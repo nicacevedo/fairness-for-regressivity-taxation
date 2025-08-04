@@ -315,10 +315,11 @@ def CCAO_features(X, y, test_year=2023):
     # imputer.fit_transform(X)
 
 
-    # # Sample the data
-    # sample_size = 100000
-    # X_train_onehot = X_train_onehot.sample(sample_size, replace=False, random_state=42)
-    # y_train = y_train.loc[X_train_onehot.index]
+    # Sample the data
+    sample_size = 10000
+    X_train_onehot = X_train_onehot.sample(sample_size, replace=False, random_state=42)
+    X_train = X_train.loc[X_train_onehot.index, :]
+    y_train = y_train.loc[X_train_onehot.index]
 
     print("First solution on a dataset of: ", X_train.shape)
     print("One hot endoded dataset (sample) of: ", X_train_onehot.shape)
@@ -384,10 +385,10 @@ def CCAO_features(X, y, test_year=2023):
     print(f"RMSE val: {np.sqrt(mse):.3f}")
     print(fr"$R^2$ train: {r2_score(y_train, y_pred_train):.3f}")
     print(fr"$R^2$ val: {r2_score(y_test, y_pred_test):.3f}")
-    print(fr"$F_dev$ ({alpha_}) train: {f_metrics_train.f_dev:.3f}")
-    print(fr"$F_dev$ ({alpha_}) test: {f_metrics_test.f_dev:.3f}")
-    print(fr"$F_grp$ ({n_groups_}) train: {f_metrics_train.f_grp:.3f}")
-    print(fr"$F_grp$ ({n_groups_}) test: {f_metrics_test.f_grp:.3f}")
+    print(fr"$F_dev$ ({alpha_}) train: {f_metrics_train['f_dev']:.3f}")
+    print(fr"$F_dev$ ({alpha_}) test: {f_metrics_test['f_dev']:.3f}")
+    print(fr"$F_grp$ ({n_groups_}) train: {f_metrics_train['f_grp']:.3f}")
+    print(fr"$F_grp$ ({n_groups_}) test: {f_metrics_test['f_grp']:.3f}")
 
 
     # PLotting
@@ -418,7 +419,7 @@ def CCAO_features(X, y, test_year=2023):
     score_train = -iso.decision_function(X_train_onehot)
 
     # 2. Get scoring bins 
-    n_bins = 25
+    n_bins = 15
     outlier_bin_edges = compute_bin_edges(score_train, num_bins=n_bins +1)
     outlier_bin_indices = get_bin_indices_from_edges(score_train, outlier_bin_edges)
 
@@ -490,24 +491,24 @@ def CCAO_features(X, y, test_year=2023):
     # --- Evaluate Performance ---
     # For regression, we can use metrics like Mean Squared Error (MSE).
     mse = mean_squared_error(y_test, y_pred_test)
-    train_mse = mean_squared_error(y_train, y_pred_train)
+    train_mse = mean_squared_error(y_train_resampled, y_pred_train)
 
     print(" == Resampled Metrics == ")
     # ratio
     n_groups_, alpha_ = 3, 2 
     r_pred_test = y_pred_test / y_test
-    r_pred_train = y_pred_train / y_train
+    r_pred_train = y_pred_train / y_train_resampled
     f_metrics_test = compute_haihao_F_metrics(r_pred_test, y_test, n_groups=n_groups_, alpha=alpha_)
-    f_metrics_train = compute_haihao_F_metrics(r_pred_train, y_train, n_groups=n_groups_, alpha=alpha_)
+    f_metrics_train = compute_haihao_F_metrics(r_pred_train, y_train_resampled, n_groups=n_groups_, alpha=alpha_)
 
     print(f"RMSE train: {np.sqrt(train_mse):.3f}")
     print(f"RMSE val: {np.sqrt(mse):.3f}")
-    print(fr"$R^2$ train: {r2_score(y_train, y_pred_train):.3f}")
+    print(fr"$R^2$ train: {r2_score(y_train_resampled, y_pred_train):.3f}")
     print(fr"$R^2$ val: {r2_score(y_test, y_pred_test):.3f}")
-    print(fr"$F_dev({alpha_})^2$ train: {f_metrics_train.f_dev:.3f}")
-    print(fr"$F_dev({alpha_})^2$ test: {f_metrics_test.f_dev:.3f}")
-    print(fr"$F_grp({n_groups_})^2$ train: {f_metrics_train.f_grp:.3f}")
-    print(fr"$F_grp({n_groups_})^2$ test: {f_metrics_test.f_grp:.3f}")
+    print(fr"$F_dev$ ({alpha_}) train: {f_metrics_train['f_dev']:.3f}")
+    print(fr"$F_dev$ ({alpha_}) test: {f_metrics_test['f_dev']:.3f}")
+    print(fr"$F_grp$ ({n_groups_}) train: {f_metrics_train['f_grp']:.3f}")
+    print(fr"$F_grp$ ({n_groups_}) test: {f_metrics_test['f_grp']:.3f}")
 
 
     
