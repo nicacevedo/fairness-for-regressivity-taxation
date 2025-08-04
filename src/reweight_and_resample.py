@@ -317,7 +317,7 @@ class SMOTERegressor:
             count = bin_counts[bin_idx]
             print("Bin: ", bin_idx, " | bin count: ", count) 
             # if count == 0 or count == max_count:
-            if count < self.k_neighbors or count == max_count:
+            if count < min(3, self.k_neighbors) or count == max_count:
                 print("skipped")
                 continue  # skip (almost) empty or already balanced bins
             

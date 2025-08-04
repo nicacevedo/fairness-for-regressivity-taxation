@@ -221,16 +221,16 @@ def CCAO_features(X, y, test_year=2023):
 
     # ===== Model Selection ===== 
     # 1. General parameters
-    model_names = ["UnconstrainedNN", "LightGBM", "LinearRegression", "ConstrainedNN"]
-    model_name = model_names[1]
+    model_names = ["UnconstrainedNN", "LightGBM", "LinearRegression", "ConstrainedNN", "ConstraintBothRegression"]
+    model_name = model_names[4]
     print("MODEL SELECTED: ", model_name)
 
     # inputation = False
-    scaling = False
+    scaling = True
     skip_imbalanced = True
 
     resampler_names = ["SMOTERegressor", "OutlierSmoteResampler"]
-    resampler_name = resampler_names[1]
+    resampler_name = resampler_names[0]
     print("RE-SAMPLER SELECTED: ", resampler_name)
 
 
@@ -253,6 +253,8 @@ def CCAO_features(X, y, test_year=2023):
     from src.nn_unconstrained import FeedForwardNNRegressor
     from src.nn_constrained_cpu_v2 import ConstrainedNNRegressor#ConstrainedMLPRegressor
     from sklearn.ensemble import IsolationForest
+
+    from src.linear_models import ConstraintBothRegression
     # from sklearn.ensemble import ExtraTreesRegressor
 
     # from sklearn.neural_network import MLPRegressor
@@ -270,6 +272,7 @@ def CCAO_features(X, y, test_year=2023):
     #     # early_stopping=False,
     #     # validation_fraction=0.1,
     # )#LinearRegression(fit_intercept=True)
+
 
     if model_name == "LightGBM":
         # ============================
@@ -292,18 +295,29 @@ def CCAO_features(X, y, test_year=2023):
             lambda_l1=1,
             lambda_l2=1,
         )
+
+    elif model_name == "ConstraintBothRegression":
+        model = ConstraintBothRegression(
+            n_groups=10, 
+            group_thresh=0.5, 
+            deviation_thresh=10,
+            solver_parameters={
+                "tol_gap_abs":1e-4, 
+                "tol_gap_rel":1e-4,
+                "tol_feas":1e-5, 
+            },
+        )
     elif model_name == "UnconstrainedNN":
 
-
         model = FeedForwardNNRegressor( # output size 1 for regression
-            input_features=X_train_scaled.shape[1], 
+            input_features=X_train_onehot.shape[1], 
             output_size=1, batch_size=16, learning_rate=0.001, 
-            num_epochs=30, hidden_sizes=[1024]
+            num_epochs=1000, hidden_sizes=[1024]
         )
 
     elif model_name == "ConstrainedNN":
         model = ConstrainedNNRegressor(
-            input_dim=X_train_scaled.shape[1], 
+            input_dim=X_train_onehot.shape[1], 
             output_size=1, batch_size=16, learning_rate=0.001, 
             num_epochs=10, hidden_layers=[1024]#, dropout_rate=0.2
         )
@@ -415,18 +429,29 @@ def CCAO_features(X, y, test_year=2023):
 
     if resampler_name == "SMOTERegressor":
         # Re-compute the weights to use in the loss function in terms of the representativity of each bin
-        n_bins = 1000
-        y_train_bins = compute_bin_edges(y_train, num_bins=n_bins) 
+        n_bins = 500
+        log_scale = True
+        if log_scale:
+            y_train_bins = compute_bin_edges(np.log(y_train), num_bins=n_bins)
+        else:
+            y_train_bins = compute_bin_edges(y_train, num_bins=n_bins) 
 
         # Resampler
         # metric_params={"VI":np.linalg.pinv(X_train_sample.cov())}
         csmote = SMOTERegressor(
             bin_edges=y_train_bins, 
-            k_neighbors=3, metric="minkowski", 
-            p=2, random_state=45, bin_size_ratio=0.5, # Ratio of the max-min count to define as goal 
+            k_neighbors=20, metric="minkowski", 
+            p=2, random_state=45, bin_size_ratio=0.2, # Ratio of the max-min count to define as goal 
             undersampling_policy="random"
         )  # New one
-        X_train_resampled, y_train_resampled = csmote.fit_resample(X_train_onehot, y_train)
+
+
+        if log_scale:
+            X_train_resampled, y_train_resampled = csmote.fit_resample(X_train_onehot, np.log(y_train))
+            y_train_resampled = np.exp(y_train_resampled)
+        else:
+            X_train_resampled, y_train_resampled = csmote.fit_resample(X_train_onehot, y_train)
+
 
     if resampler_name == "OutlierSmoteResampler":
 
@@ -442,7 +467,7 @@ def CCAO_features(X, y, test_year=2023):
         score_train = -iso.decision_function(X_train_onehot)
 
         # 2. Get scoring bins 
-        n_bins = 30
+        n_bins = 50
         outlier_bin_edges = compute_bin_edges(score_train, num_bins=n_bins +1)
         outlier_bin_indices = get_bin_indices_from_edges(score_train, outlier_bin_edges)
 
@@ -453,7 +478,7 @@ def CCAO_features(X, y, test_year=2023):
             metric="minkowski", 
             p=2, 
             random_state=45, 
-            bin_size_ratio=0.1, # Ratio of the max-min count to define as goal 
+            bin_size_ratio=0.2, # Ratio of the max-min count to define as goal 
             undersampling_policy="random"
         )  # New one
         X_train_resampled, y_train_resampled = csmote.fit_resample(X_train_onehot, y_train)
