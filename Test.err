@@ -1,0 +1,11 @@
+
+CondaError: Run 'conda init' before 'conda activate'
+
+/orcd/home/002/nacevedo/RA/fairness-for-regressivity-taxation/preliminaries.py:178: SettingWithCopyWarning: 
+A value is trying to be set on a copy of a slice from a DataFrame.
+Try using .loc[row_indexer,col_indexer] = value instead
+
+See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy
+  X[cat_cols] = X[cat_cols].astype('category')
+/var/spool/slurmd/job1886756/slurm_script: line 18: 1216734 Killed                  python preliminaries.py
+slurmstepd: error: Detected 1 oom_kill event in StepId=1886756.batch. Some of the step tasks have been OOM Killed.
