@@ -1,0 +1,16 @@
+# Ignore build artifacts
+bin/
+obj/
+
+# Ignore editor-specific files
+.vscode/
+.idea/
+
+# Ignore log files
+*.log
+
+# Ignore temporary files
+*.tmp
+
+# Ignore .csv
+*.csv
