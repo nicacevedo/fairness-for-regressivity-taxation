@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
 from scipy.stats import kurtosis, skew
 # Metrics
 
@@ -77,11 +78,13 @@ def compute_haihao_F_metrics(r, y, n_groups=3, alpha=2):
     # Get the quantiles
     if isinstance(y, pd.Series):
         y = y.to_numpy()
+    if isinstance(r, pd.Series):
+        r = r.to_numpy()
     y_quants = quantiles_price(y)
     # First metric: F_dev
     f_dev = F_dev(r, y_quants, alpha=alpha)
-    groups = get_groups_from_quants(y.to_numpy(), y_quants, n_groups)
-    f_grp = F_grp(r.to_numpy(), groups)
+    groups = get_groups_from_quants(y, y_quants, n_groups)
+    f_grp = F_grp(r, groups)
     return {"f_dev":f_dev , "f_grp":f_grp}
 
 

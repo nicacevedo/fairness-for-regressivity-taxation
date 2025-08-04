@@ -227,6 +227,11 @@ def CCAO_features(X, y, test_year=2023):
 
     # inputation = False
     scaling = False
+    skip_imbalanced = True
+
+    resampler_names = ["SMOTERegressor", "OutlierSmoteResampler"]
+    resampler_name = resampler_names[1]
+    print("RE-SAMPLER SELECTED: ", resampler_name)
 
 
     print("First solution on a dataset of: ", X_train.shape)
@@ -407,35 +412,54 @@ def CCAO_features(X, y, test_year=2023):
     print("Plots saved (First part)!!")
 
 
-    # Re-sampled version   
-    # 1. Outlier scoring 
-    iso = IsolationForest(
-        n_estimators=100,
-        contamination='auto',  # or a float like 0.05 if you know the expected outlier fraction
-        # behaviour='new',       # for newest scikit‑learn versions; remove if deprecated
-        random_state=42
-    )
-    iso.fit(X_train_onehot) 
-    score_train = -iso.decision_function(X_train_onehot)
 
-    # 2. Get scoring bins 
-    n_bins = 15
-    outlier_bin_edges = compute_bin_edges(score_train, num_bins=n_bins +1)
-    outlier_bin_indices = get_bin_indices_from_edges(score_train, outlier_bin_edges)
+    if resampler_name == "SMOTERegressor":
+        # Re-compute the weights to use in the loss function in terms of the representativity of each bin
+        n_bins = 1000
+        y_train_bins = compute_bin_edges(y_train, num_bins=n_bins) 
 
-    # 3. Re-sampler
-    csmote = OutlierSmoteResampler(
-        bin_indices=outlier_bin_indices, 
-        k_neighbors=20, 
-        metric="minkowski", 
-        p=2, 
-        random_state=45, 
-        bin_size_ratio=0.05, # Ratio of the max-min count to define as goal 
-        undersampling_policy="random"
-    )  # New one
-    X_train_resampled, y_train_resampled = csmote.fit_resample(X_train_onehot, y_train)
+        # Resampler
+        # metric_params={"VI":np.linalg.pinv(X_train_sample.cov())}
+        csmote = SMOTERegressor(
+            bin_edges=y_train_bins, 
+            k_neighbors=3, metric="minkowski", 
+            p=2, random_state=45, bin_size_ratio=0.5, # Ratio of the max-min count to define as goal 
+            undersampling_policy="random"
+        )  # New one
+        X_train_resampled, y_train_resampled = csmote.fit_resample(X_train_onehot, y_train)
 
-    print("Second solution on a dataset of: ", X_train_onehot.shape)
+    if resampler_name == "OutlierSmoteResampler":
+
+        # Re-sampled version   
+        # 1. Outlier scoring 
+        iso = IsolationForest(
+            n_estimators=100,
+            contamination='auto',  # or a float like 0.05 if you know the expected outlier fraction
+            # behaviour='new',       # for newest scikit‑learn versions; remove if deprecated
+            random_state=42
+        )
+        iso.fit(X_train_onehot) 
+        score_train = -iso.decision_function(X_train_onehot)
+
+        # 2. Get scoring bins 
+        n_bins = 30
+        outlier_bin_edges = compute_bin_edges(score_train, num_bins=n_bins +1)
+        outlier_bin_indices = get_bin_indices_from_edges(score_train, outlier_bin_edges)
+
+        # 3. Re-sampler
+        csmote = OutlierSmoteResampler(
+            bin_indices=outlier_bin_indices, 
+            k_neighbors=20, 
+            metric="minkowski", 
+            p=2, 
+            random_state=45, 
+            bin_size_ratio=0.1, # Ratio of the max-min count to define as goal 
+            undersampling_policy="random"
+        )  # New one
+        X_train_resampled, y_train_resampled = csmote.fit_resample(X_train_onehot, y_train)
+
+    print("Second solution on a dataset of: ", X_train_resampled.shape)
+    
 
     # 4. Re-train model
     t0 = time()
