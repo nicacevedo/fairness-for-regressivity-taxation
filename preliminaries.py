@@ -649,10 +649,26 @@ def main():
         y = df["median_house_value"]
         X = df.drop(columns=["median_house_value"])
     elif source == "county":
-        # Kaggle training dataset
-        training_data = pd.read_parquet(f"data_county/{year}/training_data.parquet")
+        # Real CCAO datasets
+
+        # Load the full set of training data, then arrange by sale date in order to
+        # facilitate out-of-time sampling/validation
+
+        # NOTE: It is critical to trim "multicard" sales when training. Multicard means
+        # there is multiple buildings on a PIN. Since these sales include multiple
+        # buildings, they are typically higher than a "normal" sale and must be removed
+        training_data_full = pd.read_parquet(f"data_county/{year}/training_data.parquet")
+        training_data_full = training_data_full[
+            (~training_data_full['ind_pin_is_multicard'].fillna(True)) &
+            (~training_data_full['sv_is_outlier'].fillna(True))
+        ]
+
+        # Sort by 'meta_sale_date'
+        training_data_full = training_data_full.sort_values('meta_sale_date')
+        print(training_data_full.head())
+        exit()  
+
         assessment_data = pd.read_parquet(f"data_county/{year}/assessment_data.parquet")
-        
 
         # # ===== Complementary datasets: 2023 =====
         # complex_id_data = pd.read_parquet(f"data_county/{year}/complex_id_data.parquet")
