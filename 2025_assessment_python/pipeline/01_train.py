@@ -13,25 +13,38 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 # Construct the path to the parent directory (project/)
 # Go up one level from 'subfolder' to 'project'
 parent_dir = os.path.abspath(os.path.join(current_dir, os.pardir))
+granparent_dir = os.path.dirname(os.path.abspath(parent_dir))
+granparent_dir = os.path.abspath(os.path.join(parent_dir, granparent_dir))
+print("parent", parent_dir)
+print("g parent", granparent_dir)
 # Add the parent directory to sys.path
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
+    sys.path.append(granparent_dir)
 
 # Real imports 
 import pandas as pd
 import numpy as np
 import yaml
+from math import log2, floor
+
+
+
 
 # Models 
 from sklearn.linear_model import LinearRegression
 from sklearn.pipeline import make_pipeline
 import lightgbm as lgb
+import optuna
+from sklearn.model_selection import KFold, TimeSeriesSplit
 
 # Metrics
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 # My imports
-from R.recipes import model_main_pipeline, model_lin_pipeline
+from src.nn_unconstrained import FeedForwardNNRegressor
+from R.recipes import model_main_pipeline, model_lin_pipeline, my_model_lin_pipeline
+from src.util_functions import compute_haihao_F_metrics
 
 # Load YAML params file
 with open('params.yaml', 'r') as file:
@@ -39,6 +52,9 @@ with open('params.yaml', 'r') as file:
 
 # Inputs
 assessment_year = 2025
+
+use_sample = True
+sample_size = 10000
 
 #- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 # 2. Prepare Data --------------------------------------------------------------
@@ -59,6 +75,12 @@ training_data_full = training_data_full[
 ]
 training_data_full = training_data_full.sort_values('meta_sale_date') # Sort by 'meta_sale_date'
 
+if use_sample:
+    print("I am using a sample")
+    training_data_full = training_data_full.sample(sample_size, random_state=42)
+else:
+    print("I am using full data")
+
 # Create train/test split by time, with most recent observations in the test set
 # We want our best model(s) to be predictive of the future, since properties are
 # assessed on the basis of past sales
@@ -76,7 +98,8 @@ train_pipeline, X, y, train_IDs = model_main_pipeline(
     id_vars=params['model']['predictor']['id']
 )
 # # Fit and transform training data (applies categorical processing, etc.)
-# X_transformed = train_pipeline.fit_transform(X)
+# X_transformed = pd.DataFrame(train_pipeline.fit_transform(X), index=X.index)
+
 
 
 
@@ -90,6 +113,9 @@ print("Creating and fitting linear baseline model")
 training_data_full_log = training_data_full.copy()
 training_data_full_log['meta_sale_price'] = np.log(training_data_full_log['meta_sale_price'])
 
+from time import time
+
+# t0 = time()
 X_train_prep, y_train_log, train_IDs = model_lin_pipeline(
     data=training_data_full_log,
     pred_vars=params['model']['predictor']['all'],
@@ -105,83 +131,195 @@ lin_pipeline = make_pipeline(
 # Fit the linear model on the training data
 X_train_fit, y_train_fit_log = X_train_prep.loc[train.index, ], y_train_log.loc[train.index]
 lin_pipeline.fit(X_train_fit, y_train_fit_log)
-# # MINE: PREDICT IN TRAIN
-# y_pred_train_log = lin_pipeline.predict(X_train_fit)
-# print("RMSE train log:", np.sqrt(mean_squared_error(y_pred_train_log, y_train_fit_log)))
-# print("RMSE train:", np.sqrt(mean_squared_error(np.exp(y_pred_train_log), np.exp(y_train_fit_log))))
-# # MINE PREDICT IN TEST
-# X_test_fit, y_test_fit_log = X_train_prep.loc[test.index, :], y_train_log.loc[test.index]
-# y_pred_test_log = lin_pipeline.predict(X_test_fit)
-# print("RMSE test log:", np.sqrt(mean_squared_error(y_pred_test_log, y_test_fit_log)))
-# print("RMSE test:", np.sqrt(mean_squared_error(np.exp(y_pred_test_log), np.exp(y_test_fit_log))))
+# print("Time 1: ", time() - t0)
+
+# MINE: PREDICT IN TRAIN
+y_pred_train_log = lin_pipeline.predict(X_train_fit)
+print("RMSE train log:", np.sqrt(mean_squared_error(y_pred_train_log, y_train_fit_log)))
+print("RMSE train:", np.sqrt(mean_squared_error(np.exp(y_pred_train_log), np.exp(y_train_fit_log))))
+# MINE PREDICT IN TEST
+X_test_fit, y_test_fit_log = X_train_prep.loc[test.index, :], y_train_log.loc[test.index]
+y_pred_test_log = lin_pipeline.predict(X_test_fit)
+print("RMSE test log:", np.sqrt(mean_squared_error(y_pred_test_log, y_test_fit_log)))
+print("RMSE test:", np.sqrt(mean_squared_error(np.exp(y_pred_test_log), np.exp(y_test_fit_log))))
 
 
 
-#- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-# 4. LightGBM Model ------------------------------------------------------------
-#- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-print("Initializing LightGBM model")
 
-# # BORRAR TODO DESDE AQUÍ
+# MINE
+# for col in X_train ## CHECK TYPE OF COLUMNS WHICH SHOULD BE NUMERIC  
+print(X_train_fit.shape)
+model = FeedForwardNNRegressor(
+    input_features=X_train_fit.shape[1], output_size=1,  
+    batch_size=16, learning_rate=0.001, num_epochs=80,
+    hidden_sizes=[200, 100]
+)
+model.fit(X_train_fit, y_train_fit_log)
+# MINE: PREDICT IN TRAIN
+y_pred_train_log = model.predict(X_train_fit)
+print("RMSE train log:", np.sqrt(mean_squared_error(y_pred_train_log, y_train_fit_log)))
+print("RMSE train:", np.sqrt(mean_squared_error(np.exp(y_pred_train_log), np.exp(y_train_fit_log))))
+# MINE PREDICT IN TEST
+X_test_fit, y_test_fit_log = X_train_prep.loc[test.index, :], y_train_log.loc[test.index]
+y_pred_test_log = model.predict(X_test_fit)
+print("RMSE test log:", np.sqrt(mean_squared_error(y_pred_test_log, y_test_fit_log)))
+print("RMSE test:", np.sqrt(mean_squared_error(np.exp(y_pred_test_log), np.exp(y_test_fit_log))))
 
-# model = lgb.LGBMRegressor(
-#             # PROPOSED BY ME:
-#             n_estimators=500,
-#             # learning_rate=0.1,
-#             random_state=42,
-#             # CCAO's: in between their range
-#             # num_leaves=1000,
-#             # add_to_linked_depth=4,
-#             # feature_fraction=0.5,
-#             # min_gain_to_split=10,
-#             # min_data_in_leaf=100,
-#             # max_cat_threshold=100,
-#             # min_data_per_group=100,
-#             # cat_smooth=100,
-#             # cat_l2=1,
-#             # lambda_l1=1,
-#             # lambda_l2=1,
-#             # yaml parameters
-#             num_iterations = 1575,
-#             learning_rate= 0.015,
-#             max_bin= 512,
-#             num_leaves= 185,
-#             add_to_linked_depth= 4,
-#             feature_fraction= 0.61,
-#             min_gain_to_split= 75.5,
-#             min_data_in_leaf= 31,
-#             max_cat_threshold= 165,
-#             min_data_per_group= 300,
-#             cat_smooth= 82.0,
-#             cat_l2= 1.00,
-#             lambda_l1= 0.022,
-#         )
-        
 
-# model.fit(X_train_fit, y_train_fit_log)
-# # MINE: PREDICT IN TRAIN
-# y_pred_train_log = model.predict(X_train_fit)
-# print("RMSE train log:", np.sqrt(mean_squared_error(y_pred_train_log, y_train_fit_log)))
-# print("RMSE train:", np.sqrt(mean_squared_error(np.exp(y_pred_train_log), np.exp(y_train_fit_log))))
-# # MINE PREDICT IN TEST
-# X_test_fit, y_test_fit_log = X_train_prep.loc[test.index, :], y_train_log.loc[test.index]
-# y_pred_test_log = model.predict(X_test_fit)
-# print("RMSE test log:", np.sqrt(mean_squared_error(y_pred_test_log, y_test_fit_log)))
-# print("RMSE test:", np.sqrt(mean_squared_error(np.exp(y_pred_test_log), np.exp(y_test_fit_log))))
+# END MINE
+
+
+# exit()
+
+
+# # MINE
+# for col in X.columns:
+#     if X[col].dtype == "object":
+#         print("col object: ", col, X[col].unique())
+#         X[col] = X[col].astype("category")
+# X_train, y_train = X.loc[train.index, :], y.loc[train.index]
+# X_test, y_test = X.loc[test.index, :], y.loc[test.index]
+# y_train_log, y_test_log = np.log(y_train), np.log(y_test)
+
+print("="*100)
+print("GBM:")
+gbm_pipeline, X_train_prep, y_train_log, train_IDs = model_main_pipeline(
+    data=training_data_full_log,
+    pred_vars=params['model']['predictor']['all'],
+    cat_vars=params['model']['predictor']['categorical'],
+    id_vars=params['model']['predictor']['id']
+)
+print(X_train_prep.head())
+X_train_prep = gbm_pipeline.fit_tranform(X_train_prep) # apply the pipeline
+print(X_train_prep.head())
+exit()
+
+stop_iter         = params['model']['parameter']['stop_iter']
+objective         = params['model']['objective']
+verbose           = params['model']['verbose']
+validation_prop   = params['model']['parameter']['validation_prop']   # e.g., 0.2
+validation_type   = params['model']['parameter']['validation_type']   # "random" | "recent"
+validation_metric = params['model']['parameter']['validation_metric'] # e.g., "rmse"
+link_max_depth    = params['model']['parameter']['link_max_depth']    # bool
+deterministic     = params['model']['deterministic']
+force_row_wise    = params['model']['force_row_wise']
+seed              = params['model']['seed']
+categorical_cols  = params['model']['predictor']['categorical']       # names (if you keep categorical dtype)
+
+params_dict = params["model"]["hyperparameter"]["default"]
+max_depth = floor(log2(params_dict["num_leaves"])) + params_dict['add_to_linked_depth']
+n_estimators_static = params['model']['hyperparameter']['default']['num_iterations']
+
+model = lgb.LGBMRegressor(
+    n_estimators=n_estimators_static,
+    # learning_rate=0.1,
+    # random_state=42,
+    # CCAO's: in between their range
+    # num_leaves=1000,
+    # add_to_linked_depth=4,
+    # feature_fraction=0.5,
+    # min_gain_to_split=10,
+    # min_data_in_leaf=100,
+    # ax_cat_threshold=100,
+    # min_data_per_group=100,
+    # cat_smooth=100,
+    # cat_l2=1,
+    # lambda_l1=1,
+    # lambda_l2=1,
+
+
+    # Determinism / engine controls
+    random_state=seed,
+    deterministic=deterministic,
+    force_row_wise=force_row_wise,
+    # n_jobs=num_threads, # Check the number CPU's first
+    verbose=verbose,
+
+    # Objective
+    objective=objective,
+
+    # Core complexity / tree params
+    learning_rate=params_dict['learning_rate'],
+    max_bin=int(params_dict['max_bin']),
+    num_leaves=int(params_dict["num_leaves"]),
+    feature_fraction=params_dict['feature_fraction'],
+    min_gain_to_split=params_dict['min_gain_to_split'],
+    min_data_in_leaf=int(params_dict['min_data_in_leaf']),
+    max_depth=int(max_depth) if max_depth != -1 else -1,
+
+    # Categorical-specific
+    max_cat_threshold=int(params_dict['max_cat_threshold']),
+    min_data_per_group=int(params_dict['min_data_per_group']),
+    cat_smooth=params_dict['cat_smooth'],
+    cat_l2=params_dict['cat_l2'],
+
+    # Regularization
+    reg_alpha=params_dict['lambda_l1'],
+    reg_lambda=params_dict['lambda_l2'],
+
+    # Trees (n_estimators)
+    # n_estimators=int(params_dict['n_estimators'])
+    # if params_dict.get('n_estimators') is not None
+    # else (int(params_dict["n_estimators_static"]) if params_dict["n_estimators_static"] is not None else 1000)
+)
+model.fit(
+    X_train_fit, y_train_fit_log,
+    eval_set=[(X_test_fit, y_test_fit_log)],
+    eval_metric='rmse', 
+    callbacks=[
+        lgb.early_stopping(stopping_rounds=stop_iter),  # Early stopping here
+        lgb.log_evaluation(0)  # Suppress logging (use 1 for logging every round)
+    ]
+)
+
+
+y_pred_train_log = model.predict(X_train_fit)
+print("RMSE train log:", np.sqrt(mean_squared_error(y_pred_train_log, y_train_fit_log)))
+print("RMSE train:", np.sqrt(mean_squared_error(np.exp(y_pred_train_log), np.exp(y_train_fit_log))))
+# MINE PREDICT IN TEST
+X_test_fit, y_test_fit_log = X_train_prep.loc[test.index, :], y_train_log.loc[test.index]
+y_pred_test_log = model.predict(X_test_fit)
+print("RMSE test log:", np.sqrt(mean_squared_error(y_pred_test_log, y_test_fit_log)))
+print("RMSE test:", np.sqrt(mean_squared_error(np.exp(y_pred_test_log), np.exp(y_test_fit_log))))
+
+print("="*100)
+
+
+# Prediction
+y_pred_train = np.exp(model.predict(X_train_fit))
+y_pred_test = np.exp(model.predict(X_test_fit))
+
+# --- Evaluate Performance ---
+# For regression, we can use metrics like Mean Squared Error (MSE).
+train_mse = mean_squared_error(y_pred_train, np.exp(y_train_fit_log))
+test_mse = mean_squared_error(y_pred_test, np.exp(y_test_fit_log))
+
+# ratio
+n_groups_, alpha_ = 3, 2 
+r_pred_train = y_pred_train / np.exp(y_train_fit_log)
+r_pred_test = y_pred_test / np.exp(y_test_fit_log)
+f_metrics_train = compute_haihao_F_metrics(r_pred_train, np.exp(y_train_fit_log), n_groups=n_groups_, alpha=alpha_)
+f_metrics_test = compute_haihao_F_metrics(r_pred_test, np.exp(y_test_fit_log), n_groups=n_groups_, alpha=alpha_)
+
+print(f"RMSE train: {np.sqrt(train_mse):.3f}")
+print(f"RMSE val: {np.sqrt(test_mse):.3f}")
+print(fr"$R^2$ train: {r2_score(np.exp(y_train_fit_log), y_pred_train):.3f}")
+print(fr"$R^2$ val: {r2_score(np.exp(y_test_fit_log), y_pred_test):.3f}")
+print(fr"$F_dev$ ({alpha_}) train: {f_metrics_train['f_dev']:.3f}")
+print(fr"$F_dev$ ({alpha_}) test: {f_metrics_test['f_dev']:.3f}")
+print(fr"$F_grp$ ({n_groups_}) train: {f_metrics_train['f_grp']:.3f}")
+print(fr"$F_grp$ ({n_groups_}) test: {f_metrics_test['f_grp']:.3f}")
+
+exit()
+# # END MINE
 
 
 # ------------------------------------------------------------
 # 4. LightGBM Model (Python translation of your R block)
 # ------------------------------------------------------------
-import numpy as np
-import pandas as pd
-import lightgbm as lgb
-import optuna
-from sklearn.model_selection import KFold, TimeSeriesSplit
-from math import log2, floor
-from sklearn.metrics import mean_squared_error, mean_absolute_error
 
 print("Initializing LightGBM model")
+
 
 # ---- Engine / static parameters ----
 stop_iter         = params['model']['parameter']['stop_iter']
@@ -195,6 +333,15 @@ deterministic     = params['model']['deterministic']
 force_row_wise    = params['model']['force_row_wise']
 seed              = params['model']['seed']
 categorical_cols  = params['model']['predictor']['categorical']       # names (if you keep categorical dtype)
+
+# MINE: Parameters to be used
+cv_enable = True#params['toggle']['cv_enable'] # False on yaml
+if stop_iter is not  None:
+    early_stopping_enable =  validation_prop > 0 and stop_iter > 0 
+else:
+    early_stopping_enable = False 
+print("cv_enable, early_stopping_enable: ", cv_enable, early_stopping_enable)
+
 
 # num_iterations policy
 if cv_enable and early_stopping_enable:
@@ -277,7 +424,7 @@ def make_lgbm(params_dict):
         random_state=seed,
         deterministic=deterministic,
         force_row_wise=force_row_wise,
-        n_jobs=num_threads,
+        # n_jobs=num_threads, # Check the number CPU's first
         verbose=verbose,
 
         # Objective
@@ -354,9 +501,9 @@ def objective_optuna(trial):
     # --------- Build CV folds ---------
     # X_full, y_full must be numeric matrices ready for LGBM.
     # If you have a preprocessing pipeline, fit it on fold-train and transform both train/val.
-    X_full = X_train_full  # <- provide your feature frame for training (preprocessed or to-be preprocessed consistently)
-    y_full = y_train_full  # <- corresponding target (numeric)
-
+    training_data_full_log = training_data_full.copy()
+    X_full = training_data_full_log #.drop(["meta_sale_price"])  # <- provide your feature frame for training (preprocessed or to-be preprocessed consistently)
+    y_full = np.log(training_data_full_log['meta_sale_price'])  # <- corresponding target (numeric)
     if validation_type == 'random':
         kf = KFold(n_splits=params['cv']['num_folds'], shuffle=True, random_state=seed)
         folds = list(kf.split(X_full))
@@ -386,8 +533,12 @@ def objective_optuna(trial):
             fit_kwargs.update({
                 'eval_set': [(X_val, y_val)],
                 'eval_metric': validation_metric,
-                'early_stopping_rounds': stop_iter,
-                'verbose': False
+                # 'early_stopping_rounds': stop_iter, # Error
+                'callbacks': [  # Fix
+                    lgb.early_stopping(stopping_rounds=stop_iter),  # Early stopping here
+                    lgb.log_evaluation(0)  # Suppress logging (use 1 for logging every round)
+                ],
+                # 'verbose': False # Error
             })
 
         model.fit(X_tr, y_tr, **fit_kwargs)
@@ -407,11 +558,12 @@ def objective_optuna(trial):
 # ------------------------------------------------------------
 if cv_enable:
     print("Starting cross-validation")
-    study = optuna.create_study(direction='minimize', study_name='lgbm_bayes', sampler=optuna.samplers.TPESampler(seed=seed))
+    # sampler = optuna.samplers.TPESampler(seed=seed, ) # Fix
+    study = optuna.create_study(direction='minimize', study_name='lgbm_bayes', sampler=optuna.samplers.TPESampler(seed=seed, n_startup_trials=params['cv']['initial_set'])) # Fix
     study.optimize(
         objective_optuna,
         n_trials=params['cv']['max_iterations'],
-        n_startup_trials=params['cv']['initial_set'],
+        # n_startup_trials=params['cv']['initial_set'], # Error
         show_progress_bar=True
     )
     best_params = study.best_params
