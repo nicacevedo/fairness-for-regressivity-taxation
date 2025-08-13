@@ -31,6 +31,7 @@ def model_main_pipeline(data, pred_vars, cat_vars, id_vars):
     # Drop 'time_split' if present
     if 'time_split' in data.columns:
         X = X.drop(columns=['time_split'], errors='ignore')
+    # MINE: missing " # Replace novel levels with "new" (to include in .fit ) "
     # --- Step 3: Handle categorical vars ---
     # Fill NAs with 'unknown' for categorical variables
     for col in cat_vars:
@@ -59,6 +60,17 @@ def model_main_pipeline(data, pred_vars, cat_vars, id_vars):
         ('transform', transformer)
     ])
 
+    # Mine: apply the pipeline
+    X = pd.DataFrame(
+        preprocessing_pipeline.fit_transform(X),
+        columns=preprocessing_pipeline.get_feature_names_out(),
+        index=X.index
+    )
+
+    # Mine 2: replace the extra "x__" on the names of the columns
+    X.columns = [col.replace("cat__","").replace("remainder__","") for col in X.columns] 
+
+    # Mine 3: drop the ID columns (unnecesary bc of the definition of X)
     return preprocessing_pipeline, X, y, IDs
 
 
