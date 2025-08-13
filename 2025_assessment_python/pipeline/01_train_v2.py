@@ -41,9 +41,12 @@ from sklearn.model_selection import KFold, TimeSeriesSplit
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 # My imports
-from src.nn_unconstrained import FeedForwardNNRegressor
+from src.nn_unconstrained import FeedForwardNNRegressor, FeedForwardNNRegressorWithEmbeddings
+from src.nn_constrained_cpu_v2 import FeedForwardNNRegressorWithConstraints
 from R.recipes import model_main_pipeline, model_lin_pipeline, my_model_lin_pipeline
 from src.util_functions import compute_haihao_F_metrics
+from R.recipes_pipelined import build_model_pipeline, build_model_pipeline_supress_onehot
+from balancing_models import BalancingResampler
 
 # Load YAML params file
 with open('params.yaml', 'r') as file:
@@ -53,7 +56,9 @@ with open('params.yaml', 'r') as file:
 assessment_year = 2025
 
 use_sample = True
-sample_size = 10000
+sample_size = 10000 # SAMPLE SIZE
+
+apply_resampling = False
 
 #- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 # 2. Prepare Data --------------------------------------------------------------
@@ -72,25 +77,23 @@ training_data_full = training_data_full[
     (~training_data_full['ind_pin_is_multicard'].astype('bool').fillna(True)) &
     (~training_data_full['sv_is_outlier'].astype('bool').fillna(True))
 ]
-training_data_full = training_data_full.sort_values('meta_sale_date') # Sort by 'meta_sale_date'
-print("training_data_full: ",training_data_full.head())
-print("training_data_full: ",training_data_full.tail())
 
-# assessment_data_full = pd.read_parquet(f"input/assessment_data.parquet")
-# print(assessment_data_full.head())
-# print(assessment_data_full["year"].unique())
-# assessment_data_full = assessment_data_full[
+assessment_data_full = pd.read_parquet(f"input/assessment_data.parquet")
+# assessment_data_full = assessment_data_full[ # Unnecessary for testing (?)
 #     (~assessment_data_full['ind_pin_is_multicard'].astype('bool').fillna(True)) &
 #     (~assessment_data_full['sv_is_outlier'].astype('bool').fillna(True))
 # ]
-# assessment_data_full = assessment_data_full.sort_values('meta_sale_date') # Sort by 'meta_sale_date'
 
 if use_sample:
     print("I am using a sample")
     training_data_full = training_data_full.sample(sample_size, random_state=42)
-    # assessment_data_full = assessment_data_full.sample(sample_size, random_state=42)
+    assessment_data_full = assessment_data_full.sample(sample_size, random_state=42)
 else:
     print("I am using full data")
+
+# Sorting by date of sell (ir order to split)
+training_data_full = training_data_full.sort_values('meta_sale_date') # Sort by 'meta_sale_date' 
+training_data_full['meta_sale_price'] = np.log(training_data_full['meta_sale_price']) # Log target
 
 # Create train/test split by time, with most recent observations in the test set
 # We want our best model(s) to be predictive of the future, since properties are
@@ -100,11 +103,8 @@ split_index = int(len(training_data_full) * split_prop)
 train = training_data_full.iloc[:split_index] # Split by time
 test = training_data_full.iloc[split_index:]
 
-# print(train["year"].unique())
-# print(test["year"].unique())
-# exit()
 
-# TO REFINE: main pipeline
+# # TO REFINE: main pipeline
 # # Create a recipe for the training data which removes non-predictor columns and
 # # preps categorical data, see R/recipes.R for details
 # train_pipeline, X, y, train_IDs = model_main_pipeline(
@@ -126,44 +126,86 @@ print("Creating and fitting linear baseline model")
 
 # Create a linear model recipe with additional imputation, transformations,
 # and feature interactions
-training_data_full_log = training_data_full.copy()
-training_data_full_log['meta_sale_price'] = np.log(training_data_full_log['meta_sale_price'])
+# training_data_full = training_data_full.copy()
+
+# Clean columns
+train = train[params['model']['predictor']['all'] + params['model']['predictor']['id'] + ['meta_sale_price']]
+test = test[params['model']['predictor']['all'] + params['model']['predictor']['id'] + ['meta_sale_price']]
 
 
-# t0 = time()
-X_train_prep, y_train_log, train_IDs = model_lin_pipeline(
-    data=training_data_full_log,
+# Split the data in X, y
+X_train_prep, y_train_fit_log = train.drop(columns=['meta_sale_price']), train['meta_sale_price'] 
+X_test_prep, y_test_fit_log = test.drop(columns=['meta_sale_price']), test['meta_sale_price']
+
+# print("COLUMNS: ", X_train_prep.columns)
+
+# ===== New pipeline version ====
+model_lin_pipeline = build_model_pipeline(
     pred_vars=params['model']['predictor']['all'],
     cat_vars=params['model']['predictor']['categorical'],
     id_vars=params['model']['predictor']['id']
 )
-# Fit the linear model on the training data
-X_train_fit, y_train_fit_log = X_train_prep.loc[train.index, ], y_train_log.loc[train.index]
-X_test_fit, y_test_fit_log = X_train_prep.loc[test.index, :], y_train_log.loc[test.index]
-
-print(X_train_fit.head())
-print(X_test_fit.head())
-exit()
+model_emb_pipeline = build_model_pipeline_supress_onehot(
+    pred_vars=params['model']['predictor']['all'],
+    cat_vars=params['model']['predictor']['categorical'],
+    id_vars=params['model']['predictor']['id']
+)
 
 
 
-# # Assessment data
-# assessment_data_full_log = assessment_data_full.copy()
-# assessment_data_full_log['meta_sale_price'] = np.log(assessment_data_full_log['meta_sale_price'])
 
-# X_asmt_fit, y_asmt_fit_log, asmt_IDs = model_lin_pipeline(
-#     data=assessment_data_full_log,
-#     pred_vars=params['model']['predictor']['all'],
-#     cat_vars=params['model']['predictor']['categorical'],
-#     id_vars=params['model']['predictor']['id']
-# )
+# 1. Fit / transform the data for linear models
+X_train_fit_lin = model_lin_pipeline.fit_transform(X_train_prep, y_train_fit_log).drop(columns=params['model']['predictor']['id'])
+# ===== Resampler =====
+if apply_resampling:
+    resampler_lin = BalancingResampler( 
+        n_bins=100, binning_policy='decision_tree', max_diff_ratio=0.5,
+        undersample_policy='random', oversample_policy='smoter',
+        smote_k_neighbors=5, random_state=42
+    )
+    X_train_fit_lin, y_train_fit_log_lin = resampler_lin.fit_resample(X_train_fit_lin, y_train_fit_log) # only train is for resampling
+else:
+    y_train_fit_log_lin = y_train_fit_log
+X_test_fit_lin = model_lin_pipeline.transform(X_test_prep).drop(columns=params['model']['predictor']['id'])
+
+
+# 2. Fit / transform the data for models with embeddings
+X_train_fit_emb = model_emb_pipeline.fit_transform(X_train_prep, y_train_fit_log).drop(columns=params['model']['predictor']['id'])
+na_columns = X_train_fit_emb.isna().sum()[X_train_fit_emb.isna().sum() > 0].index
+X_train_fit_emb[na_columns] = X_train_fit_emb[na_columns].fillna(value="unknown")
+cat_cols_emb = [i for i,col in enumerate(X_train_fit_emb.columns) if X_train_fit_emb[col].dtype == object ]
+print("cat_cols: ", cat_cols_emb)
+# ===== Resampler =====
+if apply_resampling:
+    resampler_emb = BalancingResampler( 
+        n_bins=100, binning_policy='decision_tree', max_diff_ratio=0.5,
+        undersample_policy='random', oversample_policy='smotenc',
+        smote_k_neighbors=5, random_state=42,
+        categorical_features=cat_cols_emb
+    )
+    X_train_fit_emb, y_train_fit_log_emb = resampler_emb.fit_resample(X_train_fit_emb, y_train_fit_log) # only train is for resampling
+else:
+    y_train_fit_log_emb = y_train_fit_log
+X_test_fit_emb = model_emb_pipeline.transform(X_test_prep).drop(columns=params['model']['predictor']['id'])
+
+# 3. Pass any object feature to category for embedded models (Light GBM, NN w/ embedding, etc.)
+for col in X_train_fit_emb:
+    if X_train_fit_emb[col].dtype == object:
+        print("To category: ", col)
+        X_train_fit_emb[col] = X_train_fit_emb[col].astype("category")
+for col in X_test_fit_emb:
+    if X_test_fit_emb[col].dtype == object:
+        print("To category: ", col)
+        X_test_fit_emb[col] = X_test_fit_emb[col].astype("category")
 
 
 # ==========================================================================================
 #                       Comparisson of the different models
 # ==========================================================================================
 
-model_names = ["LinearRegression", "LightGBM", "FeedForwardNNRegressor"]
+model_names = ["FeedForwardNNRegressorWithConstraints"]#["LinearRegression", "FeedForwardNNRegressor", "LightGBM", "FeedForwardNNRegressorWithEmbeddings", "FeedForwardNNRegressorWithConstraints"] # "LightGBM",  
+emb_model_names = ["LightGBM", "FeedForwardNNRegressorWithEmbeddings", "FeedForwardNNRegressorWithConstraints"]
+lin_model_names = ["LinearRegression", "FeedForwardNNRegressor" ]
 
 for model_name in model_names:
 
@@ -244,8 +286,8 @@ for model_name in model_names:
             # else (int(params_dict["n_estimators_static"]) if params_dict["n_estimators_static"] is not None else 1000)
         )    
         model.fit(
-            X_train_fit, y_train_fit_log,
-            eval_set=[(X_test_fit, y_test_fit_log)],
+            X_train_fit_emb, y_train_fit_log_emb,
+            eval_set=[(X_test_fit_emb, y_test_fit_log)],
             eval_metric='rmse', 
             callbacks=[
                 lgb.early_stopping(stopping_rounds=stop_iter),  # Early stopping here
@@ -255,28 +297,59 @@ for model_name in model_names:
 
     elif model_name == "LinearRegression":
         model = LinearRegression()
-        model.fit(X_train_fit, y_train_fit_log)
+        model.fit(X_train_fit_lin, y_train_fit_log_lin)
 
     elif model_name == "FeedForwardNNRegressor":
         model = FeedForwardNNRegressor(
-            input_features=X_train_fit.shape[1], output_size=1,  
-            batch_size=16, learning_rate=0.001, num_epochs=80,
+            input_features=X_train_fit_lin.shape[1], output_size=1,  
+            batch_size=16, learning_rate=0.001, num_epochs=50,
             hidden_sizes=[200, 100]
         )
-        model.fit(X_train_fit, y_train_fit_log)
+        model.fit(X_train_fit_lin, y_train_fit_log_lin)
+
+    elif model_name == "FeedForwardNNRegressorWithEmbeddings":
+        pred_vars = [col for col in params['model']['predictor']['all'] if col in X_train_fit_emb.columns] 
+        large_categories = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in pred_vars if c.startswith('loc_school_')]
+        # cat_vars = [col for col in params['model']['predictor']['categorical'] if col in X_train_fit_emb.columns]
+        model = FeedForwardNNRegressorWithEmbeddings(
+            categorical_features=large_categories, output_size=1, 
+            batch_size=16, learning_rate=0.001, num_epochs=50, 
+            hidden_sizes=[200, 100]
+        )
+        model.fit(X_train_fit_emb, y_train_fit_log_emb)
+
+    elif model_name == "FeedForwardNNRegressorWithConstraints":
+        pred_vars = [col for col in params['model']['predictor']['all'] if col in X_train_fit_emb.columns] 
+        large_categories = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in pred_vars if c.startswith('loc_school_')]
+        # cat_vars = [col for col in params['model']['predictor']['categorical'] if col in X_train_fit_emb.columns]
+        model = FeedForwardNNRegressorWithConstraints(
+            categorical_features=large_categories, output_size=1, 
+            batch_size=16, learning_rate=0.001, num_epochs=50, 
+            hidden_sizes=[200, 100],
+            # Contraint inputs 
+            n_groups=3, dev_thresh=0.15, group_thresh=0.05, 
+            use_individual_constraint=True, use_group_constraint=True # Not really working
+        )
+        model.fit(X_train_fit_emb, y_train_fit_log_emb, debug_mode=True)
 
 
 
     # =========== Prediction phase =========== 
     print("Beggining the performance phase...")
-    y_pred_train_log = model.predict(X_train_fit)
-    y_pred_test_log = model.predict(X_test_fit)
-    y_pred_test_log = model.predict(X_asmt_fit)
-    exit()
+    if model_name in emb_model_names:
+        y_pred_train_log = model.predict(X_train_fit_emb)
+        y_pred_test_log = model.predict(X_test_fit_emb)
+        # Exponential target to recover original values
+        y_train_fit = np.exp(y_train_fit_log_emb)
+    elif model_name in lin_model_names:
+        y_pred_train_log = model.predict(X_train_fit_lin)
+        y_pred_test_log = model.predict(X_test_fit_lin)
+        # Exponential target to recover original values
+        y_train_fit = np.exp(y_train_fit_log_lin)
+
     # Exponential target to recover original values
     y_pred_train = np.exp(y_pred_train_log)
     y_pred_test = np.exp(y_pred_test_log)
-    y_train_fit = np.exp(y_train_fit_log)
     y_test_fit = np.exp(y_test_fit_log)
 
     # --- Evaluate Performance ---
@@ -302,6 +375,59 @@ for model_name in model_names:
     print(fr"$F_grp$ ({n_groups_}) test: {f_metrics_test['f_grp']:.3f}")
 
 exit()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # ------------------------------------------------------------
