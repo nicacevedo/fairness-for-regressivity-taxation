@@ -42,7 +42,8 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 # My imports
 from src.nn_unconstrained import FeedForwardNNRegressor, FeedForwardNNRegressorWithEmbeddings
-from src.nn_constrained_cpu_v2 import FeedForwardNNRegressorWithConstraints
+from src.nn_constrained_cpu_v2 import FeedForwardNNRegressorWithProjection # FeedForwardNNRegressorWithConstraints, 
+from src.nn_constrained_cpu_v3 import ConstrainedRegressorProjectedWithEmbeddings
 from R.recipes import model_main_pipeline, model_lin_pipeline, my_model_lin_pipeline
 from src.util_functions import compute_haihao_F_metrics
 from R.recipes_pipelined import build_model_pipeline, build_model_pipeline_supress_onehot
@@ -56,9 +57,9 @@ with open('params.yaml', 'r') as file:
 assessment_year = 2025
 
 use_sample = True
-sample_size = 10000 # SAMPLE SIZE
+sample_size = 100000 # SAMPLE SIZE
 
-apply_resampling = False
+apply_resampling = True
 
 #- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 # 2. Prepare Data --------------------------------------------------------------
@@ -159,7 +160,7 @@ X_train_fit_lin = model_lin_pipeline.fit_transform(X_train_prep, y_train_fit_log
 # ===== Resampler =====
 if apply_resampling:
     resampler_lin = BalancingResampler( 
-        n_bins=100, binning_policy='decision_tree', max_diff_ratio=0.5,
+        n_bins=100, binning_policy='kmeans', max_diff_ratio=0.5,
         undersample_policy='random', oversample_policy='smoter',
         smote_k_neighbors=5, random_state=42
     )
@@ -178,7 +179,7 @@ print("cat_cols: ", cat_cols_emb)
 # ===== Resampler =====
 if apply_resampling:
     resampler_emb = BalancingResampler( 
-        n_bins=100, binning_policy='decision_tree', max_diff_ratio=0.5,
+        n_bins=100, binning_policy='kmeans', max_diff_ratio=0.5,
         undersample_policy='random', oversample_policy='smotenc',
         smote_k_neighbors=5, random_state=42,
         categorical_features=cat_cols_emb
@@ -322,16 +323,37 @@ for model_name in model_names:
         pred_vars = [col for col in params['model']['predictor']['all'] if col in X_train_fit_emb.columns] 
         large_categories = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in pred_vars if c.startswith('loc_school_')]
         # cat_vars = [col for col in params['model']['predictor']['categorical'] if col in X_train_fit_emb.columns]
-        model = FeedForwardNNRegressorWithConstraints(
-            categorical_features=large_categories, output_size=1, 
-            batch_size=16, learning_rate=0.001, num_epochs=50, 
-            hidden_sizes=[200, 100],
-            # Contraint inputs 
-            n_groups=3, dev_thresh=0.15, group_thresh=0.05, 
-            use_individual_constraint=True, use_group_constraint=True # Not really working
-        )
-        model.fit(X_train_fit_emb, y_train_fit_log_emb, debug_mode=True)
+        # model = FeedForwardNNRegressorWithConstraints(
+        #     categorical_features=large_categories, output_size=1, 
+        #     batch_size=16, learning_rate=0.001, num_epochs=50, 
+        #     hidden_sizes=[200, 100],
+        #     # Contraint inputs 
+        #     n_groups=3, dev_thresh=0.15, group_thresh=0.05, 
+        #     use_individual_constraint=True, use_group_constraint=True # Not really working
+        # )
 
+        model = FeedForwardNNRegressorWithProjection(
+            large_categories, output_size=1, 
+            batch_size=16, learning_rate=0.001, num_epochs=10, 
+            hidden_sizes=[200, 100], 
+            dev_thresh=0.75
+        )
+        # large_categories_indices = [X_train_fit_emb.columns.get_loc(col) for col in large_categories]
+        # model = ConstrainedRegressorProjectedWithEmbeddings(
+        #          categorical_features=large_categories_indices,
+        #          output_size=1,
+        #          batch_size=16,
+        #          learning_rate=0.001,
+        #          num_epochs=50,
+        #          hidden_sizes=[200, 100],
+        #          n_groups=3,
+        #          dev_thresh=0.15,
+        #          group_thresh=0.05,
+        #          device=None,
+        #          debug=False
+        # )
+        # model.fit(X_train_fit_emb, y_train_fit_log_emb, debug_mode=True)
+        model.fit(X_train_fit_emb, y_train_fit_log_emb)
 
 
     # =========== Prediction phase =========== 
