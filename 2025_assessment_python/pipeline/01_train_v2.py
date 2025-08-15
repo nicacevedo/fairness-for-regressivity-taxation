@@ -160,7 +160,7 @@ X_train_fit_lin = model_lin_pipeline.fit_transform(X_train_prep, y_train_fit_log
 # ===== Resampler =====
 if apply_resampling:
     resampler_lin = BalancingResampler( 
-        n_bins=100, binning_policy='kmeans', max_diff_ratio=0.5,
+        n_bins=100, binning_policy='uniform', max_diff_ratio=0.5,
         undersample_policy='random', oversample_policy='smoter',
         smote_k_neighbors=5, random_state=42
     )
@@ -179,7 +179,7 @@ print("cat_cols: ", cat_cols_emb)
 # ===== Resampler =====
 if apply_resampling:
     resampler_emb = BalancingResampler( 
-        n_bins=100, binning_policy='kmeans', max_diff_ratio=0.5,
+        n_bins=100, binning_policy='uniform', max_diff_ratio=0.5,
         undersample_policy='random', oversample_policy='smotenc',
         smote_k_neighbors=5, random_state=42,
         categorical_features=cat_cols_emb
@@ -204,7 +204,13 @@ for col in X_test_fit_emb:
 #                       Comparisson of the different models
 # ==========================================================================================
 
-model_names = ["FeedForwardNNRegressorWithConstraints"]#["LinearRegression", "FeedForwardNNRegressor", "LightGBM", "FeedForwardNNRegressorWithEmbeddings", "FeedForwardNNRegressorWithConstraints"] # "LightGBM",  
+model_names = [
+    "LinearRegression", 
+    # "FeedForwardNNRegressor", 
+    # "LightGBM", 
+    # "FeedForwardNNRegressorWithEmbeddings", 
+    "FeedForwardNNRegressorWithConstraints"
+]
 emb_model_names = ["LightGBM", "FeedForwardNNRegressorWithEmbeddings", "FeedForwardNNRegressorWithConstraints"]
 lin_model_names = ["LinearRegression", "FeedForwardNNRegressor" ]
 
@@ -392,9 +398,9 @@ for model_name in model_names:
     print(fr"$R^2$ train: {train_r2:.3f}")
     print(fr"$R^2$ val: {test_r2:.3f}")
     print(fr"$F_dev$ ({alpha_}) train: {f_metrics_train['f_dev']:.3f}")
-    print(fr"$F_dev$ ({alpha_}) test: {f_metrics_test['f_dev']:.3f}")
+    print(fr"$F_dev$ ({alpha_}) val: {f_metrics_test['f_dev']:.3f}")
     print(fr"$F_grp$ ({n_groups_}) train: {f_metrics_train['f_grp']:.3f}")
-    print(fr"$F_grp$ ({n_groups_}) test: {f_metrics_test['f_grp']:.3f}")
+    print(fr"$F_grp$ ({n_groups_}) val: {f_metrics_test['f_grp']:.3f}")
 
 exit()
 

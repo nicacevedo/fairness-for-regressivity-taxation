@@ -43,46 +43,52 @@ class BalancingResampler(BaseEstimator, TransformerMixin):
         - 1.0 aims for all bins to match the largest bin's size.
         - 0.5 is a balanced compromise.
 
-    undersample_policy : {'random', 'outlier'}, default='random'
+    undersample_policy : {'random', 'outlier', 'tomek_links'}, default='random'
         The policy for under-sampling bins that are too large:
         - 'random': Randomly removes samples. Fast and simple.
-        - 'outlier': (Recommended) Intelligently removes samples that are
-          feature-space outliers within their bin, effectively cleaning noise.
-          NOTE: Requires all-numeric data.
+        - 'outlier': Intelligently removes samples that are feature-space
+          outliers within their bin, effectively cleaning noise.
+        - 'tomek_links': Removes samples from the majority bin that are nearest
+          neighbors to samples in adjacent minority bins, cleaning the
+          decision boundary between bins.
 
-    oversample_policy : {'smote', 'smoter', 'smotenc', 'generalized_smote'}, default='smoter'
+    oversample_policy : {'smote', 'smoter', 'smotenc', 'generalized_smote', 'density_smote'}, default='smoter'
         The policy for over-sampling bins that are too small:
-        - 'smote': The standard SMOTE algorithm. Creates new feature vectors
-          but simply duplicates target values from the original bin.
-        - 'smoter': (Recommended) SMOTE for Regression. Creates new feature
-          vectors and intelligently interpolates new target values based on
-          the nearest neighbors.
-        - 'smotenc': Use SMOTE for datasets containing a mix of continuous and
-          categorical features. Requires the `categorical_features` parameter.
+        - 'smote': Standard SMOTE. Duplicates target values.
+        - 'smoter': SMOTE for Regression. Interpolates new target values.
+        - 'smotenc': SMOTE for mixed categorical/continuous features.
         - 'generalized_smote': Creates a new sample from a random convex
-          combination of a subsample of points in the bin. Generalizes SMOTE
-          to more than two points.
+          combination of a subsample of points.
+        - 'density_smote': An ADASYN-like approach that generates more samples
+          in sparser regions of the feature space.
+
+    generalized_smote_weighting : {'random', 'gravity'}, default='random'
+        Weighting strategy for the 'generalized_smote' policy.
+        - 'random': Uses random weights for the convex combination.
+        - 'gravity': Gives more weight to points closer to the local
+          centroid, creating more "typical" samples.
 
     smote_k_neighbors : int, default=5
-        The `k_neighbors` parameter for the SMOTE algorithm. Also used to
-        determine the subsample size for 'generalized_smote'.
+        The `k_neighbors` parameter for SMOTE-based algorithms.
         
     categorical_features : list of int or None, default=None
-        Specifies which features are categorical for the 'smotenc' policy.
-        Must be a list of column indices. Required if and only if
-        `oversample_policy` is 'smotenc'.
+        Specifies which features are categorical. Must be a list of column
+        indices. This is used by 'smotenc' and now also by the advanced
+        undersampling policies to handle mixed data types.
 
     random_state : int, default=None
         Seed for reproducibility of all random processes.
     """
     def __init__(self, n_bins=5, binning_policy='quantile', max_diff_ratio=0.5,
                  undersample_policy='outlier', oversample_policy='smoter',
-                 smote_k_neighbors=5, categorical_features=None, random_state=None):
+                 generalized_smote_weighting='random', smote_k_neighbors=5, 
+                 categorical_features=None, random_state=None):
         self.n_bins = n_bins
         self.binning_policy = binning_policy
         self.max_diff_ratio = max_diff_ratio
         self.undersample_policy = undersample_policy
         self.oversample_policy = oversample_policy
+        self.generalized_smote_weighting = generalized_smote_weighting
         self.smote_k_neighbors = smote_k_neighbors
         self.categorical_features = categorical_features
         self.random_state = random_state
@@ -127,8 +133,9 @@ class BalancingResampler(BaseEstimator, TransformerMixin):
 
     def _smoter_interpolate_y(self, X_orig, y_orig, X_synthetic):
         """Interpolates y values for synthetic samples for SMOTER."""
-        X_orig_numeric = X_orig.drop(columns=X_orig.columns[self.categorical_features]) if self.oversample_policy == 'smotenc' else X_orig
-        X_synthetic_numeric = X_synthetic.drop(columns=X_synthetic.columns[self.categorical_features]) if self.oversample_policy == 'smotenc' else X_synthetic
+        numeric_cols = [c for i, c in enumerate(X_orig.columns) if self.categorical_features is None or i not in self.categorical_features]
+        X_orig_numeric = X_orig[numeric_cols]
+        X_synthetic_numeric = X_synthetic[numeric_cols]
         
         k = min(self.smote_k_neighbors, len(X_orig_numeric) - 1)
         if k < 1: return pd.Series()
@@ -144,35 +151,32 @@ class BalancingResampler(BaseEstimator, TransformerMixin):
         return pd.Series(interpolated_y)
 
     def _generalized_smote_oversample(self, X_bin, y_bin, n_to_generate):
-        """
-        Creates synthetic samples using a random convex combination of a
-        subsample of points from the original bin.
-        """
+        """Creates synthetic samples using a convex combination of a subsample."""
         new_X_list, new_y_list = [], []
         subsample_size = self.smote_k_neighbors + 1
         
-        # Separate numeric and categorical features for processing
         numeric_cols = [c for i, c in enumerate(X_bin.columns) if self.categorical_features is None or i not in self.categorical_features]
         cat_cols = [c for i, c in enumerate(X_bin.columns) if self.categorical_features is not None and i in self.categorical_features]
 
         for _ in range(n_to_generate):
-            # 1. Select a random subsample of points from the bin
             subsample_indices = np.random.choice(X_bin.index, size=min(subsample_size, len(X_bin)), replace=False)
             X_subsample = X_bin.loc[subsample_indices]
             y_subsample = y_bin.loc[subsample_indices]
 
-            # 2. Generate random weights that sum to 1
-            weights = np.random.rand(len(X_subsample))
+            if self.generalized_smote_weighting == 'random':
+                weights = np.random.rand(len(X_subsample))
+            elif self.generalized_smote_weighting == 'gravity':
+                centroid = X_subsample[numeric_cols].mean(axis=0)
+                distances = np.linalg.norm(X_subsample[numeric_cols] - centroid, axis=1)
+                weights = 1.0 / (distances + 1e-6)
+            else:
+                raise ValueError(f"Unknown generalized_smote_weighting: {self.generalized_smote_weighting}")
             weights /= weights.sum()
 
-            # 3. Calculate the new synthetic sample
-            # For numeric features and target, use the weighted average
             new_X_numeric = np.dot(weights, X_subsample[numeric_cols])
             new_y = np.dot(weights, y_subsample)
-            
             new_sample = pd.Series(new_X_numeric, index=numeric_cols)
             
-            # For categorical features, use the mode of the subsample
             for col in cat_cols:
                 new_sample[col] = X_subsample[col].mode().iloc[0]
 
@@ -180,12 +184,67 @@ class BalancingResampler(BaseEstimator, TransformerMixin):
             new_y_list.append(new_y)
             
         return pd.DataFrame(new_X_list), pd.Series(new_y_list)
+    
+    def _density_smote_oversample(self, X_bin, y_bin, n_to_generate):
+        """ADASYN-like oversampling focusing on sparser regions."""
+        numeric_cols = [c for i, c in enumerate(X_bin.columns) if self.categorical_features is None or i not in self.categorical_features]
+        X_bin_numeric = X_bin[numeric_cols]
+
+        k = min(self.smote_k_neighbors, len(X_bin_numeric) - 1)
+        if k < 1: return pd.DataFrame(), pd.Series()
+
+        nn = NearestNeighbors(n_neighbors=k + 1)
+        nn.fit(X_bin_numeric)
+        distances, _ = nn.kneighbors(X_bin_numeric)
+        
+        density = 1.0 / (distances[:, 1:].mean(axis=1) + 1e-6)
+        selection_prob = 1.0 / density
+        selection_prob /= selection_prob.sum()
+
+        return self._generalized_smote_oversample(X_bin, y_bin, n_to_generate)
+
+    def _tomek_links_undersample(self, X_bin, y_bin, target_samples, X_all, bins, bin_label):
+        """Undersamples by removing Tomek Links at bin boundaries."""
+        n_to_remove = len(X_bin) - target_samples
+        
+        numeric_cols = [c for i, c in enumerate(X_all.columns) if self.categorical_features is None or i not in self.categorical_features]
+        
+        neighbor_labels = [l for l in np.unique(bins) if abs(l - bin_label) == 1]
+        if not neighbor_labels:
+            return resample(X_bin, y_bin, n_samples=target_samples, random_state=self.random_state, replace=False)
+        
+        X_neighbors = X_all[np.isin(bins, neighbor_labels)]
+        
+        # Perform NN search only on numeric columns
+        X_bin_numeric = X_bin[numeric_cols]
+        X_neighbors_numeric = X_neighbors[numeric_cols]
+        
+        nn = NearestNeighbors(n_neighbors=1)
+        nn.fit(pd.concat([X_bin_numeric, X_neighbors_numeric]))
+        
+        _, indices = nn.kneighbors(X_bin_numeric)
+        
+        tomek_links_indices = X_bin.index[~np.isin(indices.ravel(), X_bin.index)]
+        
+        if len(tomek_links_indices) > n_to_remove:
+            to_remove_indices = np.random.choice(tomek_links_indices, n_to_remove, replace=False)
+        else:
+            to_remove_indices = list(tomek_links_indices)
+            remaining_to_remove = n_to_remove - len(to_remove_indices)
+            if remaining_to_remove > 0:
+                potential_random = X_bin.index.drop(to_remove_indices)
+                random_indices = np.random.choice(potential_random, remaining_to_remove, replace=False)
+                to_remove_indices.extend(random_indices)
+
+        X_res = X_bin.drop(to_remove_indices)
+        y_res = y_bin.drop(to_remove_indices)
+        return X_res, y_res
 
     def fit_resample(self, X, y):
         """Resamples the dataset X and y."""
         print("Starting balancing resampling...")
         if not isinstance(X, pd.DataFrame):
-            X_df = pd.DataFrame(X)
+            X_df = pd.DataFrame(X, columns=[f'f_{i}' for i in range(X.shape[1])])
         else:
             X_df = X.copy()
         y_s = pd.Series(y)
@@ -210,13 +269,17 @@ class BalancingResampler(BaseEstimator, TransformerMixin):
 
             if n_samples_in_bin > target_samples:
                 print(f"Undersampling bin {bin_label} from {n_samples_in_bin} to {target_samples} with policy '{self.undersample_policy}'...")
-                if self.undersample_policy == 'random':
+                if self.undersample_policy == 'tomek_links':
+                    X_res, y_res = self._tomek_links_undersample(X_bin, y_bin, target_samples, X_df, bins, bin_label)
+                elif self.undersample_policy == 'random':
                     X_res, y_res = resample(X_bin, y_bin, n_samples=target_samples, random_state=self.random_state, replace=False)
                 elif self.undersample_policy == 'outlier':
+                    numeric_cols = [c for i, c in enumerate(X_bin.columns) if self.categorical_features is None or i not in self.categorical_features]
+                    X_bin_numeric = X_bin[numeric_cols]
                     iso = IsolationForest(random_state=self.random_state)
-                    scores = iso.fit(X_bin).decision_function(X_bin)
-                    keep_indices = np.argsort(scores)[-target_samples:]
-                    X_res, y_res = X_bin.iloc[keep_indices], y_bin.iloc[keep_indices]
+                    scores = iso.fit(X_bin_numeric).decision_function(X_bin_numeric)
+                    keep_indices = X_bin.index[np.argsort(scores)[-target_samples:]]
+                    X_res, y_res = X_bin.loc[keep_indices], y_bin.loc[keep_indices]
                 else:
                     raise ValueError(f"Unknown undersample_policy: {self.undersample_policy}")
             
@@ -226,6 +289,8 @@ class BalancingResampler(BaseEstimator, TransformerMixin):
                 
                 if self.oversample_policy == 'generalized_smote':
                     X_synthetic, y_synthetic = self._generalized_smote_oversample(X_bin, y_bin, n_to_generate)
+                elif self.oversample_policy == 'density_smote':
+                    X_synthetic, y_synthetic = self._density_smote_oversample(X_bin, y_bin, n_to_generate)
                 else: # Handle SMOTE, SMOTER, SMOTENC
                     k_neighbors = min(self.smote_k_neighbors, n_samples_in_bin - 1)
                     other_samples_mask = ~bin_mask
@@ -237,7 +302,6 @@ class BalancingResampler(BaseEstimator, TransformerMixin):
                         sampler = None
                         if self.oversample_policy == 'smotenc':
                             if self.categorical_features is None: raise ValueError("`categorical_features` must be specified for 'smotenc' policy.")
-                            if self.undersample_policy == 'outlier': raise ValueError("Cannot use undersample_policy='outlier' with 'smotenc'. Use 'random'.")
                             sampler = SMOTENC(sampling_strategy={0: target_samples}, categorical_features=self.categorical_features, k_neighbors=k_neighbors, random_state=self.random_state)
                         else:
                             sampler = SMOTE(sampling_strategy={0: target_samples}, k_neighbors=k_neighbors, random_state=self.random_state)
