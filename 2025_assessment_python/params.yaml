@@ -20,7 +20,7 @@ run_note: Preparing for 2025 model with 2024 data and updated sales
 toggle:
   # Should the train stage run full cross-validation? Otherwise, the model
   # will be trained with the default hyperparameters specified below
-  cv_enable: false
+  cv_enable: true #false # MINE: true
 
   # Should SHAP values be calculated for this run in the interpret stage? Can be
   # desirable to save time when testing many models
@@ -111,7 +111,7 @@ cv:
   initial_set: 20
 
   # Max number of total search iterations
-  max_iterations: 50
+  max_iterations: 2000 #50 (MINE: !=50) 
 
   # Max number of search iterations without improvement before stopping search
   no_improve: 15
@@ -287,7 +287,7 @@ model:
     # https://lightgbm.readthedocs.io/en/latest/R/reference/lgb.train.html#arguments
     # WARNING: See GitLab issue #82 for critical notes about early stopping / CV
     validation_prop: 0.1
-    validation_type: "random"
+    validation_type: "recent" #"random" (MINE: "recent")
     validation_metric: "rmse"
 
     # Custom parameters added by the CCAO's lightsnip wrapper package. Setting

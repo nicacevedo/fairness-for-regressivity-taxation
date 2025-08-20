@@ -8,7 +8,7 @@ import numpy as np
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, PowerTransformer, OneHotEncoder
-from sklearn.impute import SimpleImputer
+from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.compose import ColumnTransformer
 from balancing_models import BalancingResampler
 
@@ -232,6 +232,22 @@ class CatToCategory(BaseEstimator, TransformerMixin):
             X[col] = pd.Categorical(s, categories=allowed, ordered=False)
         return X
 
+class NumImputer(SimpleImputer):
+    """
+    Impute specified numerical columns (pred_vars excluding cat_vars) with median.
+    """
+    def __init__(self, num_vars):
+        super().__init__(strategy="median")
+        self.num_vars = list(num_vars)
+
+    def fit(self, X, y=None):
+        return super().fit(X[self.num_vars], y)
+
+    def transform(self, X):
+        X = X.copy()
+        X[self.num_vars] = super().transform(X[self.num_vars])
+        return X
+
 
 def ModelMainRecipe(
     outcome: str,
@@ -253,6 +269,26 @@ def ModelMainRecipe(
         ]
     )
 
+def ModelMainRecipeImputer(
+    outcome: str,
+    pred_vars: Sequence[str],
+    cat_vars: Sequence[str],
+    id_vars: Sequence[str],
+) -> Pipeline:
+    """
+    Equivalent to the R model_main_recipe:
+      - Keep only outcome, predictors, ID; drop `time_split`
+      - Categorical NA -> "unknown"; unseen -> "new"
+      - Preserve pandas Categorical dtype for cat_vars
+      - Numeric predictors pass through unchanged; ID columns carried through
+    """
+    return Pipeline(
+        steps=[
+            ("prune", ColumnPruner(outcome=outcome, pred_vars=pred_vars, id_vars=id_vars, drop_cols=["time_split"])),
+            ("cats", CatToCategory(cat_vars=cat_vars)),
+            ("impute", NumImputer(num_vars=[c for c in pred_vars if c not in cat_vars and c not in id_vars]))
+        ]
+    )
 
 
 
@@ -598,7 +634,7 @@ def build_model_pipeline_supress_onehot(pred_vars, cat_vars, id_vars, keep_cols=
     pipeline = Pipeline([
         ('1_initial_drop', InitialColumnDropper(pred_vars=pred_vars)),
         ('2_type_conversion', TypeConverter()),
-        ('3_imputation', DataFrameImputer(id_vars=id_vars)),
+        ('3_imputation', DataFrameImputer(pred_vars=pred_vars, cat_vars=cat_vars,id_vars=id_vars)),
         # ('4_target_encode', TargetEncoder(cols_to_encode=lencode_cols)),
         ('5_handle_novel_cats', NovelCategoryHandler(nom_cols=ohe_cols)),
         ('6_one_hot_encode', DataFrameOneHotEncoder(ohe_cols=ohe_cols, id_vars=id_vars)),

@@ -332,7 +332,11 @@ class FeedForwardNNRegressorWithEmbeddings:
             #     raise ValueError(f"Code {codes.max()} generated for feature '{col}' is out of bounds for {num_categories} categories.")
 
             # 5. Define the embedding layer size
-            embedding_dim = min(50, (num_categories + 1) // 2)
+            # MINE: If there are less than or equal to 10 categories, keep the number.
+            if num_categories > 10:
+                embedding_dim = min(50, (num_categories + 1) // 2)
+            else:
+                embedding_dim = num_categories
             self.embedding_specs.append((num_categories, embedding_dim))
             print(f"   -> Embedding defined with size: ({num_categories}, {embedding_dim})")
 
