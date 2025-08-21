@@ -45,9 +45,9 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 # === My imports ==
 # 1. Models
-from src.nn_unconstrained import FeedForwardNNRegressor, FeedForwardNNRegressorWithEmbeddings
-from src.nn_constrained_cpu_v2 import FeedForwardNNRegressorWithProjection # FeedForwardNNRegressorWithConstraints, 
-from src.nn_constrained_cpu_v3 import ConstrainedRegressorProjectedWithEmbeddings
+from nn_models.nn_unconstrained import FeedForwardNNRegressor, FeedForwardNNRegressorWithEmbeddings
+from nn_models.nn_constrained_cpu_v2 import FeedForwardNNRegressorWithProjection # FeedForwardNNRegressorWithConstraints, 
+from nn_models.nn_constrained_cpu_v3 import ConstrainedRegressorProjectedWithEmbeddings
 
 # 2. Pipelines
 from R.recipes import model_main_pipeline, model_lin_pipeline, my_model_lin_pipeline
@@ -164,18 +164,18 @@ model_lin_pipeline = build_model_pipeline(
     cat_vars=params['model']['predictor']['categorical'],
     id_vars=params['model']['predictor']['id']
 )
-# model_emb_pipeline = build_model_pipeline_supress_onehot( # WARNING: We only changed to this to perform changes on the pipeline
-#     pred_vars=params['model']['predictor']['all'],
-#     cat_vars=params['model']['predictor']['categorical'],
-#     id_vars=params['model']['predictor']['id']
-# )
-model_emb_pipeline = ModelMainRecipe(
-# model_emb_pipeline = ModelMainRecipeImputer(
-    outcome= "meta_sale_price",
+model_emb_pipeline = build_model_pipeline_supress_onehot( # WARNING: We only changed to this to perform changes on the pipeline
     pred_vars=params['model']['predictor']['all'],
     cat_vars=params['model']['predictor']['categorical'],
     id_vars=params['model']['predictor']['id']
 )
+# # model_emb_pipeline = ModelMainRecipe(
+# model_emb_pipeline = ModelMainRecipeImputer(
+#     outcome= "meta_sale_price",
+#     pred_vars=params['model']['predictor']['all'],
+#     cat_vars=params['model']['predictor']['categorical'],
+#     id_vars=params['model']['predictor']['id']
+# )
 
 
 
@@ -200,7 +200,7 @@ X_train_fit_emb = model_emb_pipeline.fit_transform(X_train_prep, y_train_fit_log
 # X_train_fit_emb["char_recent_renovation"] = X_train_fit_emb["char_recent_renovation"].astype(bool) # QUESTION: Why is this not in cat_vars?
 # na_columns = X_train_fit_emb.isna().sum()[X_train_fit_emb.isna().sum() > 0].index
 # X_train_fit_emb[na_columns] = X_train_fit_emb[na_columns].fillna(value="unknown")
-# cat_cols_emb = [i for i,col in enumerate(X_train_fit_emb.columns) if X_train_fit_emb[col].dtype == object ]
+cat_cols_emb = [i for i,col in enumerate(X_train_fit_emb.columns) if X_train_fit_emb[col].dtype == object  or X_train_fit_emb[col].dtype == "category"]
 # ===== Resampler =====
 if apply_resampling:
     resampler_emb = BalancingResampler( 
@@ -233,11 +233,12 @@ X_test_fit_emb = model_emb_pipeline.transform(X_test_prep).drop(columns=params['
 model_names = [
     # "LinearRegression", 
     # "FeedForwardNNRegressor", 
-    "LightGBM", 
-    # "FeedForwardNNRegressorWithEmbeddings", 
-    # "FeedForwardNNRegressorWithConstraints"
+    # "LightGBM", 
+    "FeedForwardNNRegressorWithEmbeddings", 
+    # "FeedForwardNNRegressorWithProjection",
+    # "ConstrainedRegressorProjectedWithEmbeddings",
 ]
-emb_model_names = ["LightGBM", "FeedForwardNNRegressorWithEmbeddings", "FeedForwardNNRegressorWithConstraints"]
+emb_model_names = ["LightGBM", "FeedForwardNNRegressorWithEmbeddings", "FeedForwardNNRegressorWithProjection", "ConstrainedRegressorProjectedWithEmbeddings"]
 lin_model_names = ["LinearRegression", "FeedForwardNNRegressor" ]
 
 for model_name in model_names:
@@ -319,40 +320,7 @@ for model_name in model_names:
         #     # else (int(params_dict["n_estimators_static"]) if params_dict["n_estimators_static"] is not None else 1000)
         # )    
 
-        # # 500 on 10k
-        # model = lgb.LGBMRegressor(cat_l2=67.06444168895015, cat_smooth=17.09275488174234,
-        #       deterministic=True, feature_fraction=0.690780591986823,
-        #       force_row_wise=True, learning_rate=0.021379249622581562,
-        #       max_bin=423, max_cat_threshold=47, max_depth=11,
-        #       min_data_in_leaf=2, min_data_per_group=32,
-        #       min_gain_to_split=0.2564010374007819, n_estimators=2500,
-        #       num_leaves=226, objective='rmse', random_state=2025,
-        #       reg_alpha=6.489938652852805, reg_lambda=26.226042365885338,
-        #       verbose=-1)
-
-        # # 100 on 100k
-        # model = lgb.LGBMRegressor(cat_l2=77.29638412450299, cat_smooth=106.04915982308384,
-        #       deterministic=True, feature_fraction=0.6515890168955135,
-        #       force_row_wise=True, learning_rate=0.01925779993720067,
-        #       max_bin=372, max_cat_threshold=128, max_depth=14,
-        #       min_data_in_leaf=164, min_data_per_group=215,
-        #       min_gain_to_split=0.206029615115229, n_estimators=2500,
-        #       num_leaves=1074, objective='rmse', random_state=2025,
-        #       reg_alpha=29.6577825672396, reg_lambda=60.67539891939314,
-        #       verbose=-1)
-
-        # # 500 on 100k
-        # model = lgb.LGBMRegressor(cat_l2=73.51736114647082, cat_smooth=32.89188632453103,
-        #       deterministic=True, feature_fraction=0.562108593472178,
-        #       force_row_wise=True, learning_rate=0.05027925110046119,
-        #       max_bin=382, max_cat_threshold=58, max_depth=15,
-        #       min_data_in_leaf=192, min_data_per_group=69,
-        #       min_gain_to_split=0.08102102469611594, n_estimators=2500,
-        #       num_leaves=1311, objective='rmse', random_state=2025,
-        #       reg_alpha=7.462047791346489, reg_lambda=39.33483586225005,
-        #       verbose=-1)
-
-        # # 1000 on 100k (only train (?))
+        # # 1000 on 100k (only train (?)). Note: Is it not biased bc of validation set (?).
         # model = lgb.LGBMRegressor(cat_l2=22.95020213396379, cat_smooth=31.14663605311536,
         #       deterministic=True, feature_fraction=0.6572673015780892,
         #       force_row_wise=True, learning_rate=0.03341584496999874,
@@ -363,16 +331,6 @@ for model_name in model_names:
         #       reg_alpha=0.06676779724096571, reg_lambda=30.039145583263345,
         #       verbose=-1)
 
-        # 2000 on 10k (only train)
-        model = lgb.LGBMRegressor(cat_l2=97.31432379031611, cat_smooth=48.035921397517974,
-              deterministic=True, feature_fraction=0.6799312109717625,
-              force_row_wise=True, learning_rate=0.021594784937466943,
-              max_bin=209, max_cat_threshold=97, max_depth=15,
-              min_data_in_leaf=14, min_data_per_group=66,
-              min_gain_to_split=0.012846015081543094, n_estimators=2500,
-              num_leaves=1157, objective='rmse', random_state=2025,
-              reg_alpha=0.08117475001618887, reg_lambda=68.91922642338055,
-              verbose=-1)
         model.fit(
             X_train_fit_emb, y_train_fit_log_emb,
             eval_set=[(X_test_fit_emb, y_test_fit_log)],
@@ -399,20 +357,32 @@ for model_name in model_names:
         pred_vars = [col for col in params['model']['predictor']['all'] if col in X_train_fit_emb.columns] 
         large_categories = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in pred_vars if c.startswith('loc_school_')]
         # cat_vars = [col for col in params['model']['predictor']['categorical'] if col in X_train_fit_emb.columns]
-        # model = FeedForwardNNRegressorWithEmbeddings(
-        #     categorical_features=large_categories, output_size=1, 
-        #     batch_size=16, learning_rate=0.001, num_epochs=50, 
-        #     hidden_sizes=[200, 100]
-        # )
+        # Default
         model = FeedForwardNNRegressorWithEmbeddings(
-            categorical_features=large_categories, output_size=1,
-            **{'learning_rate': 0.0012399967836846098, 'batch_size': 25, 'num_epochs': 98, 'hidden_sizes': [489, 472]}
+            categorical_features=large_categories, output_size=1, random_state=42,
+            batch_size=16, learning_rate=0.001, num_epochs=15, 
+            hidden_sizes=[200, 100]
         )
+        # 10k samples with 10 iters
+        # model = FeedForwardNNRegressorWithEmbeddings(
+        #     categorical_features=large_categories, output_size=1,
+        #     **{'learning_rate': 0.0012399967836846098, 'batch_size': 25, 'num_epochs': 98, 'hidden_sizes': [489, 472]}
+        # )
+        # # maybe 10 or 20 iters with 100k
+        # model = FeedForwardNNRegressorWithEmbeddings(
+        #     categorical_features=large_categories, output_size=1,
+        #     **{'learning_rate': 0.004370861069626263, 'batch_size': 32, 'num_epochs': 18, 'hidden_sizes': [148, 148]}
+        # )
+        # # 50 iters with 100k
+        # model = FeedForwardNNRegressorWithEmbeddings(
+        #     categorical_features=large_categories, output_size=1, random_state=42,
+        #     **{'learning_rate': 0.004172541632024457, 'batch_size': 24, 'num_epochs': 15, 'hidden_sizes': [184, 235]}
+        # )
         # print(X_train_fit_emb.isna().sum())
         # exit()
         model.fit(X_train_fit_emb, y_train_fit_log_emb)
 
-    elif model_name == "FeedForwardNNRegressorWithConstraints":
+    elif model_name == "FeedForwardNNRegressorWithProjection":
         pred_vars = [col for col in params['model']['predictor']['all'] if col in X_train_fit_emb.columns] 
         large_categories = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in pred_vars if c.startswith('loc_school_')]
         # cat_vars = [col for col in params['model']['predictor']['categorical'] if col in X_train_fit_emb.columns]
@@ -424,13 +394,24 @@ for model_name in model_names:
         #     n_groups=3, dev_thresh=0.15, group_thresh=0.05, 
         #     use_individual_constraint=True, use_group_constraint=True # Not really working
         # )
-
+        # Default
+        # model = FeedForwardNNRegressorWithProjection(
+        #     large_categories, output_size=1, random_state=42,
+        #     batch_size=16, learning_rate=0.001, num_epochs=10, 
+        #     hidden_sizes=[200, 100], 
+        #     dev_thresh=0.75
+        # )
+        # # 100k with 10 iters
+        # model = FeedForwardNNRegressorWithProjection(
+        #     large_categories, output_size=1, 
+        #     **{'learning_rate': 0.002911051996104486, 'batch_size': 19, 'num_epochs': 12, 'hidden_sizes': [195], 'dev_thresh': 0.8295835055926347}
+        # )
+        # 100k with 48 iters
         model = FeedForwardNNRegressorWithProjection(
-            large_categories, output_size=1, 
-            batch_size=16, learning_rate=0.001, num_epochs=10, 
-            hidden_sizes=[200, 100], 
-            dev_thresh=0.75
+            large_categories, output_size=1, random_state=42,
+            **{'learning_rate': 0.008284479096736002, 'batch_size': 27, 'num_epochs': 14, 'hidden_sizes': [187], 'dev_thresh': 0.9914267936547978}
         )
+
         # large_categories_indices = [X_train_fit_emb.columns.get_loc(col) for col in large_categories]
         # model = ConstrainedRegressorProjectedWithEmbeddings(
         #          categorical_features=large_categories_indices,
@@ -448,6 +429,26 @@ for model_name in model_names:
         # model.fit(X_train_fit_emb, y_train_fit_log_emb, debug_mode=True)
         model.fit(X_train_fit_emb, y_train_fit_log_emb)
 
+    elif model_name == "ConstrainedRegressorProjectedWithEmbeddings":
+        pred_vars = [col for col in params['model']['predictor']['all'] if col in X_train_fit_emb.columns] 
+        large_categories = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in pred_vars if c.startswith('loc_school_')]
+        large_categories_idx = [X_train_fit_emb.columns.tolist().index(col) for col in large_categories]
+        model = ConstrainedRegressorProjectedWithEmbeddings(
+                categorical_features=large_categories_idx,
+                hidden_sizes = [200],
+                batch_size = 32,
+                learning_rate= 1e-3,
+                num_epochs = 0.7,
+                n_groups = 3,
+                dev_thresh= 1,
+                group_thresh = 0.1,
+                use_group_balanced_sampler = False,
+                random_state = 42,
+                debug= False,
+        )
+
+        model.fit(X_train_fit_emb, y_train_fit_log_emb)
+
 
     if len(model_names) > 0: # If there is any model, predict
 
@@ -456,6 +457,7 @@ for model_name in model_names:
         if model_name in emb_model_names:
             y_pred_train_log = model.predict(X_train_fit_emb)
             y_pred_test_log = model.predict(X_test_fit_emb)
+            # print(y_test_fit_log)
             # Exponential target to recover original values
             y_train_fit = np.exp(y_train_fit_log_emb)
         elif model_name in lin_model_names:
@@ -465,6 +467,13 @@ for model_name in model_names:
             y_train_fit = np.exp(y_train_fit_log_lin)
 
         # Exponential target to recover original values
+        # Sub: quick correction
+        min_log_price = np.percentile(y_pred_train_log, 1)
+        max_log_price = np.percentile(y_pred_train_log, 99)
+        y_pred_train_log = np.clip(y_pred_train_log, min_log_price, max_log_price)
+        min_log_price = np.percentile(y_pred_test_log, 1)
+        max_log_price = np.percentile(y_pred_test_log, 99)
+        y_pred_test_log = np.clip(y_pred_test_log, min_log_price, max_log_price)
         y_pred_train = np.exp(y_pred_train_log)
         y_pred_test = np.exp(y_pred_test_log)
         y_test_fit = np.exp(y_test_fit_log)
@@ -502,18 +511,19 @@ exit()
 params = {
     'toggle': {'cv_enable': True},
     'cv': {
-        'num_folds': params['cv']['num_folds'],
+        'num_folds': 5,#params['cv']['num_folds'],
         'initial_set': params['cv']['initial_set'],
-        'max_iterations': 100, # Reduced for faster demo
+        'max_iterations': 500, # Reduced for faster demo
     },
     'model': {
-        'name': 'FeedForwardNNRegressorWithEmbeddings', # <-- SELECT MODEL HERE
+        'name': 'FeedForwardNNRegressorWithProjection', # <-- SELECT MODEL HERE
         'objective': 'regression_l1', 'verbose': -1, 'deterministic': True,
         'force_row_wise': True, 'seed': 42,
         'predictor': {
             'all': params['model']['predictor']['all'],
             'categorical': params['model']['predictor']['categorical'],
-            'id': [], # params['model']['predictor']['id']
+            'id': [], # params['model']['predictor']['id'],
+            'large_categories':['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in params['model']['predictor']['all'] if c.startswith('loc_school_')],
         },
         'parameter': {
             'stop_iter': 50, 'validation_prop': 0.1, 'validation_type': 'recent',
@@ -546,17 +556,30 @@ params = {
             },
             'FeedForwardNNRegressorWithEmbeddings': {
                 'range': {
-                    'learning_rate': [1e-4, 1e-2],
-                    'batch_size': [16, 64],
-                    'num_epochs': [10, 100],
+                    'learning_rate': [1e-3, 1e-2],
+                    'batch_size': [16, 32],
+                    'num_epochs': [10, 20],
                     # Defines search space for hidden layers:
                     # [[min_layers, max_layers], [min_units, max_units]]
-                    'hidden_sizes': [[1, 2], [128, 512]]
+                    'hidden_sizes': [[1, 2], [128, 256]]
                 },
                 'default': {
-                    'learning_rate': 0.001, 'batch_size': 32,
+                    'learning_rate': 1e-3, 'batch_size': 16,
                     'num_epochs': 50, 'hidden_sizes': [256, 128]
                 }
+            },
+            'FeedForwardNNRegressorWithProjection': {
+                    'range': {
+                        'learning_rate': [1e-3, 1e-2],
+                        'batch_size': [16, 32],
+                        'num_epochs': [10, 20],
+                        'hidden_sizes': [[1, 2], [128, 256]],
+                        'dev_thresh': [0.7, 1.0]
+                    },
+                    'default': {
+                        'learning_rate': 0.001, 'batch_size': 32, 'num_epochs': 30,
+                        'hidden_sizes': [128, 64], 'dev_thresh': 0.15
+                    }
             }
         }
     }
@@ -575,9 +598,14 @@ model_params.update({
 })
 model_params['early_stopping_enable'] = model_params['validation_prop'] > 0 and model_params['stop_iter'] > 0
 
-# pipeline = ModelMainRecipe(
-pipeline = ModelMainRecipeImputer(
-    outcome="meta_sale_price",
+# # pipeline = ModelMainRecipe(
+# pipeline = ModelMainRecipeImputer(
+#     outcome="meta_sale_price",
+#     pred_vars=params['model']['predictor']['all'],
+#     cat_vars=params['model']['predictor']['categorical'],
+#     id_vars=params['model']['predictor']['id']
+# )
+pipeline = build_model_pipeline_supress_onehot( # WARNING: We only changed to this to perform changes on the pipeline
     pred_vars=params['model']['predictor']['all'],
     cat_vars=params['model']['predictor']['categorical'],
     id_vars=params['model']['predictor']['id']

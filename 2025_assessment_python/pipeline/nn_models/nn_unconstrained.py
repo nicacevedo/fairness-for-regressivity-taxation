@@ -7,6 +7,7 @@ from sklearn.datasets import make_regression
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error
 import numpy as np
+import random
 
 import warnings
 
@@ -288,7 +289,7 @@ class NNWithEmbeddings(nn.Module):
 # and uses the NNWithEmbeddings model.
 class FeedForwardNNRegressorWithEmbeddings:
 
-    def __init__(self, categorical_features, output_size, batch_size=16, learning_rate=0.001, num_epochs=10, hidden_sizes=[1024]):
+    def __init__(self, categorical_features, output_size=1, batch_size=16, learning_rate=0.001, num_epochs=10, hidden_sizes=[1024], random_state=None):
         self.categorical_features = categorical_features
         self.numerical_features = [] # Will be determined in fit()
         self.output_size = output_size
@@ -299,6 +300,7 @@ class FeedForwardNNRegressorWithEmbeddings:
         self.model = None
         self.category_mappings = {} # To store mappings for prediction
         self.embedding_specs = [] # To store embedding configuration
+        self.random_state = random_state
 
     # In the FeedForwardNNRegressorWithEmbeddings class...
     def fit(self, X, y):
@@ -306,6 +308,14 @@ class FeedForwardNNRegressorWithEmbeddings:
         self.numerical_features = [col for col in X.columns if col not in self.categorical_features]
         print(f"Categorical features: {self.categorical_features}")
         print(f"Numerical features: {self.numerical_features}")
+
+        # Set random seed for reproducibility
+        if self.random_state is not None:
+            np.random.seed(self.random_state)
+            torch.manual_seed(self.random_state)
+            random.seed(self.random_state)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(self.random_state)
 
         # Create mappings, embedding specs, and the categorical tensor in a single, safe loop.
         X_cat_list = []
