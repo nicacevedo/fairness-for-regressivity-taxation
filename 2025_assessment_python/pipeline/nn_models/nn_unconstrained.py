@@ -199,7 +199,16 @@ class FeedForwardNNRegressor:
 
 
 
+
+
+
+
+
+
+# =============================
 # ===== Adding embeddings =====
+# =============================
+
 
 import torch
 import torch.nn as nn
@@ -445,3 +454,8 @@ class FeedForwardNNRegressorWithEmbeddings:
                 # This helps catch typos or invalid parameter names
                 warnings.warn(f"Invalid parameter {key} for estimator {self.__class__.__name__}.")
         return self
+
+
+
+
+

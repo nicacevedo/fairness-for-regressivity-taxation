@@ -48,6 +48,8 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from nn_models.nn_unconstrained import FeedForwardNNRegressor, FeedForwardNNRegressorWithEmbeddings
 from nn_models.nn_constrained_cpu_v2 import FeedForwardNNRegressorWithProjection # FeedForwardNNRegressorWithConstraints, 
 from nn_models.nn_constrained_cpu_v3 import ConstrainedRegressorProjectedWithEmbeddings
+from nn_models.unconstrained.TabTransformerRegressor import TabTransformerRegressor
+from nn_models.unconstrained.WideAndDeepRegressor import WideAndDeepRegressor
 
 # 2. Pipelines
 from R.recipes import model_main_pipeline, model_lin_pipeline, my_model_lin_pipeline
@@ -62,6 +64,9 @@ from temporal_bayes_cv import ModelHandler, TemporalCV#TemporalBayesCV, ModelSpe
 from optuna.pruners import SuccessiveHalvingPruner
 
 
+# If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  
+#  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+# In command prompt: set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Load YAML params file
 with open('params.yaml', 'r') as file:
@@ -75,6 +80,28 @@ sample_size = 100000 # SAMPLE SIZE
 
 apply_resampling = False
 
+emb_pipeline_names = ["ModelMainRecipe", "ModelMainRecipeImputer", "build_model_pipeline_supress_onehot"]
+emb_pipeline_name = emb_pipeline_names[1]
+
+
+model_names = [
+    # "LinearRegression", 
+    # "FeedForwardNNRegressor", 
+    # "LightGBM", 
+    # "FeedForwardNNRegressorWithEmbeddings", 
+    # "FeedForwardNNRegressorWithProjection",
+    # "ConstrainedRegressorProjectedWithEmbeddings",
+
+    # More unconstrained
+    # "TabTransformerRegressor",
+    "WideAndDeepRegressor",
+]
+emb_model_names = ["LightGBM", 
+                   "FeedForwardNNRegressorWithEmbeddings", "FeedForwardNNRegressorWithProjection", "ConstrainedRegressorProjectedWithEmbeddings",
+                   "TabTransformerRegressor", "WideAndDeepRegressor"]
+lin_model_names = ["LinearRegression", "FeedForwardNNRegressor" ]
+
+
 #- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 # 2. Prepare Data --------------------------------------------------------------
 #- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -87,7 +114,8 @@ print("Preparing model training data")
 # NOTE: It is critical to trim "multicard" sales when training. Multicard means
 # there is multiple buildings on a PIN. Since these sales include multiple
 # buildings, they are typically higher than a "normal" sale and must be removed
-training_data_full = pd.read_parquet(f"input/training_data.parquet")
+desired_columns = params['model']['predictor']['all'] + params['model']['predictor']['id'] + ['meta_sale_price', 'meta_sale_date'] + ["ind_pin_is_multicard", "sv_is_outlier"]
+training_data_full = pd.read_parquet(f"input/training_data.parquet", columns=desired_columns)#columns=params['model']['predictor']['all'] + params['model']['predictor']['id'] + ['meta_sale_price', 'meta_sale_date'])
 training_data_full = training_data_full[
     (~training_data_full['ind_pin_is_multicard'].astype('bool').fillna(True)) &
     (~training_data_full['sv_is_outlier'].astype('bool').fillna(True))
@@ -148,9 +176,7 @@ print("Creating and fitting linear baseline model")
 # Clean columns
 train = train[params['model']['predictor']['all'] + params['model']['predictor']['id'] + ['meta_sale_price']]
 # train = train[params['model']['predictor']['all'] + params['model']['predictor']['id'] + ['meta_sale_price'] + ["meta_sale_date"]] # Sale date for CV split (?)
-
 test = test[params['model']['predictor']['all'] + params['model']['predictor']['id'] + ['meta_sale_price']]
-
 
 # Split the data in X, y
 X_train_prep, y_train_fit_log = train.drop(columns=['meta_sale_price']), train['meta_sale_price'] 
@@ -164,20 +190,29 @@ model_lin_pipeline = build_model_pipeline(
     cat_vars=params['model']['predictor']['categorical'],
     id_vars=params['model']['predictor']['id']
 )
-model_emb_pipeline = build_model_pipeline_supress_onehot( # WARNING: We only changed to this to perform changes on the pipeline
-    pred_vars=params['model']['predictor']['all'],
-    cat_vars=params['model']['predictor']['categorical'],
-    id_vars=params['model']['predictor']['id']
-)
-# # model_emb_pipeline = ModelMainRecipe(
-# model_emb_pipeline = ModelMainRecipeImputer(
-#     outcome= "meta_sale_price",
-#     pred_vars=params['model']['predictor']['all'],
-#     cat_vars=params['model']['predictor']['categorical'],
-#     id_vars=params['model']['predictor']['id']
-# )
 
+if emb_pipeline_name == "build_model_pipeline_supress_onehot":
+    model_emb_pipeline = build_model_pipeline_supress_onehot( # WARNING: We only changed to this to perform changes on the pipeline
+        pred_vars=params['model']['predictor']['all'],
+        cat_vars=params['model']['predictor']['categorical'],
+        id_vars=params['model']['predictor']['id']
+    )
+elif emb_pipeline_name == "ModelMainRecipe":
+    model_emb_pipeline = ModelMainRecipe(
+        outcome= "meta_sale_price",
+        pred_vars=params['model']['predictor']['all'],
+        cat_vars=params['model']['predictor']['categorical'],
+        id_vars=params['model']['predictor']['id']
+    )
+elif emb_pipeline_name == "ModelMainRecipeImputer":
+    model_emb_pipeline = ModelMainRecipeImputer(
+            outcome= "meta_sale_price",
+            pred_vars=params['model']['predictor']['all'],
+            cat_vars=params['model']['predictor']['categorical'],
+            id_vars=params['model']['predictor']['id']
+    )
 
+# === Fitting datasets ===
 
 
 # 1. Fit / transform the data for linear models
@@ -230,16 +265,7 @@ X_test_fit_emb = model_emb_pipeline.transform(X_test_prep).drop(columns=params['
 #                       Comparisson of the different models
 # ==========================================================================================
 
-model_names = [
-    # "LinearRegression", 
-    # "FeedForwardNNRegressor", 
-    # "LightGBM", 
-    "FeedForwardNNRegressorWithEmbeddings", 
-    # "FeedForwardNNRegressorWithProjection",
-    # "ConstrainedRegressorProjectedWithEmbeddings",
-]
-emb_model_names = ["LightGBM", "FeedForwardNNRegressorWithEmbeddings", "FeedForwardNNRegressorWithProjection", "ConstrainedRegressorProjectedWithEmbeddings"]
-lin_model_names = ["LinearRegression", "FeedForwardNNRegressor" ]
+print("Fitting models...")
 
 for model_name in model_names:
 
@@ -320,16 +346,17 @@ for model_name in model_names:
         #     # else (int(params_dict["n_estimators_static"]) if params_dict["n_estimators_static"] is not None else 1000)
         # )    
 
-        # # 1000 on 100k (only train (?)). Note: Is it not biased bc of validation set (?).
-        # model = lgb.LGBMRegressor(cat_l2=22.95020213396379, cat_smooth=31.14663605311536,
-        #       deterministic=True, feature_fraction=0.6572673015780892,
-        #       force_row_wise=True, learning_rate=0.03341584496999874,
-        #       max_bin=323, max_cat_threshold=82, max_depth=12,
-        #       min_data_in_leaf=68, min_data_per_group=81,
-        #       min_gain_to_split=0.12374932835073327, n_estimators=2500,
-        #       num_leaves=366, objective='rmse', random_state=2025,
-        #       reg_alpha=0.06676779724096571, reg_lambda=30.039145583263345,
-        #       verbose=-1)
+        # 1000 on 100k (only train (?)). Note: Is it not biased bc of validation set (?).
+        model = lgb.LGBMRegressor(cat_l2=22.95020213396379, cat_smooth=31.14663605311536,
+              deterministic=True, feature_fraction=0.6572673015780892,
+              force_row_wise=True, learning_rate=0.03341584496999874,
+              max_bin=323, max_cat_threshold=82, max_depth=12,
+              min_data_in_leaf=68, min_data_per_group=81,
+              min_gain_to_split=0.12374932835073327, n_estimators=2500,
+              num_leaves=366, objective='rmse', random_state=2025,
+              reg_alpha=0.06676779724096571, reg_lambda=30.039145583263345,
+              verbose=-1)
+
 
         model.fit(
             X_train_fit_emb, y_train_fit_log_emb,
@@ -358,11 +385,11 @@ for model_name in model_names:
         large_categories = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in pred_vars if c.startswith('loc_school_')]
         # cat_vars = [col for col in params['model']['predictor']['categorical'] if col in X_train_fit_emb.columns]
         # Default
-        model = FeedForwardNNRegressorWithEmbeddings(
-            categorical_features=large_categories, output_size=1, random_state=42,
-            batch_size=16, learning_rate=0.001, num_epochs=15, 
-            hidden_sizes=[200, 100]
-        )
+        # model = FeedForwardNNRegressorWithEmbeddings(
+        #     categorical_features=large_categories, output_size=1, random_state=42,
+        #     batch_size=16, learning_rate=0.001, num_epochs=15, 
+        #     hidden_sizes=[200, 100]
+        # )
         # 10k samples with 10 iters
         # model = FeedForwardNNRegressorWithEmbeddings(
         #     categorical_features=large_categories, output_size=1,
@@ -374,10 +401,10 @@ for model_name in model_names:
         #     **{'learning_rate': 0.004370861069626263, 'batch_size': 32, 'num_epochs': 18, 'hidden_sizes': [148, 148]}
         # )
         # # 50 iters with 100k
-        # model = FeedForwardNNRegressorWithEmbeddings(
-        #     categorical_features=large_categories, output_size=1, random_state=42,
-        #     **{'learning_rate': 0.004172541632024457, 'batch_size': 24, 'num_epochs': 15, 'hidden_sizes': [184, 235]}
-        # )
+        model = FeedForwardNNRegressorWithEmbeddings(
+            categorical_features=large_categories, output_size=1, random_state=42,
+            **{'learning_rate': 0.004172541632024457, 'batch_size': 24, 'num_epochs': 15, 'hidden_sizes': [184, 235]}
+        )
         # print(X_train_fit_emb.isna().sum())
         # exit()
         model.fit(X_train_fit_emb, y_train_fit_log_emb)
@@ -449,6 +476,28 @@ for model_name in model_names:
 
         model.fit(X_train_fit_emb, y_train_fit_log_emb)
 
+    # =======================================================
+    #               More Unconstrained models
+    # =======================================================
+    elif model_name == "TabTransformerRegressor":
+        cat_vars = cat_vars=params['model']['predictor']['categorical']
+        coord_vars = ["loc_longitude", "loc_latitude"]
+        model = TabTransformerRegressor(
+            cat_vars, coord_vars, output_size=1, random_state=42,
+                batch_size=16, learning_rate=0.001, num_epochs=30, transformer_dim=16, 
+                transformer_heads=8, transformer_layers=6,
+                 dropout=0.1, loss_fn='focal_mse' #  'mse', 'focal_mse', or 'huber'.
+        )
+        model.fit(X_train_fit_emb, y_train_fit_log_emb)
+
+    elif model_name == "WideAndDeepRegressor":
+        cat_vars = cat_vars=params['model']['predictor']['categorical']
+        model = WideAndDeepRegressor(
+            categorical_features=cat_vars, output_size=1, random_state=42,
+            batch_size=16, learning_rate=0.001,
+            num_epochs=10, hidden_sizes=[200, 100]
+        )
+        model.fit(X_train_fit_emb, y_train_fit_log_emb)
 
     if len(model_names) > 0: # If there is any model, predict
 
