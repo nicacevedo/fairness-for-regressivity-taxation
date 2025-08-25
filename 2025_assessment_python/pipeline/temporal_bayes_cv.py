@@ -1,20 +1,29 @@
 # ------------------------------------------------------------
 # Generalized Temporal Cross-Validation Framework
 # ------------------------------------------------------------
-# ------------------------------------------------------------
-# Generalized Temporal Cross-Validation Framework
-# ------------------------------------------------------------
 import pandas as pd
 import numpy as np
 import warnings
 import lightgbm as lgb
 import optuna
+import yaml 
 from sklearn.model_selection import KFold
 from sklearn.metrics import mean_squared_error
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import StandardScaler
+from math import log2, floor
+
+# === My models ===
 from nn_models.nn_unconstrained import FeedForwardNNRegressorWithEmbeddings
 from nn_models.nn_constrained_cpu_v2 import FeedForwardNNRegressorWithProjection
+
+# === Missing models ===
+from nn_models.nn_constrained_cpu_v3 import ConstrainedRegressorProjectedWithEmbeddings
+from nn_models.unconstrained.TabTransformerRegressor import TabTransformerRegressor
+from nn_models.unconstrained.WideAndDeepRegressor import WideAndDeepRegressor 
+# === End of Missing models ===
+
 from recipes.recipes_pipelined import ModelMainRecipe
 from math import log2, floor
 
@@ -31,10 +40,6 @@ print(f"Using device: {device}")
 # ------------------------------------------------------------
 # Model Handler: Updated to include the new model
 # ------------------------------------------------------------
-
-# ------------------------------------------------------------
-# Model Handler: Updated to include the new model
-# ------------------------------------------------------------
 class ModelHandler:
     def __init__(self, model_name, model_params, hyperparameter_config):
         self.model_name = model_name
@@ -44,10 +49,21 @@ class ModelHandler:
     def _suggest_from_range(self, trial, name, rng):
         if isinstance(rng, list) and len(rng) > 0 and isinstance(rng[0], (bool, str)):
             return trial.suggest_categorical(name, rng)
-        if name == 'hidden_sizes':
-            n_layers = trial.suggest_int('n_layers', rng[0][0], rng[0][1])
-            layers = [trial.suggest_int(f'n_units_l{i}', rng[1][0], rng[1][1]) for i in range(n_layers)]
+        
+        if name == 'hidden_sizes' or name == 'mlp_hidden_dims':
+            min_layers, max_layers = rng[0]
+            min_units, max_units = rng[1]
+            
+            n_layers = trial.suggest_int(f'{name}_n_layers', min_layers, max_layers)
+            layers = []
+            
+            previous_layer_size = max_units
+            for i in range(n_layers):
+                layer_size = trial.suggest_int(f'{name}_n_units_l{i}', min_units, previous_layer_size)
+                layers.append(layer_size)
+                previous_layer_size = layer_size
             return layers
+
         low, high = rng[0], rng[1]
         if isinstance(low, int) and isinstance(high, int):
             return trial.suggest_int(name, low, high)
@@ -68,7 +84,10 @@ class ModelHandler:
             'RandomForestRegressor': self._create_random_forest,
             'LinearRegression': self._create_linear_regression,
             'FeedForwardNNRegressorWithEmbeddings': self._create_feed_forward_nn_embedding,
-            'FeedForwardNNRegressorWithProjection': self._create_feed_forward_nn_projection
+            'FeedForwardNNRegressorWithProjection': self._create_feed_forward_nn_projection,
+            'ConstrainedRegressorProjectedWithEmbeddings': self._create_constrained_nn_v3,
+            'TabTransformerRegressor': self._create_tab_transformer,
+            'WideAndDeepRegressor': self._create_wide_and_deep
         }
         creator = model_creators.get(self.model_name)
         if creator:
@@ -76,16 +95,22 @@ class ModelHandler:
         raise ValueError(f"Unsupported model name: {self.model_name}")
 
     def _create_lgbm(self, params_dict):
-        # ... (implementation is unchanged)
-        return lgb.LGBMRegressor(...)
+        lgbm_params = params_dict.copy()
+        lgbm_params['random_state'] = self.static_params.get('seed')
+        lgbm_params['deterministic'] = True
+        lgbm_params['force_row_wise'] = True
+        lgbm_params['max_depth'] = floor(np.log2(lgbm_params['num_leaves'])) + lgbm_params['add_to_linked_depth']
+        lgbm_params['objective'] = 'rmse'
+        lgbm_params['verbose'] = -1
+        return lgb.LGBMRegressor(**lgbm_params)
 
     def _create_random_forest(self, params_dict):
-        # ... (implementation is unchanged)
-        return RandomForestRegressor(...)
+        rf_params = params_dict.copy()
+        rf_params['random_state'] = self.static_params.get('seed')
+        return RandomForestRegressor(**rf_params)
 
     def _create_linear_regression(self, params_dict):
-        # ... (implementation is unchanged)
-        return LinearRegression(...)
+        return LinearRegression(**params_dict)
     
     def _create_feed_forward_nn_embedding(self, params_dict):
         nn_params = {
@@ -94,6 +119,7 @@ class ModelHandler:
             'batch_size': params_dict.get('batch_size'),
             'num_epochs': params_dict.get('num_epochs'),
             'hidden_sizes': params_dict.get('hidden_sizes'),
+            'random_state': self.static_params.get('seed') # Pass seed
         }
         return FeedForwardNNRegressorWithEmbeddings(**nn_params)
 
@@ -105,17 +131,59 @@ class ModelHandler:
             'num_epochs': params_dict.get('num_epochs'),
             'hidden_sizes': params_dict.get('hidden_sizes'),
             'dev_thresh': params_dict.get('dev_thresh'),
+            'random_state': self.static_params.get('seed') # Pass seed
         }
         return FeedForwardNNRegressorWithProjection(**nn_params)
+
+    def _create_constrained_nn_v3(self, params_dict):
+        nn_params = {
+            'categorical_features': self.static_params['predictor']['large_categories'],
+            'learning_rate': params_dict.get('learning_rate'),
+            'batch_size': params_dict.get('batch_size'),
+            'num_epochs': params_dict.get('num_epochs'),
+            'hidden_sizes': params_dict.get('hidden_sizes'),
+            'dev_thresh': params_dict.get('dev_thresh'),
+            'group_thresh': params_dict.get('group_thresh'),
+            'n_groups': params_dict.get('n_groups'),
+            'random_state': self.static_params.get('seed') # Pass seed
+        }
+        return ConstrainedRegressorProjectedWithEmbeddings(**nn_params)
+
+    def _create_tab_transformer(self, params_dict):
+        nn_params = {
+            'categorical_features': self.static_params['predictor']['categorical'],
+            'coord_features': ["loc_longitude", "loc_latitude"],
+            'batch_size': params_dict.get('batch_size'),
+            'learning_rate': params_dict.get('learning_rate'),
+            'num_epochs': params_dict.get('num_epochs'),
+            'transformer_dim': params_dict.get('transformer_dim'),
+            'transformer_heads': params_dict.get('transformer_heads'),
+            'transformer_layers': params_dict.get('transformer_layers'),
+            'dropout': params_dict.get('dropout'),
+            'loss_fn': params_dict.get('loss_fn'),
+            'random_state': self.static_params.get('seed') # Pass seed
+        }
+        return TabTransformerRegressor(**nn_params)
+
+    def _create_wide_and_deep(self, params_dict):
+        nn_params = {
+            'categorical_features': self.static_params['predictor']['categorical'],
+            'batch_size': params_dict.get('batch_size'),
+            'learning_rate': params_dict.get('learning_rate'),
+            'num_epochs': params_dict.get('num_epochs'),
+            'hidden_sizes': params_dict.get('hidden_sizes'),
+            'random_state': self.static_params.get('seed') # Pass seed
+        }
+        return WideAndDeepRegressor(**nn_params)
 
     def get_fit_kwargs(self, X_val, y_val):
         return {} # No special fit args for these models
 
 # ------------------------------------------------------------
-# 2. Temporal CV Class
+# Temporal CV Class
 # ------------------------------------------------------------
 class TemporalCV:
-    def __init__(self, model_handler, cv_params, cv_enable, data, target_col, date_col, preproc_pipeline):
+    def __init__(self, model_handler, cv_params, cv_enable, data, target_col, date_col, preproc_pipeline, run_name_suffix=''):
         self.model_handler = model_handler
         self.cv_params = cv_params
         self.cv_enable = cv_enable
@@ -123,6 +191,7 @@ class TemporalCV:
         self.target_col = target_col
         self.date_col = date_col
         self.preproc_pipeline = preproc_pipeline
+        self.run_name_suffix = run_name_suffix
         self.best_params_ = None
         self.best_model_ = None
         self.study_ = None
@@ -137,8 +206,7 @@ class TemporalCV:
         df_sorted = df.sort_values(self.date_col).reset_index(drop=True)
         n = len(df_sorted)
         fold_sizes = [n // v] * v
-        for i in range(n % v):
-            fold_sizes[i] += 1
+        for i in range(n % v): fold_sizes[i] += 1
         idx = 0
         folds = []
         for fs in fold_sizes:
@@ -148,60 +216,48 @@ class TemporalCV:
         splits = []
         for i, (start, end) in enumerate(folds):
             test_idx, train_idx = np.arange(start, end), np.arange(0, start)
-            if len(train_idx) == 0:
-                continue
+            if len(train_idx) == 0: continue
             splits.append((train_idx, test_idx))
         return df_sorted, splits
 
     def _split_train_eval(self, X_fold, y_fold):
         val_prop = self.model_handler.static_params.get('validation_prop', 0.0)
-        if val_prop <= 0 or val_prop >= 1:
-            return X_fold, y_fold, None, None
+        if val_prop <= 0 or val_prop >= 1: return X_fold, y_fold, None, None
         n = len(X_fold)
         val_n = max(1, int(round(n * val_prop)))
         tr_n = n - val_n
-        if tr_n <= 0:
-            return X_fold, y_fold, None, None
+        if tr_n <= 0: return X_fold, y_fold, None, None
         X_tr, y_tr = X_fold.iloc[:tr_n], y_fold.iloc[:tr_n]
         X_val, y_val = X_fold.iloc[tr_n:], y_fold.iloc[tr_n:]
         return X_tr, y_tr, X_val, y_val
 
     def _objective_optuna(self, trial):
         hp = self.model_handler.suggest_hyperparameters(trial)
-
-        if self.early_stopping_enable:
-            hp['n_estimators'] = self.n_estimators_static
+        if self.early_stopping_enable: hp['n_estimators'] = self.n_estimators_static
         elif 'n_estimators' in self.model_handler.hp_config.get('range', {}):
             ni_range = self.model_handler.hp_config['range']['n_estimators']
             hp['n_estimators'] = trial.suggest_int('n_estimators', int(ni_range[0]), int(ni_range[1]))
-
         model = self.model_handler.create_model(hp)
-
         validation_type = self.model_handler.static_params.get('validation_type', 'recent')
         if validation_type == 'random':
             kf = KFold(n_splits=self.cv_params['num_folds'], shuffle=True, random_state=self.model_handler.static_params.get('seed'))
             folds = list(kf.split(np.arange(len(self.data))))
             X_full = self.data.drop(columns=[self.target_col, self.date_col])
             y_full = self.data[self.target_col]
-        else: # 'recent'
+        else:
             df_sorted, folds = self._rolling_origin_splits(self.data, v=self.cv_params['num_folds'])
             X_full = df_sorted.drop(columns=[self.target_col, self.date_col])
             y_full = df_sorted[self.target_col]
-
         fold_scores = []
         for tr_idx, te_idx in folds:
             X_tr_full, y_tr_full = X_full.iloc[tr_idx], y_full.iloc[tr_idx]
             X_te, y_te = X_full.iloc[te_idx], y_full.iloc[te_idx]
             X_tr, y_tr, X_val, y_val = self._split_train_eval(X_tr_full, y_tr_full)
-            
             pipeline_instance = self.preproc_pipeline
             X_tr_proc = pipeline_instance.fit_transform(X_tr, y_tr)
             X_te_proc = pipeline_instance.transform(X_te)
-            X_val_proc = pipeline_instance.transform(X_val) if X_val is not None else None
-
-            fit_kwargs = self.model_handler.get_fit_kwargs(X_val_proc, y_val)
+            fit_kwargs = self.model_handler.get_fit_kwargs(None, None)
             model.fit(X_tr_proc, y_tr, **fit_kwargs)
-
             y_pred = model.predict(X_te_proc)
             score = mean_squared_error(y_te, y_pred, squared=False)
             fold_scores.append(score)
@@ -212,15 +268,27 @@ class TemporalCV:
             print("CV is disabled. Using default hyperparameters.")
             final_hp = self.model_handler.hp_config['default']
             if 'n_estimators' not in final_hp and self.n_estimators_static:
-                final_hp['n_estimators'] = self.n_estimators_static
+                 final_hp['n_estimators'] = self.n_estimators_static
             self.best_model_ = self.model_handler.create_model(final_hp)
             return
 
         print(f"Starting cross-validation for {self.model_handler.model_name} model...")
 
-        def print_best_params(study, trial):
-            print(f"Iteration {trial.number}: Best value so far = {study.best_value:.5f}")
-            print(f"Best params so far: {study.best_params}")
+        def save_study_callback(study, trial):
+            if trial.number > 0 and (trial.number + 1) % 5 == 0:
+                best_params_serializable = {k: (v.item() if hasattr(v, 'item') else v) for k, v in study.best_params.items()}
+                
+                results_to_save = {
+                    'model_name': self.model_handler.model_name,
+                    'best_value (RMSE)': study.best_value,
+                    'best_params': best_params_serializable,
+                    'trials': study.trials_dataframe().to_dict(orient='records')
+                }
+
+                filename = f"outputs/{self.model_handler.model_name}_{self.run_name_suffix}_study.yaml"
+                with open(filename, 'w') as f:
+                    yaml.dump(results_to_save, f, sort_keys=False)
+                print(f"\n--- Study results periodically saved to {filename} at iteration {trial.number + 1} ---")
 
         sampler = optuna.samplers.TPESampler(seed=self.model_handler.static_params.get('seed'), n_startup_trials=self.cv_params.get('initial_set', 10))
         self.study_ = optuna.create_study(direction='minimize', study_name=f'{self.model_handler.model_name}_cv', sampler=sampler)
@@ -228,11 +296,26 @@ class TemporalCV:
             self._objective_optuna,
             n_trials=self.cv_params.get('max_iterations', 50),
             show_progress_bar=True,
-            callbacks=[print_best_params]
+            callbacks=[save_study_callback]
         )
         self.best_params_ = self.study_.best_params
         print("\nBest hyperparameters found:")
         print(self.best_params_)
+
+        if self.study_:
+            best_params_serializable = {k: (v.item() if hasattr(v, 'item') else v) for k, v in self.study_.best_params.items()}
+            
+            results_to_save = {
+                'model_name': self.model_handler.model_name,
+                'best_value (RMSE)': self.study_.best_value,
+                'best_params': best_params_serializable,
+                'trials': self.study_.trials_dataframe().to_dict(orient='records')
+            }
+
+            filename = f"outputs/{self.model_handler.model_name}_{self.run_name_suffix}_study.yaml"
+            with open(filename, 'w') as f:
+                yaml.dump(results_to_save, f, sort_keys=False)
+            print(f"\nFinal study results saved to {filename}")
 
         final_hp = self.best_params_.copy()
         if self.early_stopping_enable:
@@ -242,7 +325,7 @@ class TemporalCV:
         print(self.best_model_)
 
 # ------------------------------------------------------------
-# 3. Configuration and Execution
+# Configuration and Execution
 # ------------------------------------------------------------
 if __name__ == '__main__':
     # --- Create Dummy Data ---
@@ -260,13 +343,14 @@ if __name__ == '__main__':
     # --- General Parameters (YAML content) ---
     params = {
         'toggle': {'cv_enable': True},
-        'cv': {
-            'num_folds': 5,
-            'initial_set': 5,
-            'max_iterations': 10, # Reduced for faster demo
+        'cv': { 
+            'num_folds': 3, 
+            'initial_set': 3, 
+            'max_iterations': 15,
+            'run_name_suffix': 'reproducible_nn_test'
         },
         'model': {
-            'name': 'FeedForwardNNRegressorWithEmbeddings', # <-- SELECT MODEL HERE
+            'name': 'WideAndDeepRegressor', # <-- SELECT MODEL HERE
             'objective': 'regression_l1', 'verbose': -1, 'deterministic': True,
             'force_row_wise': True, 'seed': 42,
             'predictor': {
@@ -279,49 +363,49 @@ if __name__ == '__main__':
                 'validation_metric': 'rmse', 'link_max_depth': True,
             },
             'hyperparameter': {
-                'LightGBM': {
+                'LightGBM': {},
+                'RandomForestRegressor': {},
+                'LinearRegression': {},
+                'FeedForwardNNRegressorWithEmbeddings': {},
+                'FeedForwardNNRegressorWithProjection': {},
+                'ConstrainedRegressorProjectedWithEmbeddings': {},
+                'TabTransformerRegressor': {
                     'range': {
-                        'learning_rate': [0.01, 0.2], 'max_bin': [64, 256], 'num_leaves': [20, 100],
-                        'add_to_linked_depth': [1, 5], 'feature_fraction': [0.5, 1.0],
-                        'min_gain_to_split': [1e-8, 1.0], 'min_data_in_leaf': [10, 50],
-                        'max_cat_threshold': [16, 64], 'min_data_per_group': [50, 200],
-                        'cat_smooth': [1.0, 30.0], 'cat_l2': [1.0, 100.0],
-                        'lambda_l1': [1e-8, 10.0], 'lambda_l2': [1e-8, 10.0],
-                        'n_estimators': [50, 1000]
-                    },
-                    'default': {'learning_rate': 0.05, 'num_leaves': 31}
-                },
-                'RandomForestRegressor': {
-                    'range': {
-                        'n_estimators': [50, 500], 'max_depth': [5, 50],
-                        'min_samples_split': [2, 20], 'min_samples_leaf': [1, 10],
-                        'max_features': [0.5, 1.0]
-                    },
-                    'default': {'n_estimators': 100, 'max_depth': 10}
-                },
-                'LinearRegression': {
-                    'range': { 'fit_intercept': [True, False] },
-                    'default': {'fit_intercept': True}
-                },
-                'FeedForwardNNRegressorWithEmbeddings': {
-                    'range': {
-                        'learning_rate': [1e-4, 1e-2],
-                        'batch_size': [16, 64],
-                        'num_epochs': [20, 100],
-                        # Defines search space for hidden layers:
-                        # [[min_layers, max_layers], [min_units, max_units]]
-                        'hidden_sizes': [[1, 2], [128, 512]]
+                        'learning_rate': [1e-4, 1e-2], 'batch_size': [16, 64],
+                        'num_epochs': [20, 50], 'mlp_hidden_dims': [[1, 3], [32, 128]],
+                        'num_attention_layers': [1, 4], 'num_attention_heads': [2, 8]
                     },
                     'default': {
-                        'learning_rate': 0.001, 'batch_size': 32,
-                        'num_epochs': 50, 'hidden_sizes': [256, 128]
+                        'learning_rate': 0.001, 'batch_size': 32, 'num_epochs': 30,
+                        'mlp_hidden_dims': [64, 32], 'num_attention_layers': 2,
+                        'num_attention_heads': 4
+                    }
+                },
+                'WideAndDeepRegressor': {
+                    'range': {
+                        'learning_rate': [1e-4, 1e-2], 'batch_size': [16, 128],
+                        'num_epochs': [20, 50], 'hidden_sizes': [[2, 4], [64, 512]]
+                    },
+                    'default': {
+                        'learning_rate': 0.001, 'batch_size': 64, 'num_epochs': 30,
+                        'hidden_sizes': [256, 128]
                     }
                 }
             }
         }
     }
+    
+    # --- Set seeds for reproducibility ---
+    seed = params['model'].get('seed', 42)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    # The following two lines are often recommended for full reproducibility with CUDA
+    # torch.backends.cudnn.deterministic = True
+    # torch.backends.cudnn.benchmark = False
 
-    # --- Execution ---
+    # --- Execution Logic ---
     model_name_to_run = params['model']['name']
     print(f"----- RUNNING FOR MODEL: {model_name_to_run.upper()} -----")
 
@@ -330,7 +414,7 @@ if __name__ == '__main__':
         'objective': params['model']['objective'], 'verbose': params['model']['verbose'],
         'deterministic': params['model']['deterministic'], 'force_row_wise': params['model']['force_row_wise'],
         'seed': params['model']['seed'],
-        'predictor': params['model']['predictor'] # Pass predictor info for NN
+        'predictor': params['model']['predictor']
     })
     model_params['early_stopping_enable'] = model_params['validation_prop'] > 0 and model_params['stop_iter'] > 0
 
@@ -354,6 +438,7 @@ if __name__ == '__main__':
         data=dummy_data,
         target_col='meta_sale_price',
         date_col='meta_sale_date',
-        preproc_pipeline=pipeline
+        preproc_pipeline=pipeline,
+        run_name_suffix=params['cv'].get('run_name_suffix', 'default')
     )
     temporal_cv_process.run()

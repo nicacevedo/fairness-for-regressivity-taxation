@@ -46,10 +46,14 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 # === My imports ==
 # 1. Models
 from nn_models.nn_unconstrained import FeedForwardNNRegressor, FeedForwardNNRegressorWithEmbeddings
+from nn_models.unconstrained.FeedForwardNNRegressorWithEmbeddings2 import FeedForwardNNRegressorWithEmbeddings2
 from nn_models.nn_constrained_cpu_v2 import FeedForwardNNRegressorWithProjection # FeedForwardNNRegressorWithConstraints, 
 from nn_models.nn_constrained_cpu_v3 import ConstrainedRegressorProjectedWithEmbeddings
 from nn_models.unconstrained.TabTransformerRegressor import TabTransformerRegressor
+from nn_models.unconstrained.TabTransformerRegressor2 import TabTransformerRegressor2
 from nn_models.unconstrained.WideAndDeepRegressor import WideAndDeepRegressor
+from nn_models.unconstrained.TabNetRegressor import TabNetRegressor
+from nn_models.unconstrained.SpatialGNNRegressor import SpatialGNNRegressor
 
 # 2. Pipelines
 from R.recipes import model_main_pipeline, model_lin_pipeline, my_model_lin_pipeline
@@ -81,7 +85,7 @@ sample_size = 100000 # SAMPLE SIZE
 apply_resampling = False
 
 emb_pipeline_names = ["ModelMainRecipe", "ModelMainRecipeImputer", "build_model_pipeline_supress_onehot"]
-emb_pipeline_name = emb_pipeline_names[1]
+emb_pipeline_name = emb_pipeline_names[2]
 
 
 model_names = [
@@ -92,13 +96,21 @@ model_names = [
     # "FeedForwardNNRegressorWithProjection",
     # "ConstrainedRegressorProjectedWithEmbeddings",
 
+    # Modified
+    "FeedForwardNNRegressorWithEmbeddings2",
     # More unconstrained
     # "TabTransformerRegressor",
-    "WideAndDeepRegressor",
+    # "TabTransformerRegressor2",
+    # "WideAndDeepRegressor",
+    # "TabNetRegressor",
+    # "SpatialGNNRegressor",
 ]
-emb_model_names = ["LightGBM", 
-                   "FeedForwardNNRegressorWithEmbeddings", "FeedForwardNNRegressorWithProjection", "ConstrainedRegressorProjectedWithEmbeddings",
-                   "TabTransformerRegressor", "WideAndDeepRegressor"]
+emb_model_names = [
+    "LightGBM", 
+    "FeedForwardNNRegressorWithEmbeddings", "FeedForwardNNRegressorWithProjection", "ConstrainedRegressorProjectedWithEmbeddings",
+    "TabTransformerRegressor","TabTransformerRegressor2", "WideAndDeepRegressor", "TabNetRegressor", "SpatialGNNRegressor"
+    "FeedForwardNNRegressorWithEmbeddings2"
+]
 lin_model_names = ["LinearRegression", "FeedForwardNNRegressor" ]
 
 
@@ -174,9 +186,9 @@ print("Creating and fitting linear baseline model")
 # training_data_full = training_data_full.copy()
 
 # Clean columns
-train = train[params['model']['predictor']['all'] + params['model']['predictor']['id'] + ['meta_sale_price']]
+train = train[params['model']['predictor']['all'] + params['model']['predictor']['id'] + ['meta_sale_price', 'meta_sale_date']]
 # train = train[params['model']['predictor']['all'] + params['model']['predictor']['id'] + ['meta_sale_price'] + ["meta_sale_date"]] # Sale date for CV split (?)
-test = test[params['model']['predictor']['all'] + params['model']['predictor']['id'] + ['meta_sale_price']]
+test = test[params['model']['predictor']['all'] + params['model']['predictor']['id'] + ['meta_sale_price', 'meta_sale_date']]
 
 # Split the data in X, y
 X_train_prep, y_train_fit_log = train.drop(columns=['meta_sale_price']), train['meta_sale_price'] 
@@ -261,6 +273,15 @@ X_test_fit_emb = model_emb_pipeline.transform(X_test_prep).drop(columns=params['
 #         X_test_fit_emb[col] = X_test_fit_emb[col].astype("category")
 
 
+
+# print("All features:")
+# for col in X_train_fit_emb.columns:
+#     if len(X_train_fit_emb[col].unique()) < 10:
+#         print(col, X_train_fit_emb[col].dtype, X_train_fit_emb[col].unique()) 
+#     else:
+#         print(col, X_train_fit_emb[col].dtype, X_train_fit_emb[col].unique()[:10]) 
+# # print(X_train_fit_emb.columns.tolist())
+# exit()
 # ==========================================================================================
 #                       Comparisson of the different models
 # ==========================================================================================
@@ -356,7 +377,33 @@ for model_name in model_names:
               num_leaves=366, objective='rmse', random_state=2025,
               reg_alpha=0.06676779724096571, reg_lambda=30.039145583263345,
               verbose=-1)
-
+        
+        # Temp try:
+        num_leaves = 33
+        add_to_linked_depth = 5
+        model = lgb.LGBMRegressor(
+            learning_rate=0.01851839183501252,
+            max_bin=484, 
+            num_leaves=num_leaves, 
+            add_to_linked_depth=add_to_linked_depth,
+            feature_fraction=0.3487421794838527,
+            min_gain_to_split=0.0019132666418427095, 
+            min_data_in_leaf=329, 
+            max_cat_threshold=14, 
+            min_data_per_group=366,
+            cat_smooth=30.52247516945211,
+            cat_l2=15.996397825809856, 
+            lambda_l1=0.003785404852255749, # reg_alpha
+            lambda_l2=0.029397028671217528,# reg_lambda
+            # Static?
+            n_estimators=2500,
+            # Fixed ones
+            random_state=42,#2025,
+            deterministic=True, 
+            force_row_wise=True, 
+            max_depth=floor(np.log2(num_leaves)) + add_to_linked_depth,
+            objective='rmse', 
+            verbose=-1)
 
         model.fit(
             X_train_fit_emb, y_train_fit_log_emb,
@@ -400,10 +447,34 @@ for model_name in model_names:
         #     categorical_features=large_categories, output_size=1,
         #     **{'learning_rate': 0.004370861069626263, 'batch_size': 32, 'num_epochs': 18, 'hidden_sizes': [148, 148]}
         # )
-        # # 50 iters with 100k
+        # # # 50 iters with 100k
+        # model = FeedForwardNNRegressorWithEmbeddings(
+        #     categorical_features=large_categories, output_size=1, random_state=42,
+        #     **{'learning_rate': 0.004172541632024457, 'batch_size': 24, 'num_epochs': 15, 'hidden_sizes': [184, 235]}
+        # )
+        # Temp:
         model = FeedForwardNNRegressorWithEmbeddings(
             categorical_features=large_categories, output_size=1, random_state=42,
-            **{'learning_rate': 0.004172541632024457, 'batch_size': 24, 'num_epochs': 15, 'hidden_sizes': [184, 235]}
+            learning_rate= 0.003702078773155906,
+            batch_size= 31,
+            num_epochs= 500,#34,
+            hidden_sizes=[95,82,79],
+        )
+        # print(X_train_fit_emb.isna().sum())
+        # exit()
+        model.fit(X_train_fit_emb, y_train_fit_log_emb)
+
+    elif model_name == "FeedForwardNNRegressorWithEmbeddings2":
+        pred_vars = [col for col in params['model']['predictor']['all'] if col in X_train_fit_emb.columns] 
+        large_categories = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in pred_vars if c.startswith('loc_school_')]
+        # Temp
+        model = FeedForwardNNRegressorWithEmbeddings(
+            categorical_features=large_categories, output_size=1, random_state=42,
+            learning_rate= 1e-3,
+            batch_size= 16,
+            num_epochs= 50,
+            hidden_sizes=[1024],
+            patience=10,
         )
         # print(X_train_fit_emb.isna().sum())
         # exit()
@@ -482,20 +553,81 @@ for model_name in model_names:
     elif model_name == "TabTransformerRegressor":
         cat_vars = cat_vars=params['model']['predictor']['categorical']
         coord_vars = ["loc_longitude", "loc_latitude"]
+        # model = TabTransformerRegressor(
+        #     cat_vars, coord_vars, output_size=1, random_state=42,
+        #         batch_size=16, learning_rate=0.001, num_epochs=30, transformer_dim=16, 
+        #         transformer_heads=8, transformer_layers=6,
+        #          dropout=0.1, loss_fn='focal_mse' #  'mse', 'focal_mse', or 'huber'.
+        # )
+        # Temp:
         model = TabTransformerRegressor(
             cat_vars, coord_vars, output_size=1, random_state=42,
-                batch_size=16, learning_rate=0.001, num_epochs=30, transformer_dim=16, 
-                transformer_heads=8, transformer_layers=6,
-                 dropout=0.1, loss_fn='focal_mse' #  'mse', 'focal_mse', or 'huber'.
+            learning_rate= 0.001845632975218141,
+            batch_size= 48,
+            num_epochs= 31,
+            transformer_dim= 16,
+            transformer_heads= 8,
+            transformer_layers= 6,
+            dropout= 0.3171215578791728,
+            loss_fn= "mse",
+        )
+        model.fit(X_train_fit_emb, y_train_fit_log_emb)
+
+    elif model_name == "TabTransformerRegressor2":
+        cat_vars = cat_vars=params['model']['predictor']['categorical']
+        coord_vars = ["loc_longitude", "loc_latitude"]
+        # Temp
+        model = TabTransformerRegressor2(
+            cat_vars, coord_vars, output_size=1, random_state=42,
+            learning_rate= 0.001845632975218141,
+            batch_size= 48,
+            num_epochs= 31,
+            transformer_dim= 16,
+            transformer_heads= 8,
+            transformer_layers= 6,
+            dropout= 0.3171215578791728,
+            loss_fn= "mse",
+            patience=5,
         )
         model.fit(X_train_fit_emb, y_train_fit_log_emb)
 
     elif model_name == "WideAndDeepRegressor":
         cat_vars = cat_vars=params['model']['predictor']['categorical']
+        # model = WideAndDeepRegressor(
+        #     categorical_features=cat_vars, output_size=1, random_state=42,
+        #     batch_size=16, learning_rate=0.001,
+        #     num_epochs=50, hidden_sizes=[200, 100]
+        # )
+        # Temp:
         model = WideAndDeepRegressor(
             categorical_features=cat_vars, output_size=1, random_state=42,
-            batch_size=16, learning_rate=0.001,
-            num_epochs=10, hidden_sizes=[200, 100]
+            learning_rate= 0.0037121387535015093,
+            batch_size= 49,
+            num_epochs= 20, #10,
+            hidden_sizes=[403, 277, 173, 70],
+        )
+        model.fit(X_train_fit_emb, y_train_fit_log_emb)
+
+    elif model_name == "TabNetRegressor":
+        cat_vars = cat_vars=params['model']['predictor']['categorical']
+        coord_vars = ["loc_longitude", "loc_latitude"]
+        model = TabNetRegressor(
+            cat_vars, coord_vars, output_size=1, random_state=42,
+            batch_size=32, learning_rate=0.001, num_epochs=20, n_steps=3, 
+            feature_dim=4, attention_dim=4, sparsity_lambda=1e-5, loss_fn='mse', 
+        )
+        model.fit(X_train_fit_emb, y_train_fit_log_emb)
+
+    elif model_name == "SpatialGNNRegressor":
+        cat_vars = cat_vars=params['model']['predictor']['categorical']
+        coord_vars = ["loc_longitude", "loc_latitude"]
+        graph_cat_features = ['meta_nbhd_code', 'loc_school_elementary_district_geoid']
+
+        model = SpatialGNNRegressor(
+            cat_vars, coord_vars, graph_cat_features, output_size=1, random_state=42,
+            k_neighbors=10, batch_size=32, learning_rate=0.001, num_epochs=100,
+            gnn_type='gat', gat_heads=4,
+            gnn_hidden_dim=64, gnn_layers=3, mlp_hidden_sizes=[32, 16], loss_fn='huber',
         )
         model.fit(X_train_fit_emb, y_train_fit_log_emb)
 
@@ -551,6 +683,7 @@ for model_name in model_names:
 
 
 
+
 exit()
 
 
@@ -562,10 +695,11 @@ params = {
     'cv': {
         'num_folds': 5,#params['cv']['num_folds'],
         'initial_set': params['cv']['initial_set'],
-        'max_iterations': 500, # Reduced for faster demo
+        'max_iterations': 1000, # Reduced for faster demo
+        'run_name_suffix': '1000iter_v0'
     },
     'model': {
-        'name': 'FeedForwardNNRegressorWithProjection', # <-- SELECT MODEL HERE
+        'name': 'LightGBM', # <-- SELECT MODEL HERE
         'objective': 'regression_l1', 'verbose': -1, 'deterministic': True,
         'force_row_wise': True, 'seed': 42,
         'predictor': {
@@ -581,13 +715,20 @@ params = {
         'hyperparameter': {
             'LightGBM': {
                 'range': {
-                    'learning_rate': [0.01, 0.2], 'max_bin': [64, 256], 'num_leaves': [20, 100],
-                    'add_to_linked_depth': [1, 5], 'feature_fraction': [0.5, 1.0],
-                    'min_gain_to_split': [1e-8, 1.0], 'min_data_in_leaf': [10, 50],
-                    'max_cat_threshold': [16, 64], 'min_data_per_group': [50, 200],
-                    'cat_smooth': [1.0, 30.0], 'cat_l2': [1.0, 100.0],
-                    'lambda_l1': [1e-8, 10.0], 'lambda_l2': [1e-8, 10.0],
-                    'n_estimators': [50, 1000]
+                    "n_estimators": params['model']['hyperparameter']['range']['num_iterations'],
+                    "learning_rate": [10**x for x in params['model']['hyperparameter']['range']['learning_rate']],  # 10 ^ X,
+                    "max_bin": params['model']['hyperparameter']['range']['max_bin'], #[50, 512],
+                    "num_leaves": params['model']['hyperparameter']['range']['num_leaves'], #[32, 2048],
+                    "add_to_linked_depth": params['model']['hyperparameter']['range']['add_to_linked_depth'], #[1, 7],
+                    "feature_fraction": params['model']['hyperparameter']['range']['feature_fraction'], #[0.3, 0.7],
+                    "min_gain_to_split": [10**x for x in params['model']['hyperparameter']['range']['min_gain_to_split']], #[-3.0, 4.0]  # 10 ^ X,,
+                    "min_data_in_leaf": params['model']['hyperparameter']['range']['min_data_in_leaf'], #[2, 400],
+                    "max_cat_threshold": params['model']['hyperparameter']['range']['max_cat_threshold'], #[10, 250],
+                    "min_data_per_group": params['model']['hyperparameter']['range']['min_data_per_group'], #[2, 400],
+                    "cat_smooth": params['model']['hyperparameter']['range']['cat_smooth'], #[10.0, 200.0],
+                    "cat_l2": [10**x for x in params['model']['hyperparameter']['range']['cat_l2']], #[-3, 2]  # 10 ^ X,
+                    "lambda_l1": [10**x for x in params['model']['hyperparameter']['range']['lambda_l1']], #[-3, 2]  # 10 ^ X,
+                    "lambda_l2": [10**x for x in params['model']['hyperparameter']['range']['lambda_l2']], #[-3, 2]  # 10 ^ X,
                 },
                 'default': {'learning_rate': 0.05, 'num_leaves': 31}
             },
@@ -605,12 +746,12 @@ params = {
             },
             'FeedForwardNNRegressorWithEmbeddings': {
                 'range': {
-                    'learning_rate': [1e-3, 1e-2],
-                    'batch_size': [16, 32],
-                    'num_epochs': [10, 20],
+                    'learning_rate': [1e-4, 1e-2],
+                    'batch_size': [16, 128],
+                    'num_epochs': [10, 50],
                     # Defines search space for hidden layers:
                     # [[min_layers, max_layers], [min_units, max_units]]
-                    'hidden_sizes': [[1, 2], [128, 256]]
+                    'hidden_sizes': [[1, 3], [64, 256]]
                 },
                 'default': {
                     'learning_rate': 1e-3, 'batch_size': 16,
@@ -629,12 +770,35 @@ params = {
                         'learning_rate': 0.001, 'batch_size': 32, 'num_epochs': 30,
                         'hidden_sizes': [128, 64], 'dev_thresh': 0.15
                     }
-            }
+            },
+            'TabTransformerRegressor': {
+                'range': {
+                    'learning_rate': [1e-4, 1e-2], 'batch_size': [16, 128],
+                    'num_epochs': [10, 50], 'transformer_dim': [16, 16],
+                    'transformer_heads': [8, 8], 'transformer_layers': [2, 8],
+                    'dropout':[0.1, 0.5], 'loss_fn': ['mse', 'focal_mse', 'huber'],
+                },
+                'default': {
+                    'learning_rate': 0.001, 'batch_size': 32, 'num_epochs': 30,
+                    'mlp_hidden_dims': [64, 32], 'num_attention_layers': 2,
+                    'num_attention_heads': 4
+                }
+            },
+            'WideAndDeepRegressor': {
+                'range': {
+                    'learning_rate': [1e-4, 1e-2], 'batch_size': [16, 128],
+                    'num_epochs': [10, 50], 'hidden_sizes': [[2, 4], [64, 512]]
+                },
+                'default': {
+                    'learning_rate': 0.001, 'batch_size': 64, 'num_epochs': 30,
+                    'hidden_sizes': [256, 128]
+                }
+            },
         }
     }
 }
 
-# --- Execution ---
+# --- Execution Logic ---
 model_name_to_run = params['model']['name']
 print(f"----- RUNNING FOR MODEL: {model_name_to_run.upper()} -----")
 
@@ -643,22 +807,22 @@ model_params.update({
     'objective': params['model']['objective'], 'verbose': params['model']['verbose'],
     'deterministic': params['model']['deterministic'], 'force_row_wise': params['model']['force_row_wise'],
     'seed': params['model']['seed'],
-    'predictor': params['model']['predictor'] # Pass predictor info for NN
+    'predictor': params['model']['predictor']
 })
 model_params['early_stopping_enable'] = model_params['validation_prop'] > 0 and model_params['stop_iter'] > 0
 
-# # pipeline = ModelMainRecipe(
+pipeline = ModelMainRecipe(
 # pipeline = ModelMainRecipeImputer(
-#     outcome="meta_sale_price",
-#     pred_vars=params['model']['predictor']['all'],
-#     cat_vars=params['model']['predictor']['categorical'],
-#     id_vars=params['model']['predictor']['id']
-# )
-pipeline = build_model_pipeline_supress_onehot( # WARNING: We only changed to this to perform changes on the pipeline
+    outcome="meta_sale_price",
     pred_vars=params['model']['predictor']['all'],
     cat_vars=params['model']['predictor']['categorical'],
     id_vars=params['model']['predictor']['id']
 )
+# pipeline = build_model_pipeline_supress_onehot( # WARNING: We only changed to this to perform changes on the pipeline
+#         pred_vars=params['model']['predictor']['all'],
+#         cat_vars=params['model']['predictor']['categorical'],
+#         id_vars=params['model']['predictor']['id']
+#     )
 
 handler = ModelHandler(
     model_name=model_name_to_run,
@@ -670,10 +834,11 @@ temporal_cv_process = TemporalCV(
     model_handler=handler,
     cv_params=params['cv'],
     cv_enable=params['toggle']['cv_enable'],
-    data=training_data_full.loc[train.index, train.columns.tolist() + ["meta_sale_date"]],
+    data=train,
     target_col='meta_sale_price',
     date_col='meta_sale_date',
-    preproc_pipeline=pipeline
+    preproc_pipeline=pipeline,
+    run_name_suffix=params['cv'].get('run_name_suffix', 'default')
 )
 temporal_cv_process.run()
 
