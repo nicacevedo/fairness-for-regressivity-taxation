@@ -72,21 +72,18 @@ class FocalMSELoss(nn.Module):
         return (focal_weight * mse_loss).mean()
 
 # ==============================================================================
-# 3. The Enhanced TabTransformer Model with [CLS] Token
+# 3. The TabTransformer Model
 # ==============================================================================
 
 class TabTransformer(nn.Module):
     """
-    A Transformer-based model for tabular data, enhanced with a [CLS] token.
+    A Transformer-based model for tabular data.
     """
     def __init__(self, embedding_specs, num_numerical_features, num_coord_features,
                  fourier_mapping_size, transformer_dim, transformer_heads,
                  transformer_layers, dropout, output_size):
         super().__init__()
         
-        # --- [CLS] Token ---
-        self.cls_token = nn.Parameter(torch.randn(1, 1, transformer_dim))
-
         # --- Feature Tokenizers ---
         self.embedding_layers = nn.ModuleList([nn.Embedding(num, dim) for num, dim in embedding_specs])
         total_embedding_dim = sum(dim for _, dim in embedding_specs)
@@ -96,30 +93,34 @@ class TabTransformer(nn.Module):
         self.fourier_features = None
         if num_coord_features > 0:
             self.fourier_features = FourierFeatures(num_coord_features, fourier_mapping_size)
+            # Each coordinate feature gets projected to 2 * mapping_size
             self.coord_projector = nn.Linear(2 * fourier_mapping_size, transformer_dim)
 
         # --- Transformer Encoder ---
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=transformer_dim, nhead=transformer_heads,
-            dropout=dropout, batch_first=True, activation='gelu'
+            dropout=dropout, batch_first=True
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=transformer_layers)
         
         # --- Final MLP Head ---
+        # Project categorical embeddings to the transformer dimension
         self.cat_projector = nn.Linear(total_embedding_dim, transformer_dim * len(embedding_specs))
         
-        # The final layer now only takes the [CLS] token's output
-        self.output_layer = nn.Linear(transformer_dim, output_size)
+        # The final layer projects the processed tokens to the output size
+        self.output_layer = nn.Linear(transformer_dim * self.get_num_tokens(num_numerical_features, num_coord_features), output_size)
+
+    def get_num_tokens(self, num_numerical, num_coord):
+        return len(self.embedding_layers) + num_numerical + (1 if num_coord > 0 else 0)
 
     def forward(self, x_cat, x_num, x_coord):
         tokens = []
         
         # Categorical tokens
-        if x_cat.size(1) > 0:
-            cat_embeddings = [emb_layer(x_cat[:, i]) for i, emb_layer in enumerate(self.embedding_layers)]
-            cat_embeddings = torch.cat(cat_embeddings, dim=1)
-            cat_tokens = self.cat_projector(cat_embeddings).view(x_cat.size(0), len(self.embedding_layers), -1)
-            tokens.append(cat_tokens)
+        cat_embeddings = [emb_layer(x_cat[:, i]) for i, emb_layer in enumerate(self.embedding_layers)]
+        cat_embeddings = torch.cat(cat_embeddings, dim=1)
+        cat_tokens = self.cat_projector(cat_embeddings).view(x_cat.size(0), len(self.embedding_layers), -1)
+        tokens.append(cat_tokens)
         
         # Numerical tokens
         if x_num.size(1) > 0:
@@ -132,30 +133,24 @@ class TabTransformer(nn.Module):
             coord_token = self.coord_projector(coord_fourier).unsqueeze(1)
             tokens.append(coord_token)
             
-        # Combine all feature tokens
-        feature_tokens = torch.cat(tokens, dim=1)
-        
-        # Prepend the [CLS] token
-        cls_tokens = self.cls_token.expand(feature_tokens.size(0), -1, -1)
-        x = torch.cat([cls_tokens, feature_tokens], dim=1)
-        
-        # Pass through the Transformer
+        # Combine all tokens and pass through the Transformer
+        x = torch.cat(tokens, dim=1)
         x = self.transformer_encoder(x)
         
-        # Use only the output of the [CLS] token for prediction
-        cls_output = x[:, 0]
-        return self.output_layer(cls_output)
+        # Flatten the output and pass to the final layer
+        x = x.flatten(start_dim=1)
+        return self.output_layer(x)
 
 # ==============================================================================
-# 4. The Main User-Facing Wrapper Class with Enhancements
+# 4. The Main User-Facing Wrapper Class
 # ==============================================================================
 class TabTransformerRegressor2:
 
     def __init__(self, categorical_features, coord_features, output_size=1, batch_size=32, learning_rate=0.001,
                  num_epochs=100, transformer_dim=32, transformer_heads=8, transformer_layers=6,
                  dropout=0.1, loss_fn='mse', patience=10, random_state=None):
-        self.categorical_features = list(categorical_features)
-        self.coord_features = list(coord_features)
+        self.categorical_features = categorical_features
+        self.coord_features = coord_features
         self.numerical_features = []
         self.output_size = output_size
         self.batch_size = batch_size
@@ -173,43 +168,38 @@ class TabTransformerRegressor2:
         self.scaler = StandardScaler()
         self.category_mappings = {}
 
-    def _feature_engineer(self, X):
-        """Applies feature engineering steps."""
-        X_eng = X.copy()
-        if 'char_yrblt' in X_eng.columns:
-            print("Binning 'char_yrblt' into decades.")
-            bins = [1900, 1920, 1940, 1960, 1980, 2000, 2025]
-            labels = ['pre-1920', '1920-1940', '1940-1960', '1960-1980', '1980-2000', 'post-2000']
-            X_eng['yrblt_decade'] = pd.cut(X_eng['char_yrblt'], bins=bins, labels=labels, right=False).astype(str)
-            
-            if 'yrblt_decade' not in self.categorical_features:
-                self.categorical_features.append('yrblt_decade')
-        return X_eng
-
-    def fit(self, X, y):
-        X_fit = self._feature_engineer(X)
-        y_fit = y.copy()
+    def fit(self, X, y, X_val=None, y_val=None):
+        self.numerical_features = [col for col in X.columns if col not in self.categorical_features and col not in self.coord_features]
         
-        self.numerical_features = [col for col in X_fit.columns if col not in self.categorical_features and col not in self.coord_features]
-
         if self.random_state is not None:
             np.random.seed(self.random_state)
             torch.manual_seed(self.random_state)
             random.seed(self.random_state)
 
-        # Split data for early stopping
-        X_train, X_val, y_train, y_val = train_test_split(X_fit, y_fit, test_size=0.2, random_state=self.random_state)
+        # Handle validation set
+        if X_val is not None and y_val is not None:
+            X_train, y_train = X.copy(), y.copy()
+            X_val, y_val = X_val.copy(), y_val.copy()
+        else:
+            X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=self.random_state)
 
+        # Fit scaler on training data only and transform both sets
         if self.numerical_features:
             self.scaler.fit(X_train[self.numerical_features])
-            X_train[self.numerical_features] = self.scaler.transform(X_train[self.numerical_features])
-            X_val[self.numerical_features] = self.scaler.transform(X_val[self.numerical_features])
+            X_train.loc[:, self.numerical_features] = self.scaler.transform(X_train[self.numerical_features])
+            X_val.loc[:, self.numerical_features] = self.scaler.transform(X_val[self.numerical_features])
 
         for col in self.categorical_features:
             self.category_mappings[col] = {cat: i for i, cat in enumerate(X_train[col].unique())}
         
         def _create_tensors(X_df, y_series):
-            X_cat = torch.stack([torch.tensor(X_df[col].map(self.category_mappings[col]).fillna(0).values, dtype=torch.long) for col in self.categorical_features], dim=1)
+            # Create a list of tensors for categorical features without modifying X_df
+            X_cat_tensors = [
+                torch.tensor(X_df[col].map(self.category_mappings[col]).fillna(0).values, dtype=torch.long)
+                for col in self.categorical_features
+            ]
+            X_cat = torch.stack(X_cat_tensors, dim=1)
+            
             X_num = torch.tensor(X_df[self.numerical_features].values, dtype=torch.float32)
             X_coord = torch.tensor(X_df[self.coord_features].values, dtype=torch.float32)
             y_tensor = torch.tensor(y_series.values, dtype=torch.float32).unsqueeze(1)
@@ -226,19 +216,24 @@ class TabTransformerRegressor2:
         embedding_specs = [(len(self.category_mappings[col]), min(50, (len(self.category_mappings[col])+1)//2)) for col in self.categorical_features]
         
         self.model = TabTransformer(
-            embedding_specs=embedding_specs, num_numerical_features=len(self.numerical_features),
-            num_coord_features=len(self.coord_features), fourier_mapping_size=16,
-            transformer_dim=self.transformer_dim, transformer_heads=self.transformer_heads,
-            transformer_layers=self.transformer_layers, dropout=self.dropout, output_size=self.output_size
+            embedding_specs=embedding_specs,
+            num_numerical_features=len(self.numerical_features),
+            num_coord_features=len(self.coord_features),
+            fourier_mapping_size=16,
+            transformer_dim=self.transformer_dim,
+            transformer_heads=self.transformer_heads,
+            transformer_layers=self.transformer_layers,
+            dropout=self.dropout,
+            output_size=self.output_size
         ).to(device)
         
         criterion = FocalMSELoss() if self.loss_fn_name == 'focal_mse' else nn.HuberLoss() if self.loss_fn_name == 'huber' else nn.MSELoss()
         optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=self.patience // 2, factor=0.5)
-
-        print("Starting Enhanced TabTransformer training...")
+        
+        print("Starting TabTransformer training...")
         best_val_loss = float('inf')
         patience_counter = 0
+        best_model_state = None
 
         for epoch in range(self.num_epochs):
             self.model.train()
@@ -254,7 +249,6 @@ class TabTransformerRegressor2:
 
             avg_train_loss = total_train_loss / len(train_loader)
 
-            # Validation loop
             self.model.eval()
             total_val_loss = 0
             with torch.no_grad():
@@ -265,27 +259,27 @@ class TabTransformerRegressor2:
                     total_val_loss += loss.item()
             
             avg_val_loss = total_val_loss / len(val_loader)
-            scheduler.step(avg_val_loss)
-
             print(f'Epoch [{epoch+1}/{self.num_epochs}], Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}')
 
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 patience_counter = 0
-                torch.save(self.model.state_dict(), 'best_model.pth')
+                best_model_state = self.model.state_dict()
             else:
                 patience_counter += 1
                 if patience_counter >= self.patience:
                     print("Early stopping triggered.")
                     break
         
-        self.model.load_state_dict(torch.load('best_model.pth'))
+        if best_model_state:
+            self.model.load_state_dict(best_model_state)
         print("Training finished.")
 
     def predict(self, X):
-        if self.model is None: raise RuntimeError("You must call fit() before predicting.")
+        if self.model is None:
+            raise RuntimeError("You must call fit() before predicting.")
         
-        X_pred = self._feature_engineer(X)
+        X_pred = X.copy()
         if self.numerical_features:
             X_pred[self.numerical_features] = self.scaler.transform(X_pred[self.numerical_features])
         for col in self.categorical_features:
@@ -307,3 +301,11 @@ class TabTransformerRegressor2:
                 all_predictions.append(predictions.cpu().numpy())
         
         return np.concatenate(all_predictions).flatten()
+
+    def set_params(self, **params):
+        for key, value in params.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+            else:
+                warnings.warn(f"Invalid parameter {key} for estimator {self.__class__.__name__}.")
+        return self

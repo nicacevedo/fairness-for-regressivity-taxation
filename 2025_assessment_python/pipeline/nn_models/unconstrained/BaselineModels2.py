@@ -8,6 +8,8 @@ from collections import OrderedDict
 import random
 import warnings
 
+from sklearn.model_selection import train_test_split
+
 # Assume 'device' is configured (e.g., device = torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -120,7 +122,6 @@ class FeedForwardNNRegressorWithEmbeddings2:
             X_train, y_train = X.copy(), y.copy()
             X_val, y_val = X_val.copy(), y_val.copy()
         else:
-            from sklearn.model_selection import train_test_split
             X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=self.random_state)
 
         # Create mappings and embedding specs from training data only
@@ -135,7 +136,7 @@ class FeedForwardNNRegressorWithEmbeddings2:
             codes = X_train[col].map(self.category_mappings[col])
             X_cat_list_train.append(codes.values.reshape(-1, 1))
 
-            embedding_dim = min(50, (num_categories + 1) // 2) #if num_categories > 10 else num_categories
+            embedding_dim = min(50, (num_categories + 1) // 2) if num_categories > 4 else num_categories # if num_categories > 10 else num_categories
             self.embedding_specs.append((num_categories, embedding_dim))
             print(f"   -> Embedding for '{col}' defined with size: ({num_categories}, {embedding_dim})")
 
@@ -198,7 +199,7 @@ class FeedForwardNNRegressorWithEmbeddings2:
             print(f'Epoch [{epoch+1}/{self.num_epochs}], Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}')
 
             # Early stopping logic
-            if avg_val_loss < best_val_loss:
+            if avg_val_loss < best_val_loss: # If the last loss is better than the best one so far, reset
                 best_val_loss = avg_val_loss
                 patience_counter = 0
                 best_model_state = self.model.state_dict()
