@@ -53,6 +53,7 @@ from nn_models.nn_constrained_cpu_v3 import ConstrainedRegressorProjectedWithEmb
 from nn_models.unconstrained.TabTransformerRegressor import TabTransformerRegressor
 from nn_models.unconstrained.TabTransformerRegressor2 import TabTransformerRegressor2
 from nn_models.unconstrained.TabTransformerRegressor3 import TabTransformerRegressor3
+from nn_models.unconstrained.TabTransformerRegressor4 import TabTransformerRegressor4
 from nn_models.unconstrained.WideAndDeepRegressor import WideAndDeepRegressor
 from nn_models.unconstrained.TabNetRegressor import TabNetRegressor
 from nn_models.unconstrained.SpatialGNNRegressor import SpatialGNNRegressor
@@ -81,7 +82,7 @@ with open('params.yaml', 'r') as file:
 # Inputs
 assessment_year = 2025
 
-use_sample = True
+use_sample = False
 sample_size = 1000#00 # SAMPLE SIZE
 
 apply_resampling = False
