@@ -22,6 +22,7 @@ from nn_models.nn_constrained_cpu_v2 import FeedForwardNNRegressorWithProjection
 # === Missing models ===
 from nn_models.nn_constrained_cpu_v3 import ConstrainedRegressorProjectedWithEmbeddings
 from nn_models.unconstrained.TabTransformerRegressor2 import TabTransformerRegressor2
+from nn_models.unconstrained.TabTransformerRegressor3 import TabTransformerRegressor3
 from nn_models.unconstrained.WideAndDeepRegressor import WideAndDeepRegressor 
 # === End of Missing models ===
 
@@ -169,10 +170,12 @@ class ModelHandler:
             'dropout': params_dict.get('dropout'),
             'loss_fn': params_dict.get('loss_fn'),
             'patience':params_dict.get('patience'),
+            'fourier_type': params_dict.get('fourier_type'),
             'random_state': self.static_params.get('seed') # Pass seed
         }
         print("PARAMS: ", (nn_params['transformer_dim'], nn_params['transformer_heads'], nn_params['transformer_layers']))
-        return TabTransformerRegressor2(**nn_params)
+        # return TabTransformerRegressor2(**nn_params)
+        return TabTransformerRegressor3(**nn_params)
 
     def _create_wide_and_deep(self, params_dict):
         nn_params = {

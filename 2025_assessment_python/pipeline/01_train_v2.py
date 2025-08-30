@@ -52,6 +52,7 @@ from nn_models.nn_constrained_cpu_v2 import FeedForwardNNRegressorWithProjection
 from nn_models.nn_constrained_cpu_v3 import ConstrainedRegressorProjectedWithEmbeddings
 from nn_models.unconstrained.TabTransformerRegressor import TabTransformerRegressor
 from nn_models.unconstrained.TabTransformerRegressor2 import TabTransformerRegressor2
+from nn_models.unconstrained.TabTransformerRegressor3 import TabTransformerRegressor3
 from nn_models.unconstrained.WideAndDeepRegressor import WideAndDeepRegressor
 from nn_models.unconstrained.TabNetRegressor import TabNetRegressor
 from nn_models.unconstrained.SpatialGNNRegressor import SpatialGNNRegressor
@@ -81,12 +82,12 @@ with open('params.yaml', 'r') as file:
 assessment_year = 2025
 
 use_sample = False
-sample_size = 100000 # SAMPLE SIZE
+sample_size = 1000#00 # SAMPLE SIZE
 
 apply_resampling = False
 
 emb_pipeline_names = ["ModelMainRecipe", "ModelMainRecipeImputer", "build_model_pipeline_supress_onehot"]
-emb_pipeline_name = emb_pipeline_names[2]
+emb_pipeline_name = emb_pipeline_names[1]
 
 
 model_names = [
@@ -387,33 +388,6 @@ for model_name in model_names:
               num_leaves=366, objective='rmse', random_state=2025,
               reg_alpha=0.06676779724096571, reg_lambda=30.039145583263345,
               verbose=-1)
-        
-        # Temp try:
-        num_leaves = 33
-        add_to_linked_depth = 5
-        model = lgb.LGBMRegressor(
-            learning_rate= 0.016779451009423275,
-            max_bin= 185,
-            num_leaves= 33,
-            add_to_linked_depth= 5,
-            feature_fraction= 0.3543594854022016,
-            min_gain_to_split= 0.0016783170371411766,
-            min_data_in_leaf= 277,
-            max_cat_threshold= 15,
-            min_data_per_group= 392,
-            cat_smooth= 27.018676769116315,
-            cat_l2= 3.8634988587465484,
-            lambda_l1= 0.04269230198441984,
-            lambda_l2= 8.719642782347766,
-            # Static?
-            n_estimators=2500,
-            # Fixed ones
-            random_state=42,#2025,
-            deterministic=True, 
-            force_row_wise=True, 
-            max_depth=floor(np.log2(num_leaves)) + add_to_linked_depth,
-            objective='rmse', 
-            verbose=-1)
 
         model.fit(
             X_train_fit_emb, y_train_fit_log_emb,
@@ -446,21 +420,6 @@ for model_name in model_names:
         #     categorical_features=large_categories, output_size=1, random_state=42,
         #     batch_size=16, learning_rate=0.001, num_epochs=15, 
         #     hidden_sizes=[200, 100]
-        # )
-        # 10k samples with 10 iters
-        # model = FeedForwardNNRegressorWithEmbeddings(
-        #     categorical_features=large_categories, output_size=1,
-        #     **{'learning_rate': 0.0012399967836846098, 'batch_size': 25, 'num_epochs': 98, 'hidden_sizes': [489, 472]}
-        # )
-        # # maybe 10 or 20 iters with 100k
-        # model = FeedForwardNNRegressorWithEmbeddings(
-        #     categorical_features=large_categories, output_size=1,
-        #     **{'learning_rate': 0.004370861069626263, 'batch_size': 32, 'num_epochs': 18, 'hidden_sizes': [148, 148]}
-        # )
-        # # # 50 iters with 100k
-        # model = FeedForwardNNRegressorWithEmbeddings(
-        #     categorical_features=large_categories, output_size=1, random_state=42,
-        #     **{'learning_rate': 0.004172541632024457, 'batch_size': 24, 'num_epochs': 15, 'hidden_sizes': [184, 235]}
         # )
         # Temp:
         model = FeedForwardNNRegressorWithEmbeddings(
@@ -518,14 +477,6 @@ for model_name in model_names:
         pred_vars = [col for col in params['model']['predictor']['all'] if col in X_train_fit_emb.columns] 
         large_categories = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in pred_vars if c.startswith('loc_school_')]
         # cat_vars = [col for col in params['model']['predictor']['categorical'] if col in X_train_fit_emb.columns]
-        # model = FeedForwardNNRegressorWithConstraints(
-        #     categorical_features=large_categories, output_size=1, 
-        #     batch_size=16, learning_rate=0.001, num_epochs=50, 
-        #     hidden_sizes=[200, 100],
-        #     # Contraint inputs 
-        #     n_groups=3, dev_thresh=0.15, group_thresh=0.05, 
-        #     use_individual_constraint=True, use_group_constraint=True # Not really working
-        # )
         # Default
         # model = FeedForwardNNRegressorWithProjection(
         #     large_categories, output_size=1, random_state=42,
@@ -742,7 +693,7 @@ params = {
             'run_name_suffix': 'multi_sample_test_3'
         },
     'model': {
-        'name': 'TabTransformerRegressor', # <-- SELECT MODEL HERE
+        'name': 'FeedForwardNNRegressorWithEmbeddings', # <-- SELECT MODEL HERE
         'objective': 'regression_l1', 'verbose': -1, 'deterministic': True,
         'force_row_wise': True, 'seed': 42,
         'predictor': {
@@ -776,21 +727,13 @@ params = {
                 },
                 'default': {'learning_rate': 0.05, 'num_leaves': 31}
             },
-            'RandomForestRegressor': {
-                'range': {
-                    'n_estimators': [50, 500], 'max_depth': [5, 50],
-                    'min_samples_split': [2, 20], 'min_samples_leaf': [1, 10],
-                    'max_features': [0.5, 1.0]
-                },
-                'default': {'n_estimators': 100, 'max_depth': 10}
-            },
             'LinearRegression': {
                 'range': { 'fit_intercept': [True, False] },
                 'default': {'fit_intercept': True}
             },
             'FeedForwardNNRegressorWithEmbeddings': {
                 'range': {
-                    'learning_rate': [1e-3, 5e-2],
+                    'learning_rate': [5e-4, 5e-2],
                     'batch_size': [16, 512],
                     'num_epochs': [10, 500],
                     # Defines search space for hidden layers:
@@ -822,11 +765,12 @@ params = {
             },
             'TabTransformerRegressor': {
                 'range': {
-                    'learning_rate': [1e-3, 5e-2], 'batch_size': [16, 512],
-                    'num_epochs': [10, 500], 'transformer_dim': [1, 16], # NOTE: heads as a divisor: transformer_dim = transformer_dim * heads
-                    'transformer_heads': [2, 8], 'transformer_layers': [1, 5], 
-                    'dropout':[0.05, 0.5], 'loss_fn': ['mse', 'focal_mse', 'huber'],
-                    'patience':[1, 15],
+                    'learning_rate': [1e-4, 1e-3], 'batch_size': [64, 512],
+                    'num_epochs': [10, 500], 'transformer_dim': [2, 8], # NOTE: heads as a divisor: transformer_dim = transformer_dim * heads
+                    'transformer_heads': [4, 8], 'transformer_layers': [4, 6], 
+                    'dropout':[0.05, 0.2], 'loss_fn': ['mse', 'focal_mse', 'huber'],
+                    'patience':[1, 15], 
+                    'fourier_type':['none', 'basic', 'positional', 'gaussian'],
                 },
                 'default': {
                     'learning_rate': 0.001, 'batch_size': 32, 'num_epochs': 30,
