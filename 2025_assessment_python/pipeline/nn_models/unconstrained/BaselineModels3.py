@@ -14,25 +14,63 @@ from sklearn.model_selection import train_test_split
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ==============================================================================
-# 1. Fourier Features Module
+# 1. Fourier Features Module (Upgraded)
 # ==============================================================================
 class FourierFeatures(nn.Module):
     """
-    Adds Fourier features for positional encoding of coordinate data.
+    A module to generate various types of Fourier features for coordinate data,
+    based on the "Fourier Features Let Networks Learn High Frequency Functions" paper.
     """
-    def __init__(self, in_features, mapping_size, scale=10.0):
+    def __init__(self, in_features, mapping_size, scale=10.0, fourier_type='gaussian', sigma=1.25):
         super().__init__()
+        self.in_features = in_features
         self.mapping_size = mapping_size
-        # Random projection matrix for Fourier features
-        self.B = nn.Parameter(torch.randn(in_features, mapping_size) * scale, requires_grad=False)
+        self.fourier_type = fourier_type
+
+        if fourier_type == 'gaussian':
+            # Random Fourier Features (Gaussian RFF)
+            # B is sampled from N(0, scale^2)
+            self.B = nn.Parameter(torch.randn(in_features, mapping_size) * scale, requires_grad=False)
+            self.output_dim = 2 * mapping_size
+        elif fourier_type == 'positional':
+            # Positional Encoding with log-linear frequencies
+            if sigma is None:
+                raise ValueError("sigma must be provided for positional Fourier features.")
+            # Create log-linearly spaced frequency bands
+            freq_bands = (sigma ** (torch.arange(mapping_size) / mapping_size))
+            self.register_buffer('freq_bands', freq_bands)
+            # The output will be (2 * num_coord_dims * num_bands)
+            self.output_dim = 2 * in_features * mapping_size
+        elif fourier_type == 'basic':
+            # Basic sin/cos mapping
+            self.output_dim = 2 * in_features
+        elif fourier_type == 'none':
+            # Pass through raw coordinates, no change in dimension
+            self.output_dim = in_features
+        else:
+            raise ValueError(f"Unknown fourier_type: {fourier_type}")
 
     def forward(self, x):
-        # x has shape (batch_size, num_coord_features)
-        x_proj = 2 * np.pi * x @ self.B
-        return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
+        if self.fourier_type == 'gaussian':
+            # gamma(v) = [cos(2*pi*Bv), sin(2*pi*Bv)]
+            x_proj = 2 * np.pi * x @ self.B
+            return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
+        elif self.fourier_type == 'positional':
+            # Broadcast frequencies across input features
+            # Resulting shape: (batch, in_features, mapping_size)
+            x_proj = 2 * np.pi * x.unsqueeze(-1) * self.freq_bands.view(1, 1, -1)
+            # Flatten last two dimensions before sin/cos
+            x_proj_flat = x_proj.view(x.shape[0], -1)
+            return torch.cat([torch.sin(x_proj_flat), torch.cos(x_proj_flat)], dim=-1)
+        elif self.fourier_type == 'basic':
+            # gamma(v) = [cos(2*pi*v), sin(2*pi*v)]
+            x_proj = 2 * np.pi * x
+            return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
+        elif self.fourier_type == 'none':
+            return x
 
 # ==============================================================================
-# 2. Advanced Loss Functions
+# 2. Advanced Loss Functions (Unchanged)
 # ==============================================================================
 class FocalMSELoss(nn.Module):
     """Focal Mean Squared Error Loss to focus on hard-to-predict samples."""
@@ -43,7 +81,6 @@ class FocalMSELoss(nn.Module):
 
     def forward(self, y_pred, y_true):
         mse_loss = self.mse(y_pred, y_true)
-        # Use the loss itself as a proxy for "hardness"
         focal_weight = mse_loss.detach() ** self.gamma
         return (focal_weight * mse_loss).mean()
 
@@ -55,41 +92,24 @@ class BinnedMSELoss(nn.Module):
     def __init__(self, y_min, y_max, n_bins=10, gamma=1.0):
         super().__init__()
         self.n_bins = n_bins
-        self.y_min = y_min
-        self.y_max = y_max
         self.gamma = gamma
-        # Create bin edges. Add a small epsilon to the max to include it.
         self.bin_edges = torch.linspace(y_min, y_max + 1e-6, n_bins + 1, device=device)
         self.mse = nn.MSELoss(reduction='none')
 
     def forward(self, y_pred, y_true):
-        # Determine which bin each true value falls into
         bin_indices = torch.bucketize(y_true.flatten(), self.bin_edges) - 1
-        
-        # Clamp indices to be within the valid range [0, n_bins-1]
         bin_indices = torch.clamp(bin_indices, 0, self.n_bins - 1)
-        
-        # Calculate the count of samples in each bin for the current batch
         bin_counts = torch.bincount(bin_indices, minlength=self.n_bins)
         
-        # Calculate bin weights (inverse frequency)
         weights_per_bin = 1.0 / (bin_counts + 1e-6)
         weights_per_bin[bin_counts == 0] = 0
         bin_weights = weights_per_bin[bin_indices]
         
-        # Calculate the raw MSE for each sample
         per_sample_mse = self.mse(y_pred, y_true).flatten()
-        
-        # Calculate focal weights based on error magnitude
         focal_weights = per_sample_mse.detach() ** self.gamma
-        
-        # Combine the weights
         combined_weights = bin_weights * focal_weights
-        
-        # The final loss is the weighted average of the per-sample MSEs
         weighted_loss = per_sample_mse * combined_weights
         
-        # Normalize by the number of non-empty bins to keep the loss scale consistent
         num_non_empty_bins = (bin_counts > 0).sum()
         if num_non_empty_bins == 0:
             return torch.tensor(0.0, device=device, requires_grad=True)
@@ -97,23 +117,28 @@ class BinnedMSELoss(nn.Module):
         return weighted_loss.sum() / num_non_empty_bins
 
 # ==============================================================================
-# 3. The Core Neural Network Model with Embedding and Fourier Layers
+# 3. The Core Neural Network Model (Upgraded)
 # ==============================================================================
 class NNWithEmbeddings(nn.Module):
     """
-    A neural network model that accepts categorical, numerical, and coordinate inputs.
+    A neural network model that accepts categorical, numerical, and coordinate inputs,
+    with flexible Fourier feature encoding for coordinates.
     """
     def __init__(self, embedding_specs, num_numerical_features, num_coord_features,
-                 use_fourier_features, fourier_mapping_size, layer_sizes):
+                 fourier_type, fourier_mapping_size, fourier_sigma, layer_sizes):
         super().__init__()
-        self.use_fourier_features = use_fourier_features
         
         # --- Feature Encoders ---
         self.embedding_layers = nn.ModuleList([nn.Embedding(num, dim) for num, dim in embedding_specs])
         
-        if self.use_fourier_features and num_coord_features > 0:
-            self.fourier_layer = FourierFeatures(num_coord_features, fourier_mapping_size)
-            coord_dim = 2 * fourier_mapping_size
+        if fourier_type != 'none' and num_coord_features > 0:
+            self.fourier_layer = FourierFeatures(
+                in_features=num_coord_features, 
+                mapping_size=fourier_mapping_size,
+                fourier_type=fourier_type,
+                sigma=fourier_sigma
+            )
+            coord_dim = self.fourier_layer.output_dim
         else:
             self.fourier_layer = None
             coord_dim = num_coord_features
@@ -133,14 +158,13 @@ class NNWithEmbeddings(nn.Module):
             
         self.layers = nn.Sequential(OrderedDict(all_layers))
 
-
     def forward(self, x_cat, x_num, x_coord):
         # Process categorical features
         embeddings = [emb_layer(x_cat[:, i]) for i, emb_layer in enumerate(self.embedding_layers)]
         x_cat_emb = torch.cat(embeddings, dim=1)
         
         # Process coordinate features
-        if self.use_fourier_features and self.fourier_layer:
+        if self.fourier_layer:
             x_coord_processed = self.fourier_layer(x_coord)
         else:
             x_coord_processed = x_coord
@@ -151,16 +175,19 @@ class NNWithEmbeddings(nn.Module):
         return self.layers(x)
 
 # ==============================================================================
-# 4. The Regressor Wrapper Class
+# 4. The Regressor Wrapper Class (Upgraded)
 # ==============================================================================
 class FeedForwardNNRegressorWithEmbeddings3:
 
-    def __init__(self, categorical_features, coord_features=[], use_fourier_features=False,
+    def __init__(self, categorical_features, coord_features=[], fourier_type='none',
+                 fourier_mapping_size=16, fourier_sigma=1.25,
                  output_size=1, batch_size=16, learning_rate=0.001, num_epochs=10, 
                  hidden_sizes=[1024], patience=10, loss_fn='mse', n_bins=10, gamma=1.0, random_state=None):
         self.categorical_features = categorical_features
         self.coord_features = coord_features
-        self.use_fourier_features = use_fourier_features
+        self.fourier_type = fourier_type
+        self.fourier_mapping_size = fourier_mapping_size
+        self.fourier_sigma = fourier_sigma
         self.numerical_features = []
         self.output_size = output_size
         self.batch_size = batch_size
@@ -179,9 +206,6 @@ class FeedForwardNNRegressorWithEmbeddings3:
     def fit(self, X, y, X_val=None, y_val=None):
         # --- Data Preprocessing ---
         self.numerical_features = [col for col in X.columns if col not in self.categorical_features and col not in self.coord_features]
-        # print(f"Categorical features: {self.categorical_features}")
-        # print(f"Numerical features: {self.numerical_features}")
-        # print(f"Coordinate features: {self.coord_features}")
 
         if self.random_state is not None:
             np.random.seed(self.random_state)
@@ -194,7 +218,6 @@ class FeedForwardNNRegressorWithEmbeddings3:
         else:
             X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=self.random_state)
 
-        # BAD FIX: reset specs to empty list
         if len(self.embedding_specs) > 0:
             self.embedding_specs = []
 
@@ -207,7 +230,7 @@ class FeedForwardNNRegressorWithEmbeddings3:
 
         def _create_tensors(X_df, y_series):
             X_cat_tensors = [torch.tensor(X_df[col].map(self.category_mappings[col]).fillna(0).values, dtype=torch.long) for col in self.categorical_features]
-            X_cat = torch.stack(X_cat_tensors, dim=1)
+            X_cat = torch.stack(X_cat_tensors, dim=1) if X_cat_tensors else torch.empty(len(X_df), 0, dtype=torch.long)
             X_num = torch.tensor(X_df[self.numerical_features].astype(float).values, dtype=torch.float32)
             X_coord = torch.tensor(X_df[self.coord_features].astype(float).values, dtype=torch.float32)
             y_tensor = torch.tensor(y_series.values.reshape(-1, 1), dtype=torch.float32)
@@ -225,8 +248,9 @@ class FeedForwardNNRegressorWithEmbeddings3:
             embedding_specs=self.embedding_specs,
             num_numerical_features=len(self.numerical_features),
             num_coord_features=len(self.coord_features),
-            use_fourier_features=self.use_fourier_features,
-            fourier_mapping_size=16, # Can be tuned
+            fourier_type=self.fourier_type,
+            fourier_mapping_size=self.fourier_mapping_size,
+            fourier_sigma=self.fourier_sigma,
             layer_sizes=self.hidden_sizes + [self.output_size]
         ).to(device)
         
@@ -293,8 +317,9 @@ class FeedForwardNNRegressorWithEmbeddings3:
         X_processed = X.copy()
         
         X_cat_list = [X_processed[col].map(self.category_mappings[col]).fillna(0).astype(int).values.reshape(-1, 1) for col in self.categorical_features]
-        X_cat_np = np.hstack(X_cat_list)
+        X_cat_np = np.hstack(X_cat_list) if X_cat_list else np.empty((len(X_processed), 0))
         X_cat = torch.tensor(X_cat_np, dtype=torch.long)
+        
         X_num = torch.tensor(X_processed[self.numerical_features].values, dtype=torch.float32)
         X_coord = torch.tensor(X_processed[self.coord_features].values, dtype=torch.float32)
         
@@ -316,3 +341,4 @@ class FeedForwardNNRegressorWithEmbeddings3:
             if hasattr(self, key):
                 setattr(self, key, value)
         return self
+

@@ -83,7 +83,7 @@ class FourierFeatures(nn.Module):
         elif self.fourier_type == 'basic':
             x_proj = 2 * np.pi * x
             return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
-        elif self.fourier_type == 'none':
+        elif fourier_type == 'none':
             return x
 
 # ==============================================================================
@@ -127,7 +127,7 @@ class TabTransformer(nn.Module):
         self.numerical_tokenizer = NumericalFeatureTokenizer(num_numerical_features, transformer_dim)
         
         self.fourier_features = None
-        if num_coord_features > 0:
+        if num_coord_features > 0 and fourier_type != 'none':
             self.fourier_features = FourierFeatures(num_coord_features, fourier_mapping_size, 
                                                     fourier_type=fourier_type, sigma=fourier_sigma)
             self.coord_projector = nn.Linear(self.fourier_features.output_dim, transformer_dim)
@@ -159,9 +159,10 @@ class TabTransformer(nn.Module):
             tokens.append(num_tokens)
             
         if x_coord.size(1) > 0:
-            coord_processed = self.fourier_features(x_coord)
-            coord_token = self.coord_projector(coord_processed).unsqueeze(1)
-            tokens.append(coord_token)
+            if self.fourier_features:
+                coord_processed = self.fourier_features(x_coord)
+                coord_token = self.coord_projector(coord_processed).unsqueeze(1)
+                tokens.append(coord_token)
         
         # 2. Prepend the [CLS] token
         cls_tokens = self.cls_token.expand(batch_size, -1, -1)
@@ -182,12 +183,15 @@ class TabTransformer(nn.Module):
 class TabTransformerRegressor3:
 
     def __init__(self, categorical_features, coord_features, fourier_type='gaussian',
+                 fourier_mapping_size=16, fourier_sigma=1.25,
                  output_size=1, batch_size=32, learning_rate=0.001,
                  num_epochs=100, transformer_dim=32, transformer_heads=8, transformer_layers=6,
                  dropout=0.1, loss_fn='mse', patience=10, random_state=None):
         self.categorical_features = categorical_features
         self.coord_features = coord_features
         self.fourier_type = fourier_type
+        self.fourier_mapping_size = fourier_mapping_size
+        self.fourier_sigma = fourier_sigma
         self.numerical_features = []
         self.output_size = output_size
         self.batch_size = batch_size
@@ -259,8 +263,8 @@ class TabTransformerRegressor3:
             num_numerical_features=len(self.numerical_features),
             num_coord_features=len(self.coord_features),
             fourier_type=self.fourier_type,
-            fourier_mapping_size=16, # Tuneable, used for 'gaussian' and 'positional'
-            fourier_sigma=1.25,      # Tuneable, used for 'positional'
+            fourier_mapping_size=self.fourier_mapping_size,
+            fourier_sigma=self.fourier_sigma,
             transformer_dim=self.transformer_dim,
             transformer_heads=self.transformer_heads,
             transformer_layers=self.transformer_layers,

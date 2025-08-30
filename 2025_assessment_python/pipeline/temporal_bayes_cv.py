@@ -123,10 +123,13 @@ class ModelHandler:
             'hidden_sizes': params_dict.get('hidden_sizes'),
             'random_state': self.static_params.get('seed'), # Pass seed
             'coord_features': self.static_params['predictor']['coord_features'],
-            'use_fourier_features':params_dict.get('use_fourier_features'),
+            # 'use_fourier_features':params_dict.get('use_fourier_features'),
             'patience':params_dict.get('patience'),
             'loss_fn':params_dict.get('loss_fn'),
             'gamma':params_dict.get('gamma'),
+            'fourier_type' : params_dict.get("fourier_type"),
+            'fourier_mapping_size' : params_dict.get("fourier_mapping_size"),
+            'fourier_sigma' : params_dict.get("fourier_sigma"),
         }
         # return FeedForwardNNRegressorWithEmbeddings2(**nn_params)
         return FeedForwardNNRegressorWithEmbeddings3(**nn_params)
@@ -171,6 +174,8 @@ class ModelHandler:
             'loss_fn': params_dict.get('loss_fn'),
             'patience':params_dict.get('patience'),
             'fourier_type': params_dict.get('fourier_type'),
+            'fourier_mapping_size' : params_dict.get('fourier_mapping_size'),
+            'fourier_sigma' : params_dict.get('fourier_sigma'),
             'random_state': self.static_params.get('seed') # Pass seed
         }
         print("PARAMS: ", (nn_params['transformer_dim'], nn_params['transformer_heads'], nn_params['transformer_layers']))
@@ -289,14 +294,6 @@ class TemporalCV:
             y_pred_val = model.predict(X_val_proc)
             y_pred_test = model.predict(X_te_proc)
             
-            print("Has data any nan?")
-            print(X_tr_proc.isna().sum().sum())
-
-            print("Is it a nan?")
-            print("pred: ", np.sum(np.isnan(y_pred_train)))
-            print("pred: ", np.mean(np.isnan(y_pred_train)))
-            print("train: ", np.sum(np.isnan(y_tr)))
-            print("train: ", np.mean(np.isnan(y_tr)))
             all_scores['rmse_train'].append(root_mean_squared_error(y_tr, y_pred_train))
             all_scores['r2_train'].append(r2_score(y_tr, y_pred_train))
             all_scores['rmse_val'].append(root_mean_squared_error(y_val, y_pred_val))

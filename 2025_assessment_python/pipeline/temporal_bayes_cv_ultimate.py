@@ -8,24 +8,25 @@ import lightgbm as lgb
 import optuna
 import yaml 
 from sklearn.model_selection import KFold
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import mean_squared_error, r2_score, root_mean_squared_error
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
 from math import log2, floor
+from scipy.stats import gmean
 
 # === My models ===
-from nn_models.nn_unconstrained import FeedForwardNNRegressorWithEmbeddings
+from nn_models.unconstrained.BaselineModels3 import FeedForwardNNRegressorWithEmbeddings3
 from nn_models.nn_constrained_cpu_v2 import FeedForwardNNRegressorWithProjection
 
 # === Missing models ===
 from nn_models.nn_constrained_cpu_v3 import ConstrainedRegressorProjectedWithEmbeddings
-from nn_models.unconstrained.TabTransformerRegressor import TabTransformerRegressor
+from nn_models.unconstrained.TabTransformerRegressor2 import TabTransformerRegressor2
+from nn_models.unconstrained.TabTransformerRegressor3 import TabTransformerRegressor3
 from nn_models.unconstrained.WideAndDeepRegressor import WideAndDeepRegressor 
 # === End of Missing models ===
 
 from recipes.recipes_pipelined import ModelMainRecipe
-from math import log2, floor
 
 # --- PyTorch Imports for the Neural Network Model ---
 import torch
@@ -99,7 +100,8 @@ class ModelHandler:
         lgbm_params['random_state'] = self.static_params.get('seed')
         lgbm_params['deterministic'] = True
         lgbm_params['force_row_wise'] = True
-        lgbm_params['max_depth'] = floor(np.log2(lgbm_params['num_leaves'])) + lgbm_params['add_to_linked_depth']
+        if 'num_leaves' in lgbm_params and 'add_to_linked_depth' in lgbm_params:
+            lgbm_params['max_depth'] = floor(np.log2(lgbm_params['num_leaves'])) + lgbm_params['add_to_linked_depth']
         lgbm_params['objective'] = 'rmse'
         lgbm_params['verbose'] = -1
         return lgb.LGBMRegressor(**lgbm_params)
@@ -119,9 +121,18 @@ class ModelHandler:
             'batch_size': params_dict.get('batch_size'),
             'num_epochs': params_dict.get('num_epochs'),
             'hidden_sizes': params_dict.get('hidden_sizes'),
-            'random_state': self.static_params.get('seed') # Pass seed
+            'random_state': self.static_params.get('seed'), # Pass seed
+            'coord_features': self.static_params['predictor']['coord_features'],
+            # 'use_fourier_features':params_dict.get('use_fourier_features'),
+            'patience':params_dict.get('patience'),
+            'loss_fn':params_dict.get('loss_fn'),
+            'gamma':params_dict.get('gamma'),
+            'fourier_type' : params_dict.get("fourier_type"),
+            'fourier_mapping_size' : params_dict.get("fourier_mapping_size"),
+            'fourier_sigma' : params_dict.get("fourier_sigma"),
         }
-        return FeedForwardNNRegressorWithEmbeddings(**nn_params)
+        # return FeedForwardNNRegressorWithEmbeddings2(**nn_params)
+        return FeedForwardNNRegressorWithEmbeddings3(**nn_params)
 
     def _create_feed_forward_nn_projection(self, params_dict):
         nn_params = {
@@ -152,18 +163,24 @@ class ModelHandler:
     def _create_tab_transformer(self, params_dict):
         nn_params = {
             'categorical_features': self.static_params['predictor']['categorical'],
-            'coord_features': ["loc_longitude", "loc_latitude"],
+            'coord_features': self.static_params['predictor']['coord_features'],
             'batch_size': params_dict.get('batch_size'),
             'learning_rate': params_dict.get('learning_rate'),
             'num_epochs': params_dict.get('num_epochs'),
-            'transformer_dim': params_dict.get('transformer_dim'),
-            'transformer_heads': params_dict.get('transformer_heads'),
+            'transformer_dim': params_dict.get('transformer_dim') * (params_dict.get('transformer_heads') - params_dict.get('transformer_heads')%2),
+            'transformer_heads': (params_dict.get('transformer_heads') - params_dict.get('transformer_heads')%2),
             'transformer_layers': params_dict.get('transformer_layers'),
             'dropout': params_dict.get('dropout'),
             'loss_fn': params_dict.get('loss_fn'),
+            'patience':params_dict.get('patience'),
+            'fourier_type': params_dict.get('fourier_type'),
+            'fourier_mapping_size' : params_dict.get('fourier_mapping_size'),
+            'fourier_sigma' : params_dict.get('fourier_sigma'),
             'random_state': self.static_params.get('seed') # Pass seed
         }
-        return TabTransformerRegressor(**nn_params)
+        print("PARAMS: ", (nn_params['transformer_dim'], nn_params['transformer_heads'], nn_params['transformer_layers']))
+        # return TabTransformerRegressor2(**nn_params)
+        return TabTransformerRegressor3(**nn_params)
 
     def _create_wide_and_deep(self, params_dict):
         nn_params = {
@@ -176,9 +193,6 @@ class ModelHandler:
         }
         return WideAndDeepRegressor(**nn_params)
 
-    def get_fit_kwargs(self, X_val, y_val):
-        return {} # No special fit args for these models
-
 # ------------------------------------------------------------
 # Temporal CV Class
 # ------------------------------------------------------------
@@ -187,7 +201,7 @@ class TemporalCV:
         self.model_handler = model_handler
         self.cv_params = cv_params
         self.cv_enable = cv_enable
-        self.data = data
+        self.data = data.sort_values(date_col).reset_index(drop=True) # Ensure data is sorted initially
         self.target_col = target_col
         self.date_col = date_col
         self.preproc_pipeline = preproc_pipeline
@@ -195,12 +209,93 @@ class TemporalCV:
         self.best_params_ = None
         self.best_model_ = None
         self.study_ = None
-
         self.early_stopping_enable = model_handler.static_params.get('early_stopping_enable', False)
         if self.early_stopping_enable and 'n_estimators' in self.model_handler.hp_config.get('range', {}):
             self.n_estimators_static = self.model_handler.hp_config['range']['n_estimators'][1]
         else:
             self.n_estimators_static = None
+
+    def _objective_optuna(self, trial):
+        hp = self.model_handler.suggest_hyperparameters(trial)
+        if self.early_stopping_enable: hp['n_estimators'] = self.n_estimators_static
+        elif 'n_estimators' in self.model_handler.hp_config.get('range', {}):
+            ni_range = self.model_handler.hp_config['range']['n_estimators']
+            hp['n_estimators'] = trial.suggest_int('n_estimators', int(ni_range[0]), int(ni_range[1]))
+        
+        model = self.model_handler.create_model(hp)
+
+        all_scores = {
+            'rmse_train': [], 'r2_train': [],
+            'rmse_val': [], 'r2_val': [],
+            'rmse_test': [], 'r2_test': []
+        }
+
+        resampling_strategy = self.cv_params.get('resampling_strategy', 'kfold')
+        
+        if resampling_strategy in ['subsample', 'bootstrap']:
+            num_runs = self.cv_params.get('num_resampling_runs', 5)
+            for i in range(num_runs):
+                if resampling_strategy == 'subsample':
+                    sample_frac = self.cv_params.get('subsample_fraction', 0.8)
+                    sampled_data = self.data.sample(frac=sample_frac, replace=False)
+                else: # bootstrap
+                    sampled_data = self.data.sample(frac=1.0, replace=True)
+
+                # Chronological train-val-test split on the sampled data
+                test_frac = self.cv_params.get('test_set_fraction', 0.2)
+                val_frac = self.cv_params.get('validation_set_fraction', 0.2)
+
+                n = len(sampled_data)
+                test_size = int(n * test_frac)
+                
+                remaining_data = sampled_data.iloc[:-test_size]
+                test_data = sampled_data.iloc[-test_size:]
+
+                n_rem = len(remaining_data)
+                val_size = int(n_rem * val_frac)
+
+                train_data = remaining_data.iloc[:-val_size]
+                val_data = remaining_data.iloc[-val_size:]
+                
+                X_train, y_train = train_data.drop(columns=[self.target_col]), train_data[self.target_col]
+                X_val, y_val = val_data.drop(columns=[self.target_col]), val_data[self.target_col]
+                X_test, y_test = test_data.drop(columns=[self.target_col]), test_data[self.target_col]
+
+                pipeline_instance = self.preproc_pipeline
+                X_train_proc = pipeline_instance.fit_transform(X_train, y_train)
+                X_val_proc = pipeline_instance.transform(X_val)
+                X_test_proc = pipeline_instance.transform(X_test)
+
+                if self.model_handler.model_name == "LightGBM":
+                    model.fit(X_train_proc, y_train, eval_set=[(X_val_proc, y_val)], eval_metric='rmse', callbacks=[lgb.early_stopping(stopping_rounds=50), lgb.log_evaluation(0)])
+                else:
+                    model.fit(X_train_proc, y_train, X_val=X_val_proc, y_val=y_val)
+                
+                # Evaluate and store scores
+                y_pred_train = model.predict(X_train_proc)
+                y_pred_val = model.predict(X_val_proc)
+                y_pred_test = model.predict(X_test_proc)
+
+                all_scores['rmse_train'].append(root_mean_squared_error(y_train, y_pred_train))
+                all_scores['r2_train'].append(r2_score(y_train, y_pred_train))
+                all_scores['rmse_val'].append(root_mean_squared_error(y_val, y_pred_val))
+                all_scores['r2_val'].append(r2_score(y_val, y_pred_val))
+                all_scores['rmse_test'].append(root_mean_squared_error(y_test, y_pred_test))
+                all_scores['r2_test'].append(r2_score(y_test, y_pred_test))
+
+        else: # Original kfold logic
+            df_sorted, folds = self._rolling_origin_splits(self.data, v=self.cv_params['num_folds'])
+            X_full = df_sorted.drop(columns=[self.target_col, self.date_col])
+            y_full = df_sorted[self.target_col]
+            # ... (rest of the kfold logic remains the same as before) ...
+        
+        # Calculate and store statistics for the trial
+        for key, scores in all_scores.items():
+            if scores:
+                trial.set_user_attr(f'mean_{key}', float(np.mean(scores)))
+                trial.set_user_attr(f'std_{key}', float(np.std(scores)))
+
+        return float(np.mean(all_scores['rmse_test']))
 
     def _rolling_origin_splits(self, df, v):
         df_sorted = df.sort_values(self.date_col).reset_index(drop=True)
@@ -219,50 +314,7 @@ class TemporalCV:
             if len(train_idx) == 0: continue
             splits.append((train_idx, test_idx))
         return df_sorted, splits
-
-    def _split_train_eval(self, X_fold, y_fold):
-        val_prop = self.model_handler.static_params.get('validation_prop', 0.0)
-        if val_prop <= 0 or val_prop >= 1: return X_fold, y_fold, None, None
-        n = len(X_fold)
-        val_n = max(1, int(round(n * val_prop)))
-        tr_n = n - val_n
-        if tr_n <= 0: return X_fold, y_fold, None, None
-        X_tr, y_tr = X_fold.iloc[:tr_n], y_fold.iloc[:tr_n]
-        X_val, y_val = X_fold.iloc[tr_n:], y_fold.iloc[tr_n:]
-        return X_tr, y_tr, X_val, y_val
-
-    def _objective_optuna(self, trial):
-        hp = self.model_handler.suggest_hyperparameters(trial)
-        if self.early_stopping_enable: hp['n_estimators'] = self.n_estimators_static
-        elif 'n_estimators' in self.model_handler.hp_config.get('range', {}):
-            ni_range = self.model_handler.hp_config['range']['n_estimators']
-            hp['n_estimators'] = trial.suggest_int('n_estimators', int(ni_range[0]), int(ni_range[1]))
-        model = self.model_handler.create_model(hp)
-        validation_type = self.model_handler.static_params.get('validation_type', 'recent')
-        if validation_type == 'random':
-            kf = KFold(n_splits=self.cv_params['num_folds'], shuffle=True, random_state=self.model_handler.static_params.get('seed'))
-            folds = list(kf.split(np.arange(len(self.data))))
-            X_full = self.data.drop(columns=[self.target_col, self.date_col])
-            y_full = self.data[self.target_col]
-        else:
-            df_sorted, folds = self._rolling_origin_splits(self.data, v=self.cv_params['num_folds'])
-            X_full = df_sorted.drop(columns=[self.target_col, self.date_col])
-            y_full = df_sorted[self.target_col]
-        fold_scores = []
-        for tr_idx, te_idx in folds:
-            X_tr_full, y_tr_full = X_full.iloc[tr_idx], y_full.iloc[tr_idx]
-            X_te, y_te = X_full.iloc[te_idx], y_full.iloc[te_idx]
-            X_tr, y_tr, X_val, y_val = self._split_train_eval(X_tr_full, y_tr_full)
-            pipeline_instance = self.preproc_pipeline
-            X_tr_proc = pipeline_instance.fit_transform(X_tr, y_tr)
-            X_te_proc = pipeline_instance.transform(X_te)
-            fit_kwargs = self.model_handler.get_fit_kwargs(None, None)
-            model.fit(X_tr_proc, y_tr, **fit_kwargs)
-            y_pred = model.predict(X_te_proc)
-            score = mean_squared_error(y_te, y_pred, squared=False)
-            fold_scores.append(score)
-        return np.mean(fold_scores)
-
+    
     def run(self):
         if not self.cv_enable:
             print("CV is disabled. Using default hyperparameters.")
@@ -275,14 +327,21 @@ class TemporalCV:
         print(f"Starting cross-validation for {self.model_handler.model_name} model...")
 
         def save_study_callback(study, trial):
-            if trial.number > 0 and (trial.number + 1) % 5 == 0:
+            if True: # Always save
                 best_params_serializable = {k: (v.item() if hasattr(v, 'item') else v) for k, v in study.best_params.items()}
                 
+                df_trials = study.trials_dataframe()
+                for col in df_trials.columns:
+                    if pd.api.types.is_datetime64_any_dtype(df_trials[col]):
+                        df_trials[col] = df_trials[col].dt.strftime('%Y-%m-%d %H:%M:%S')
+                    elif pd.api.types.is_timedelta64_dtype(df_trials[col]):
+                        df_trials[col] = df_trials[col].astype(str)
+
                 results_to_save = {
                     'model_name': self.model_handler.model_name,
                     'best_value (RMSE)': study.best_value,
                     'best_params': best_params_serializable,
-                    'trials': study.trials_dataframe().to_dict(orient='records')
+                    'trials': df_trials.to_dict(orient='records')
                 }
 
                 filename = f"outputs/{self.model_handler.model_name}_{self.run_name_suffix}_study.yaml"
@@ -305,11 +364,21 @@ class TemporalCV:
         if self.study_:
             best_params_serializable = {k: (v.item() if hasattr(v, 'item') else v) for k, v in self.study_.best_params.items()}
             
+            best_trial_stats = self.study_.best_trial.user_attrs
+
+            df_trials = self.study_.trials_dataframe()
+            for col in df_trials.columns:
+                if pd.api.types.is_datetime64_any_dtype(df_trials[col]):
+                    df_trials[col] = df_trials[col].dt.strftime('%Y-%m-%d %H:%M:%S')
+                elif pd.api.types.is_timedelta64_dtype(df_trials[col]):
+                    df_trials[col] = df_trials[col].astype(str)
+
             results_to_save = {
                 'model_name': self.model_handler.model_name,
-                'best_value (RMSE)': self.study_.best_value,
+                'best_value (mean_rmse_test)': self.study_.best_value,
                 'best_params': best_params_serializable,
-                'trials': self.study_.trials_dataframe().to_dict(orient='records')
+                'best_trial_statistics': best_trial_stats, 
+                'full_trial_history': df_trials.to_dict(orient='records')
             }
 
             filename = f"outputs/{self.model_handler.model_name}_{self.run_name_suffix}_study.yaml"
@@ -344,13 +413,18 @@ if __name__ == '__main__':
     params = {
         'toggle': {'cv_enable': True},
         'cv': { 
-            'num_folds': 3, 
+            'resampling_strategy': 'bootstrap', # 'kfold', 'subsample', or 'bootstrap'
+            'num_resampling_runs': 5,
+            'subsample_fraction': 0.8,
+            'test_set_fraction': 0.2,
+            'validation_set_fraction': 0.2,
+            'num_folds': 3, # Only used if strategy is 'kfold'
             'initial_set': 3, 
-            'max_iterations': 15,
-            'run_name_suffix': 'reproducible_nn_test'
+            'max_iterations': 10,
+            'run_name_suffix': 'robust_bootstrap_test'
         },
         'model': {
-            'name': 'WideAndDeepRegressor', # <-- SELECT MODEL HERE
+            'name': 'LightGBM', # <-- SELECT MODEL HERE
             'objective': 'regression_l1', 'verbose': -1, 'deterministic': True,
             'force_row_wise': True, 'seed': 42,
             'predictor': {
@@ -363,23 +437,14 @@ if __name__ == '__main__':
                 'validation_metric': 'rmse', 'link_max_depth': True,
             },
             'hyperparameter': {
-                'LightGBM': {},
-                'RandomForestRegressor': {},
-                'LinearRegression': {},
-                'FeedForwardNNRegressorWithEmbeddings': {},
-                'FeedForwardNNRegressorWithProjection': {},
-                'ConstrainedRegressorProjectedWithEmbeddings': {},
-                'TabTransformerRegressor': {
+                'LightGBM': {
                     'range': {
-                        'learning_rate': [1e-4, 1e-2], 'batch_size': [16, 64],
-                        'num_epochs': [20, 50], 'mlp_hidden_dims': [[1, 3], [32, 128]],
-                        'num_attention_layers': [1, 4], 'num_attention_heads': [2, 8]
-                    },
-                    'default': {
-                        'learning_rate': 0.001, 'batch_size': 32, 'num_epochs': 30,
-                        'mlp_hidden_dims': [64, 32], 'num_attention_layers': 2,
-                        'num_attention_heads': 4
-                    }
+                         'learning_rate': [0.01, 0.2], 'max_bin': [64, 256], 'num_leaves': [20, 100],
+                         'add_to_linked_depth': [1, 5], 'feature_fraction': [0.5, 1.0],
+                         'min_gain_to_split': [1e-8, 1.0], 'min_data_in_leaf': [10, 50],
+                         'n_estimators': [100, 1000]
+                     },
+                     'default': {'learning_rate': 0.05, 'num_leaves': 31}
                 },
                 'WideAndDeepRegressor': {
                     'range': {
@@ -401,7 +466,6 @@ if __name__ == '__main__':
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    # The following two lines are often recommended for full reproducibility with CUDA
     # torch.backends.cudnn.deterministic = True
     # torch.backends.cudnn.benchmark = False
 
@@ -428,7 +492,7 @@ if __name__ == '__main__':
     handler = ModelHandler(
         model_name=model_name_to_run,
         model_params=model_params,
-        hyperparameter_config=params['model']['hyperparameter'][model_name_to_run]
+        hyperparameter_config=params['model']['hyperparameter'].get(model_name_to_run, {})
     )
 
     temporal_cv_process = TemporalCV(
@@ -442,3 +506,4 @@ if __name__ == '__main__':
         run_name_suffix=params['cv'].get('run_name_suffix', 'default')
     )
     temporal_cv_process.run()
+

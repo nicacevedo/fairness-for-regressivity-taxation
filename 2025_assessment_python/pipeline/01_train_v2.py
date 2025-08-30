@@ -81,7 +81,7 @@ with open('params.yaml', 'r') as file:
 # Inputs
 assessment_year = 2025
 
-use_sample = False
+use_sample = True
 sample_size = 1000#00 # SAMPLE SIZE
 
 apply_resampling = False
@@ -690,10 +690,10 @@ params = {
             'validation_set_fraction': 0.2,    # Validation set from the remaining data
             'initial_set': 3, 
             'max_iterations': 1000,
-            'run_name_suffix': 'multi_sample_test_3'
+            'run_name_suffix': 'multi_sample_test_4'
         },
     'model': {
-        'name': 'FeedForwardNNRegressorWithEmbeddings', # <-- SELECT MODEL HERE
+        'name': 'LightGBM', # <-- SELECT MODEL HERE
         'objective': 'regression_l1', 'verbose': -1, 'deterministic': True,
         'force_row_wise': True, 'seed': 42,
         'predictor': {
@@ -739,11 +739,14 @@ params = {
                     # Defines search space for hidden layers:
                     # [[min_layers, max_layers], [min_units, max_units]]
                     'hidden_sizes': [[1, 6], [64, 4096]],
-                    'use_fourier_features':[True, False],
+                    # 'use_fourier_features':[True, False],
                     'patience':[5, 15], 
                     'loss_fn':['mse', 'focal_mse', 'huber'], 
                     # 'n_bins' : [],
                     'gamma' : [0.75, 1.5],
+                    'fourier_type' : ['none', 'basic', 'positional', 'gaussian'],
+                    'fourier_mapping_size' : [16, 64],
+                    'fourier_sigma' : [1, 10],
                 },
                 'default': {
                     'learning_rate': 1e-3, 'batch_size': 16,
@@ -770,7 +773,9 @@ params = {
                     'transformer_heads': [4, 8], 'transformer_layers': [4, 6], 
                     'dropout':[0.05, 0.2], 'loss_fn': ['mse', 'focal_mse', 'huber'],
                     'patience':[1, 15], 
-                    'fourier_type':['none', 'basic', 'positional', 'gaussian'],
+                    'fourier_type' : ['none', 'basic', 'positional', 'gaussian'],
+                    'fourier_mapping_size' : [16, 64],
+                    'fourier_sigma' : [1, 10],
                 },
                 'default': {
                     'learning_rate': 0.001, 'batch_size': 32, 'num_epochs': 30,
