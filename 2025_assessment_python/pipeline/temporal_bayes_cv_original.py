@@ -8,24 +8,24 @@ import lightgbm as lgb
 import optuna
 import yaml 
 from sklearn.model_selection import KFold
-from sklearn.metrics import mean_squared_error, r2_score, root_mean_squared_error
+from sklearn.metrics import mean_squared_error
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
 from math import log2, floor
-from scipy.stats import gmean
 
 # === My models ===
-from nn_models.unconstrained.BaselineModels3 import FeedForwardNNRegressorWithEmbeddings3
+from nn_models.nn_unconstrained import FeedForwardNNRegressorWithEmbeddings
 from nn_models.nn_constrained_cpu_v2 import FeedForwardNNRegressorWithProjection
 
 # === Missing models ===
 from nn_models.nn_constrained_cpu_v3 import ConstrainedRegressorProjectedWithEmbeddings
-from nn_models.unconstrained.TabTransformerRegressor2 import TabTransformerRegressor2
+from nn_models.unconstrained.TabTransformerRegressor import TabTransformerRegressor
 from nn_models.unconstrained.WideAndDeepRegressor import WideAndDeepRegressor 
 # === End of Missing models ===
 
 from recipes.recipes_pipelined import ModelMainRecipe
+from math import log2, floor
 
 # --- PyTorch Imports for the Neural Network Model ---
 import torch
@@ -99,8 +99,7 @@ class ModelHandler:
         lgbm_params['random_state'] = self.static_params.get('seed')
         lgbm_params['deterministic'] = True
         lgbm_params['force_row_wise'] = True
-        if 'num_leaves' in lgbm_params and 'add_to_linked_depth' in lgbm_params:
-            lgbm_params['max_depth'] = floor(np.log2(lgbm_params['num_leaves'])) + lgbm_params['add_to_linked_depth']
+        lgbm_params['max_depth'] = floor(np.log2(lgbm_params['num_leaves'])) + lgbm_params['add_to_linked_depth']
         lgbm_params['objective'] = 'rmse'
         lgbm_params['verbose'] = -1
         return lgb.LGBMRegressor(**lgbm_params)
@@ -120,15 +119,9 @@ class ModelHandler:
             'batch_size': params_dict.get('batch_size'),
             'num_epochs': params_dict.get('num_epochs'),
             'hidden_sizes': params_dict.get('hidden_sizes'),
-            'random_state': self.static_params.get('seed'), # Pass seed
-            'coord_features': self.static_params['predictor']['coord_features'],
-            'use_fourier_features':params_dict.get('use_fourier_features'),
-            'patience':params_dict.get('patience'),
-            'loss_fn':params_dict.get('loss_fn'),
-            'gamma':params_dict.get('gamma'),
+            'random_state': self.static_params.get('seed') # Pass seed
         }
-        # return FeedForwardNNRegressorWithEmbeddings2(**nn_params)
-        return FeedForwardNNRegressorWithEmbeddings3(**nn_params)
+        return FeedForwardNNRegressorWithEmbeddings(**nn_params)
 
     def _create_feed_forward_nn_projection(self, params_dict):
         nn_params = {
@@ -159,20 +152,18 @@ class ModelHandler:
     def _create_tab_transformer(self, params_dict):
         nn_params = {
             'categorical_features': self.static_params['predictor']['categorical'],
-            'coord_features': self.static_params['predictor']['coord_features'],
+            'coord_features': ["loc_longitude", "loc_latitude"],
             'batch_size': params_dict.get('batch_size'),
             'learning_rate': params_dict.get('learning_rate'),
             'num_epochs': params_dict.get('num_epochs'),
-            'transformer_dim': params_dict.get('transformer_dim') * (params_dict.get('transformer_heads') - params_dict.get('transformer_heads')%2),
-            'transformer_heads': (params_dict.get('transformer_heads') - params_dict.get('transformer_heads')%2),
+            'transformer_dim': params_dict.get('transformer_dim'),
+            'transformer_heads': params_dict.get('transformer_heads'),
             'transformer_layers': params_dict.get('transformer_layers'),
             'dropout': params_dict.get('dropout'),
             'loss_fn': params_dict.get('loss_fn'),
-            'patience':params_dict.get('patience'),
             'random_state': self.static_params.get('seed') # Pass seed
         }
-        print("PARAMS: ", (nn_params['transformer_dim'], nn_params['transformer_heads'], nn_params['transformer_layers']))
-        return TabTransformerRegressor2(**nn_params)
+        return TabTransformerRegressor(**nn_params)
 
     def _create_wide_and_deep(self, params_dict):
         nn_params = {
@@ -185,6 +176,9 @@ class ModelHandler:
         }
         return WideAndDeepRegressor(**nn_params)
 
+    def get_fit_kwargs(self, X_val, y_val):
+        return {} # No special fit args for these models
+
 # ------------------------------------------------------------
 # Temporal CV Class
 # ------------------------------------------------------------
@@ -193,7 +187,7 @@ class TemporalCV:
         self.model_handler = model_handler
         self.cv_params = cv_params
         self.cv_enable = cv_enable
-        self.data = data.sort_values(date_col).reset_index(drop=True) # Ensure data is sorted initially
+        self.data = data
         self.target_col = target_col
         self.date_col = date_col
         self.preproc_pipeline = preproc_pipeline
@@ -201,6 +195,7 @@ class TemporalCV:
         self.best_params_ = None
         self.best_model_ = None
         self.study_ = None
+
         self.early_stopping_enable = model_handler.static_params.get('early_stopping_enable', False)
         if self.early_stopping_enable and 'n_estimators' in self.model_handler.hp_config.get('range', {}):
             self.n_estimators_static = self.model_handler.hp_config['range']['n_estimators'][1]
@@ -244,7 +239,7 @@ class TemporalCV:
             hp['n_estimators'] = trial.suggest_int('n_estimators', int(ni_range[0]), int(ni_range[1]))
         model = self.model_handler.create_model(hp)
         validation_type = self.model_handler.static_params.get('validation_type', 'recent')
-        if validation_type == 'random': # (Not being used)
+        if validation_type == 'random':
             kf = KFold(n_splits=self.cv_params['num_folds'], shuffle=True, random_state=self.model_handler.static_params.get('seed'))
             folds = list(kf.split(np.arange(len(self.data))))
             X_full = self.data.drop(columns=[self.target_col, self.date_col])
@@ -253,13 +248,7 @@ class TemporalCV:
             df_sorted, folds = self._rolling_origin_splits(self.data, v=self.cv_params['num_folds'])
             X_full = df_sorted.drop(columns=[self.target_col, self.date_col])
             y_full = df_sorted[self.target_col]
-        
-        all_scores = {
-            'rmse_train': [], 'r2_train': [],
-            'rmse_val': [], 'r2_val': [],
-            'rmse_test': [], 'r2_test': []
-        }
-
+        fold_scores = []
         for tr_idx, te_idx in folds:
             X_tr_full, y_tr_full = X_full.iloc[tr_idx], y_full.iloc[tr_idx]
             X_te, y_te = X_full.iloc[te_idx], y_full.iloc[te_idx]
@@ -267,47 +256,12 @@ class TemporalCV:
             pipeline_instance = self.preproc_pipeline
             X_tr_proc = pipeline_instance.fit_transform(X_tr, y_tr)
             X_te_proc = pipeline_instance.transform(X_te)
-            X_val_proc = pipeline_instance.transform(X_val) if X_val is not None else None
-            
-            if self.model_handler.model_name == "LightGBM":
-                model.fit(X_tr_proc, y_tr,
-                    eval_set=[(X_val_proc, y_val)],
-                    eval_metric='rmse', 
-                    callbacks=[
-                        lgb.early_stopping(stopping_rounds=50),
-                        lgb.log_evaluation(0)
-                    ]
-                )
-            else:
-                model.fit(X_tr_proc, y_tr, 
-                          X_val=X_val_proc, y_val=y_val)
-            
-            y_pred_train = model.predict(X_tr_proc)
-            y_pred_val = model.predict(X_val_proc)
-            y_pred_test = model.predict(X_te_proc)
-            
-            print("Has data any nan?")
-            print(X_tr_proc.isna().sum().sum())
-
-            print("Is it a nan?")
-            print("pred: ", np.sum(np.isnan(y_pred_train)))
-            print("pred: ", np.mean(np.isnan(y_pred_train)))
-            print("train: ", np.sum(np.isnan(y_tr)))
-            print("train: ", np.mean(np.isnan(y_tr)))
-            all_scores['rmse_train'].append(root_mean_squared_error(y_tr, y_pred_train))
-            all_scores['r2_train'].append(r2_score(y_tr, y_pred_train))
-            all_scores['rmse_val'].append(root_mean_squared_error(y_val, y_pred_val))
-            all_scores['r2_val'].append(r2_score(y_val, y_pred_val))
-            all_scores['rmse_test'].append(root_mean_squared_error(y_te, y_pred_test))
-            all_scores['r2_test'].append(r2_score(y_te, y_pred_test))
-
-        # Store detailed statistics for every trial in user_attrs
-        for key, scores in all_scores.items():
-            if scores:
-                trial.set_user_attr(f'mean_{key}', float(np.mean(scores)))
-                trial.set_user_attr(f'std_{key}', float(np.std(scores)))
-
-        return float(np.mean(all_scores['rmse_test']))
+            fit_kwargs = self.model_handler.get_fit_kwargs(None, None)
+            model.fit(X_tr_proc, y_tr, **fit_kwargs)
+            y_pred = model.predict(X_te_proc)
+            score = mean_squared_error(y_te, y_pred, squared=False)
+            fold_scores.append(score)
+        return np.mean(fold_scores)
 
     def run(self):
         if not self.cv_enable:
@@ -321,23 +275,14 @@ class TemporalCV:
         print(f"Starting cross-validation for {self.model_handler.model_name} model...")
 
         def save_study_callback(study, trial):
-            # if trial.number > 0 and (trial.number + 1) % 5 == 0:
-            if True: # Always save
+            if trial.number > 0 and (trial.number + 1) % 5 == 0:
                 best_params_serializable = {k: (v.item() if hasattr(v, 'item') else v) for k, v in study.best_params.items()}
                 
-                df_trials = study.trials_dataframe()
-                # Convert datetime and timedelta columns to strings before saving
-                for col in df_trials.columns:
-                    if pd.api.types.is_datetime64_any_dtype(df_trials[col]):
-                        df_trials[col] = df_trials[col].dt.strftime('%Y-%m-%d %H:%M:%S')
-                    elif pd.api.types.is_timedelta64_dtype(df_trials[col]):
-                        df_trials[col] = df_trials[col].astype(str)
-
                 results_to_save = {
                     'model_name': self.model_handler.model_name,
                     'best_value (RMSE)': study.best_value,
                     'best_params': best_params_serializable,
-                    'trials': df_trials.to_dict(orient='records')
+                    'trials': study.trials_dataframe().to_dict(orient='records')
                 }
 
                 filename = f"outputs/{self.model_handler.model_name}_{self.run_name_suffix}_study.yaml"
@@ -360,22 +305,11 @@ class TemporalCV:
         if self.study_:
             best_params_serializable = {k: (v.item() if hasattr(v, 'item') else v) for k, v in self.study_.best_params.items()}
             
-            best_trial_stats = self.study_.best_trial.user_attrs
-
-            df_trials = self.study_.trials_dataframe()
-            # Convert datetime and timedelta columns to strings before final save
-            for col in df_trials.columns:
-                if pd.api.types.is_datetime64_any_dtype(df_trials[col]):
-                    df_trials[col] = df_trials[col].dt.strftime('%Y-%m-%d %H:%M:%S')
-                elif pd.api.types.is_timedelta64_dtype(df_trials[col]):
-                    df_trials[col] = df_trials[col].astype(str)
-
             results_to_save = {
                 'model_name': self.model_handler.model_name,
-                'best_value (mean_rmse_test)': self.study_.best_value,
+                'best_value (RMSE)': self.study_.best_value,
                 'best_params': best_params_serializable,
-                'best_trial_statistics': best_trial_stats, 
-                'full_trial_history': df_trials.to_dict(orient='records')
+                'trials': self.study_.trials_dataframe().to_dict(orient='records')
             }
 
             filename = f"outputs/{self.model_handler.model_name}_{self.run_name_suffix}_study.yaml"

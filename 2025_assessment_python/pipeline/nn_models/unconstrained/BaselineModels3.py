@@ -133,6 +133,7 @@ class NNWithEmbeddings(nn.Module):
             
         self.layers = nn.Sequential(OrderedDict(all_layers))
 
+
     def forward(self, x_cat, x_num, x_coord):
         # Process categorical features
         embeddings = [emb_layer(x_cat[:, i]) for i, emb_layer in enumerate(self.embedding_layers)]
@@ -178,9 +179,9 @@ class FeedForwardNNRegressorWithEmbeddings3:
     def fit(self, X, y, X_val=None, y_val=None):
         # --- Data Preprocessing ---
         self.numerical_features = [col for col in X.columns if col not in self.categorical_features and col not in self.coord_features]
-        print(f"Categorical features: {self.categorical_features}")
-        print(f"Numerical features: {self.numerical_features}")
-        print(f"Coordinate features: {self.coord_features}")
+        # print(f"Categorical features: {self.categorical_features}")
+        # print(f"Numerical features: {self.numerical_features}")
+        # print(f"Coordinate features: {self.coord_features}")
 
         if self.random_state is not None:
             np.random.seed(self.random_state)
@@ -192,6 +193,10 @@ class FeedForwardNNRegressorWithEmbeddings3:
             X_val, y_val = X_val.copy(), y_val.copy()
         else:
             X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=self.random_state)
+
+        # BAD FIX: reset specs to empty list
+        if len(self.embedding_specs) > 0:
+            self.embedding_specs = []
 
         for col in self.categorical_features:
             categories = X_train[col].unique()

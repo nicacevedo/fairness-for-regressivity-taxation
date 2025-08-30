@@ -80,7 +80,7 @@ with open('params.yaml', 'r') as file:
 # Inputs
 assessment_year = 2025
 
-use_sample = True
+use_sample = False
 sample_size = 100000 # SAMPLE SIZE
 
 apply_resampling = False
@@ -99,7 +99,7 @@ model_names = [
 
     # Modified
     # "FeedForwardNNRegressorWithEmbeddings2",
-    "FeedForwardNNRegressorWithEmbeddings3",
+    # "FeedForwardNNRegressorWithEmbeddings3",
     # More unconstrained
     # "TabTransformerRegressor",
     # "TabTransformerRegressor2",
@@ -723,22 +723,26 @@ for model_name in model_names:
 
 
 
-exit()
-
+# exit()
 
 # ========== CV REFACTOR =============
 
 # --- General Parameters (YAML content) ---
 params = {
     'toggle': {'cv_enable': True},
-    'cv': {
-        'num_folds': 5,#params['cv']['num_folds'],
-        'initial_set': params['cv']['initial_set'],
-        'max_iterations': 1000, # Reduced for faster demo
-        'run_name_suffix': '1000iter_v0'
-    },
+        'cv': { 
+            'num_folds': 4, 
+            'resampling_strategy': 'subsample', # 'kfold', 'subsample', or 'bootstrap'
+            'num_resampling_runs': 10,          # Number of times to resample for bootstrap/subsample
+            'subsample_fraction': 0.1,         # Fraction of data to use if strategy is 'subsample'
+            'test_set_fraction': 0.2,          # Final holdout set
+            'validation_set_fraction': 0.2,    # Validation set from the remaining data
+            'initial_set': 3, 
+            'max_iterations': 1000,
+            'run_name_suffix': 'multi_sample_test_3'
+        },
     'model': {
-        'name': 'LightGBM', # <-- SELECT MODEL HERE
+        'name': 'TabTransformerRegressor', # <-- SELECT MODEL HERE
         'objective': 'regression_l1', 'verbose': -1, 'deterministic': True,
         'force_row_wise': True, 'seed': 42,
         'predictor': {
@@ -746,10 +750,11 @@ params = {
             'categorical': params['model']['predictor']['categorical'],
             'id': [], # params['model']['predictor']['id'],
             'large_categories':['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in params['model']['predictor']['all'] if c.startswith('loc_school_')],
+            'coord_features':["loc_longitude", "loc_latitude"],
         },
         'parameter': {
-            'stop_iter': 50, 'validation_prop': 0.1, 'validation_type': 'recent',
-            'validation_metric': 'rmse', 'link_max_depth': True,
+            'stop_iter': 50, 'validation_prop': 0.2, 'validation_type': 'recent',
+            'validation_metric': 'rmse', 'link_max_depth': True, 'early_stopping_enable': True,
         },
         'hyperparameter': {
             'LightGBM': {
@@ -785,12 +790,17 @@ params = {
             },
             'FeedForwardNNRegressorWithEmbeddings': {
                 'range': {
-                    'learning_rate': [1e-4, 1e-2],
-                    'batch_size': [16, 128],
-                    'num_epochs': [10, 50],
+                    'learning_rate': [1e-3, 5e-2],
+                    'batch_size': [16, 512],
+                    'num_epochs': [10, 500],
                     # Defines search space for hidden layers:
                     # [[min_layers, max_layers], [min_units, max_units]]
-                    'hidden_sizes': [[1, 3], [64, 256]]
+                    'hidden_sizes': [[1, 6], [64, 4096]],
+                    'use_fourier_features':[True, False],
+                    'patience':[5, 15], 
+                    'loss_fn':['mse', 'focal_mse', 'huber'], 
+                    # 'n_bins' : [],
+                    'gamma' : [0.75, 1.5],
                 },
                 'default': {
                     'learning_rate': 1e-3, 'batch_size': 16,
@@ -812,10 +822,11 @@ params = {
             },
             'TabTransformerRegressor': {
                 'range': {
-                    'learning_rate': [1e-4, 1e-2], 'batch_size': [16, 128],
-                    'num_epochs': [10, 50], 'transformer_dim': [16, 16],
-                    'transformer_heads': [8, 8], 'transformer_layers': [2, 8],
-                    'dropout':[0.1, 0.5], 'loss_fn': ['mse', 'focal_mse', 'huber'],
+                    'learning_rate': [1e-3, 5e-2], 'batch_size': [16, 512],
+                    'num_epochs': [10, 500], 'transformer_dim': [1, 16], # NOTE: heads as a divisor: transformer_dim = transformer_dim * heads
+                    'transformer_heads': [2, 8], 'transformer_layers': [1, 5], 
+                    'dropout':[0.05, 0.5], 'loss_fn': ['mse', 'focal_mse', 'huber'],
+                    'patience':[1, 15],
                 },
                 'default': {
                     'learning_rate': 0.001, 'batch_size': 32, 'num_epochs': 30,
@@ -850,18 +861,26 @@ model_params.update({
 })
 model_params['early_stopping_enable'] = model_params['validation_prop'] > 0 and model_params['stop_iter'] > 0
 
-pipeline = ModelMainRecipe(
-# pipeline = ModelMainRecipeImputer(
-    outcome="meta_sale_price",
-    pred_vars=params['model']['predictor']['all'],
-    cat_vars=params['model']['predictor']['categorical'],
-    id_vars=params['model']['predictor']['id']
-)
-# pipeline = build_model_pipeline_supress_onehot( # WARNING: We only changed to this to perform changes on the pipeline
-#         pred_vars=params['model']['predictor']['all'],
-#         cat_vars=params['model']['predictor']['categorical'],
-#         id_vars=params['model']['predictor']['id']
-#     )
+if params['model']['name'] in ["LightGBM"]:
+    pipeline = ModelMainRecipe(
+        outcome="meta_sale_price",
+        pred_vars=params['model']['predictor']['all'],
+        cat_vars=params['model']['predictor']['categorical'],
+        id_vars=params['model']['predictor']['id']
+    )
+elif params['model']['name'] in ['TabTransformerRegressor']:
+    pipeline = ModelMainRecipeImputer(
+        outcome="meta_sale_price",
+        pred_vars=params['model']['predictor']['all'],
+        cat_vars=params['model']['predictor']['categorical'],
+        id_vars=params['model']['predictor']['id']
+    )
+elif params['model']['name'] in ["FeedForwardNNRegressorWithEmbeddings"]:
+    pipeline = build_model_pipeline_supress_onehot( # WARNING: We only changed to this to perform changes on the pipeline
+            pred_vars=params['model']['predictor']['all'],
+            cat_vars=params['model']['predictor']['categorical'],
+            id_vars=params['model']['predictor']['id']
+        )
 
 handler = ModelHandler(
     model_name=model_name_to_run,
@@ -873,7 +892,7 @@ temporal_cv_process = TemporalCV(
     model_handler=handler,
     cv_params=params['cv'],
     cv_enable=params['toggle']['cv_enable'],
-    data=train,
+    data=pd.concat([train, val]),
     target_col='meta_sale_price',
     date_col='meta_sale_date',
     preproc_pipeline=pipeline,
