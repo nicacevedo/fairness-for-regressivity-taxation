@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=CV_Test2_2 # job name
-#SBATCH --partition=sched_mit_sloan_gpu_r8 # partition
+#SBATCH --partition=ou_sloan_gpu #sched_mit_sloan_gpu_r8 # partition
 #SBATCH --ntasks 1 # number of tasks
 #SBATCH --cpus-per-task=1 # cpu
 #SBATCH --gres=gpu:1  # THIS ONE WAS THE ONE MISSING

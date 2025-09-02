@@ -17,12 +17,13 @@ from scipy.stats import gmean
 
 # === My models ===
 from nn_models.unconstrained.BaselineModels3 import FeedForwardNNRegressorWithEmbeddings3
+from nn_models.unconstrained.BaselineModels4 import FeedForwardNNRegressorWithEmbeddings4
 from nn_models.nn_constrained_cpu_v2 import FeedForwardNNRegressorWithProjection
 
 # === Missing models ===
 from nn_models.nn_constrained_cpu_v3 import ConstrainedRegressorProjectedWithEmbeddings
-from nn_models.unconstrained.TabTransformerRegressor2 import TabTransformerRegressor2
 from nn_models.unconstrained.TabTransformerRegressor3 import TabTransformerRegressor3
+from nn_models.unconstrained.TabTransformerRegressor4 import TabTransformerRegressor4
 from nn_models.unconstrained.WideAndDeepRegressor import WideAndDeepRegressor 
 # === End of Missing models ===
 
@@ -116,23 +117,28 @@ class ModelHandler:
     
     def _create_feed_forward_nn_embedding(self, params_dict):
         nn_params = {
+            'random_state': self.static_params.get('seed'), # Pass seed
             'categorical_features': self.static_params['predictor']['large_categories'],
             'learning_rate': params_dict.get('learning_rate'),
             'batch_size': params_dict.get('batch_size'),
             'num_epochs': params_dict.get('num_epochs'),
             'hidden_sizes': params_dict.get('hidden_sizes'),
-            'random_state': self.static_params.get('seed'), # Pass seed
             'coord_features': self.static_params['predictor']['coord_features'],
             # 'use_fourier_features':params_dict.get('use_fourier_features'),
             'patience':params_dict.get('patience'),
             'loss_fn':params_dict.get('loss_fn'),
             'gamma':params_dict.get('gamma'),
+            # v3
             'fourier_type' : params_dict.get("fourier_type"),
             'fourier_mapping_size' : params_dict.get("fourier_mapping_size"),
             'fourier_sigma' : params_dict.get("fourier_sigma"),
+            # v4
+            'engineer_time_features':params_dict.get('engineer_time_features'), 
+            'bin_yrblt':params_dict.get('bin_yrblt'), 
+            'cross_township_class':params_dict.get('cross_township_class'),
         }
-        # return FeedForwardNNRegressorWithEmbeddings2(**nn_params)
-        return FeedForwardNNRegressorWithEmbeddings3(**nn_params)
+        # return FeedForwardNNRegressorWithEmbeddings3(**nn_params)
+        return FeedForwardNNRegressorWithEmbeddings4(**nn_params)
 
     def _create_feed_forward_nn_projection(self, params_dict):
         nn_params = {
@@ -162,6 +168,7 @@ class ModelHandler:
 
     def _create_tab_transformer(self, params_dict):
         nn_params = {
+            'random_state': self.static_params.get('seed'), # Pass seed
             'categorical_features': self.static_params['predictor']['categorical'],
             'coord_features': self.static_params['predictor']['coord_features'],
             'batch_size': params_dict.get('batch_size'),
@@ -173,14 +180,18 @@ class ModelHandler:
             'dropout': params_dict.get('dropout'),
             'loss_fn': params_dict.get('loss_fn'),
             'patience':params_dict.get('patience'),
+            # v3
             'fourier_type': params_dict.get('fourier_type'),
             'fourier_mapping_size' : params_dict.get('fourier_mapping_size'),
             'fourier_sigma' : params_dict.get('fourier_sigma'),
-            'random_state': self.static_params.get('seed') # Pass seed
+            # v4
+            'engineer_time_features':params_dict.get('engineer_time_features'), 
+            'bin_yrblt':params_dict.get('bin_yrblt'), 
+            'cross_township_class':params_dict.get('cross_township_class'),
         }
         print("PARAMS: ", (nn_params['transformer_dim'], nn_params['transformer_heads'], nn_params['transformer_layers']))
-        # return TabTransformerRegressor2(**nn_params)
-        return TabTransformerRegressor3(**nn_params)
+        # return TabTransformerRegressor3(**nn_params)
+        return TabTransformerRegressor4(**nn_params)
 
     def _create_wide_and_deep(self, params_dict):
         nn_params = {

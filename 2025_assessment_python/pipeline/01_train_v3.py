@@ -83,7 +83,7 @@ with open('params.yaml', 'r') as file:
 assessment_year = 2025
 
 use_sample = False
-sample_size = 1000#00 # SAMPLE SIZE
+sample_size = 150000 # SAMPLE SIZE
 
 apply_resampling = False
 
@@ -95,7 +95,7 @@ model_names = [
     # "LinearRegression", 
     # "FeedForwardNNRegressor", 
     # "LightGBM", 
-    # "FeedForwardNNRegressorWithEmbeddings", 
+    "FeedForwardNNRegressorWithEmbeddings", 
     # "FeedForwardNNRegressorWithProjection",
     # "ConstrainedRegressorProjectedWithEmbeddings",
 
@@ -414,64 +414,27 @@ for model_name in model_names:
     elif model_name == "FeedForwardNNRegressorWithEmbeddings":
         pred_vars = [col for col in params['model']['predictor']['all'] if col in X_train_fit_emb.columns] 
         large_categories = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in pred_vars if c.startswith('loc_school_')]
-        # cat_vars = [col for col in params['model']['predictor']['categorical'] if col in X_train_fit_emb.columns]
-        # Default
-        # model = FeedForwardNNRegressorWithEmbeddings(
-        #     categorical_features=large_categories, output_size=1, random_state=42,
-        #     batch_size=16, learning_rate=0.001, num_epochs=15, 
-        #     hidden_sizes=[200, 100]
-        # )
+        cat_vars = [col for col in params['model']['predictor']['categorical'] if col in X_train_fit_emb.columns]
+        coord_vars = ["loc_longitude", "loc_latitude"]
+        kwargs = {
+            'learning_rate': 0.0007360519059468381,
+            'batch_size': 26,
+            'num_epochs': 172,
+            'hidden_sizes':[1796, 193, 140, 69],
+            'fourier_type': 'basic',
+            'patience': 11,
+            'loss_fn': 'mse',
+            'gamma': 1.4092634199672638,
+        }
+
         # Temp:
-        model = FeedForwardNNRegressorWithEmbeddings(
-            categorical_features=large_categories, output_size=1, random_state=42,
-            learning_rate= 0.003702078773155906,
-            batch_size= 31,
-            num_epochs= 500,#34,
-            hidden_sizes=[95,82,79],
-        )
-        # print(X_train_fit_emb.isna().sum())
-        # exit()
-        model.fit(X_train_fit_emb, y_train_fit_log_emb)
-
-    elif model_name == "FeedForwardNNRegressorWithEmbeddings2":
-        pred_vars = [col for col in params['model']['predictor']['all'] if col in X_train_fit_emb.columns] 
-        large_categories = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in pred_vars if c.startswith('loc_school_')]
-        cat_vars = cat_vars=params['model']['predictor']['categorical']
-        # Temp
-        model = FeedForwardNNRegressorWithEmbeddings2(
-            categorical_features=large_categories, output_size=1, random_state=42,
-            # categorical_features=params['model']['predictor']['categorical'], output_size=1, random_state=42,
-            learning_rate= 1e-3,
-            batch_size= 40,
-            num_epochs= 50,
-            hidden_sizes=[1024, 512],
-            patience=10,
-        )
-        # print(X_train_fit_emb.isna().sum())
-        # exit()
-        # model.fit(X_train_fit_emb, y_train_fit_log_emb)
-        model.fit(X_train_fit_emb, y_train_fit_log_emb,
-            X_val=X_val_fit_emb, y_val=y_val_fit_log
-        )
-
-    elif model_name == "FeedForwardNNRegressorWithEmbeddings3":
-        pred_vars = [col for col in params['model']['predictor']['all'] if col in X_train_fit_emb.columns] 
-        large_categories = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in pred_vars if c.startswith('loc_school_')]
-        cat_vars = cat_vars=params['model']['predictor']['categorical']
-        # Temp
         model = FeedForwardNNRegressorWithEmbeddings3(
-            large_categories, coord_features= ["loc_longitude", "loc_latitude"], output_size=1, random_state=42,
-            # cat_vars, coord_features= ["loc_longitude", "loc_latitude"], output_size=1, random_state=42,
-            use_fourier_features=False,
-            batch_size=25, learning_rate=0.001, num_epochs=50, 
-            hidden_sizes=[1024, 512], patience=10, 
-            loss_fn='mse', 
-            # n_bins=10, # binned_mse # gamma = 1.5
+            categorical_features=large_categories, coord_features=coord_vars, output_size=1, random_state=42,
+            **kwargs
         )
         model.fit(X_train_fit_emb, y_train_fit_log_emb,
             X_val=X_val_fit_emb, y_val=y_val_fit_log
         )
-
 
     elif model_name == "FeedForwardNNRegressorWithProjection":
         pred_vars = [col for col in params['model']['predictor']['all'] if col in X_train_fit_emb.columns] 
@@ -659,7 +622,7 @@ for model_name in model_names:
 
 
 
-# exit()
+exit()
 
 # ========== CV REFACTOR =============
 
@@ -678,7 +641,7 @@ params = {
             'run_name_suffix': 'multi_sample_test_4_2'
         },
     'model': {
-        'name': 'TabTransformerRegressor', # <-- SELECT MODEL HERE
+        'name': 'FeedForwardNNRegressorWithEmbeddings', # <-- SELECT MODEL HERE
         'objective': 'regression_l1', 'verbose': -1, 'deterministic': True,
         'force_row_wise': True, 'seed': 42,
         'predictor': {

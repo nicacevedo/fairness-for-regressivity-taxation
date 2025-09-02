@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset, random_split
+from torch.utils.data import DataLoader, TensorDataset, random_split, Dataset
 import numpy as np
 import pandas as pd
 from collections import OrderedDict
@@ -174,8 +174,53 @@ class NNWithEmbeddings(nn.Module):
         
         return self.layers(x)
 
+
+
 # ==============================================================================
-# 4. The Regressor Wrapper Class (Upgraded)
+# 4. Memory-Efficient Prediction Dataset (NEW)
+# ==============================================================================
+class _PredictionDataset(Dataset):
+    """
+    A memory-efficient dataset for inference. It processes data from a pandas
+    DataFrame one sample at a time, avoiding loading the entire dataset into
+    memory as tensors.
+    """
+    def __init__(self, X_df, cat_features, num_features, coord_features, cat_mappings):
+        self.cat_features = cat_features
+        self.num_features = num_features
+        self.coord_features = coord_features
+        
+        # Pre-convert categorical features to numpy arrays of integer codes.
+        if cat_features:
+            self.X_cat_codes = np.stack([
+                X_df[col].map(cat_mappings[col]).fillna(0).values.astype(np.int64) 
+                for col in cat_features
+            ], axis=1)
+        else:
+            self.X_cat_codes = np.empty((len(X_df), 0), dtype=np.int64)
+
+        # Store numerical and coordinate features as numpy arrays
+        self.X_num = X_df[num_features].values.astype(np.float32)
+        self.X_coord = X_df[coord_features].values.astype(np.float32)
+
+    def __len__(self):
+        return len(self.X_num)
+
+    def __getitem__(self, idx):
+        # Retrieve the pre-converted data for a single index
+        x_cat = self.X_cat_codes[idx]
+        x_num = self.X_num[idx]
+        x_coord = self.X_coord[idx]
+        
+        # Convert just this single sample to tensors
+        return (
+            torch.tensor(x_cat, dtype=torch.long),
+            torch.tensor(x_num, dtype=torch.float32),
+            torch.tensor(x_coord, dtype=torch.float32)
+        )
+
+# ==============================================================================
+# 5. The Regressor Wrapper Class (Upgraded)
 # ==============================================================================
 class FeedForwardNNRegressorWithEmbeddings3:
 
@@ -310,7 +355,7 @@ class FeedForwardNNRegressorWithEmbeddings3:
         if best_model_state:
             self.model.load_state_dict(best_model_state)
 
-    def predict(self, X):
+    def predict_old(self, X):
         if self.model is None:
             raise RuntimeError("You must call fit() before calling predict().")
         
@@ -335,6 +380,36 @@ class FeedForwardNNRegressorWithEmbeddings3:
                 all_predictions.extend(outputs.cpu().numpy())
         
         return np.array(all_predictions).flatten()
+    
+
+    def predict(self, X):
+        if self.model is None:
+            raise RuntimeError("You must call fit() before calling predict().")
+        
+        X_processed = X.copy()
+        
+        # Use the memory-efficient custom dataset for prediction
+        test_dataset = _PredictionDataset(
+            X_df=X_processed,
+            cat_features=self.categorical_features,
+            num_features=self.numerical_features,
+            coord_features=self.coord_features,
+            cat_mappings=self.category_mappings
+        )
+        
+        # Use a larger batch size for inference as it's less memory intensive
+        test_loader = DataLoader(dataset=test_dataset, batch_size=self.batch_size * 4, shuffle=False)
+
+        self.model.eval()
+        all_predictions = []
+        with torch.no_grad():
+            for batch_cat, batch_num, batch_coord in test_loader:
+                batch_cat, batch_num, batch_coord = batch_cat.to(device), batch_num.to(device), batch_coord.to(device)
+                outputs = self.model(batch_cat, batch_num, batch_coord)
+                all_predictions.append(outputs.cpu().numpy())
+        
+        return np.concatenate(all_predictions).flatten()
+        
 
     def set_params(self, **params):
         for key, value in params.items():

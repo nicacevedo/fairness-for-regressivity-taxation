@@ -165,7 +165,7 @@ class NNWithEmbeddings(nn.Module):
 # ==============================================================================
 # 4. The Regressor Wrapper Class (Upgraded with Feature Engineering)
 # ==============================================================================
-class FeedForwardNNRegressorWithEmbeddings3:
+class FeedForwardNNRegressorWithEmbeddings4:
 
     def __init__(self, categorical_features, coord_features=[], 
                  engineer_time_features=False, bin_yrblt=False, cross_township_class=False,
@@ -358,8 +358,8 @@ class FeedForwardNNRegressorWithEmbeddings3:
         
         X_pred = self._engineer_features(X)
         
-        if self.numerical_features:
-            X_pred.loc[:, self.numerical_features] = self.scaler.transform(X_pred[self.numerical_features])
+        # if self.numerical_features:
+        #     X_pred.loc[:, self.numerical_features] = self.scaler.transform(X_pred[self.numerical_features])
 
         X_cat_tensors = [torch.tensor(X_pred[col].map(self.category_mappings[col]).fillna(0).values, dtype=torch.long) for col in self.categorical_features]
         X_cat = torch.stack(X_cat_tensors, dim=1) if X_cat_tensors else torch.empty(len(X_pred), 0, dtype=torch.long)
