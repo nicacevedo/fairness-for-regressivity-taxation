@@ -43,11 +43,13 @@ class BalancingResampler(BaseEstimator, TransformerMixin):
         - 1.0 aims for all bins to match the largest bin's size.
         - 0.5 is a balanced compromise.
 
-    undersample_policy : {'random', 'outlier', 'tomek_links'}, default='random'
+    undersample_policy : {'random', 'outlier', 'inlier', 'tomek_links'}, default='random'
         The policy for under-sampling bins that are too large:
         - 'random': Randomly removes samples. Fast and simple.
         - 'outlier': Intelligently removes samples that are feature-space
           outliers within their bin, effectively cleaning noise.
+        - 'inlier': The opposite of 'outlier'. Keeps the most anomalous
+          samples in the bin.
         - 'tomek_links': Removes samples from the majority bin that are nearest
           neighbors to samples in adjacent minority bins, cleaning the
           decision boundary between bins.
@@ -112,24 +114,44 @@ class BalancingResampler(BaseEstimator, TransformerMixin):
 
     def _create_bins(self, y, n_bins_actual):
         """Helper function to create bins based on the chosen policy."""
-        y_np = y.to_numpy()
+        y_s = y if isinstance(y, pd.Series) else pd.Series(y)
+        y_np = y_s.to_numpy()
+
         if self.binning_policy == 'uniform':
-            return pd.cut(y, n_bins_actual, labels=False, duplicates='drop')
+            bins, edges = pd.cut(y_s, n_bins_actual, labels=False, duplicates='drop', retbins=True)
+            return bins, edges
         elif self.binning_policy == 'quantile':
-            return pd.qcut(y, n_bins_actual, labels=False, duplicates='drop')
-        elif self.binning_policy == 'outlier':
+            bins, edges = pd.qcut(y_s, n_bins_actual, labels=False, duplicates='drop', retbins=True)
+            return bins, edges
+        
+        # For other policies, we derive edges after getting labels
+        bin_labels = None
+        if self.binning_policy == 'outlier':
             iso = IsolationForest(random_state=self.random_state)
             scores = iso.fit_predict(y_np.reshape(-1, 1))
-            return pd.qcut(scores, n_bins_actual, labels=False, duplicates='drop')
+            # Use qcut to get somewhat even bins from scores
+            bin_labels, edges = pd.qcut(scores, n_bins_actual, labels=False, duplicates='drop', retbins=True)
         elif self.binning_policy == 'kmeans':
             kmeans = KMeans(n_clusters=n_bins_actual, random_state=self.random_state, n_init=10)
-            return kmeans.fit_predict(y_np.reshape(-1, 1))
+            bin_labels = kmeans.fit_predict(y_np.reshape(-1, 1))
         elif self.binning_policy == 'decision_tree':
             tree = DecisionTreeRegressor(max_leaf_nodes=n_bins_actual, random_state=self.random_state)
             tree.fit(y_np.reshape(-1, 1), y)
-            return tree.apply(y_np.reshape(-1, 1))
+            bin_labels = tree.apply(y_np.reshape(-1, 1))
         else:
             raise ValueError(f"Unknown binning_policy: {self.binning_policy}")
+
+        # Derive edges from labels if not already available
+        if 'edges' not in locals():
+            df = pd.DataFrame({'y': y_np, 'bin': bin_labels})
+            # Find the max value of y in each bin to define the edge
+            sorted_bins_max = df.groupby('bin')['y'].max().sort_index()
+            edges = [y_np.min()] + sorted_bins_max.tolist()
+            edges[-1] = y_np.max() # Ensure the last edge is the global max
+            edges = np.unique(edges) # Handle cases where min/max are the same for a bin
+        
+        return pd.Series(bin_labels, index=y.index), edges
+
 
     def _smoter_interpolate_y(self, X_orig, y_orig, X_synthetic):
         """Interpolates y values for synthetic samples for SMOTER."""
@@ -211,7 +233,8 @@ class BalancingResampler(BaseEstimator, TransformerMixin):
         
         neighbor_labels = [l for l in np.unique(bins) if abs(l - bin_label) == 1]
         if not neighbor_labels:
-            return resample(X_bin, y_bin, n_samples=target_samples, random_state=self.random_state, replace=False)
+            X_res, y_res = resample(X_bin, y_bin, n_samples=target_samples, random_state=self.random_state, replace=False)
+            return X_res, y_res
         
         X_neighbors = X_all[np.isin(bins, neighbor_labels)]
         
@@ -240,6 +263,72 @@ class BalancingResampler(BaseEstimator, TransformerMixin):
         y_res = y_bin.drop(to_remove_indices)
         return X_res, y_res
 
+    def plot_distributions(self, sample_size=2000, kde=True):
+        """
+        Visualizes the distribution of the target variable before and after
+        resampling.
+
+        Requires matplotlib and seaborn to be installed.
+        """
+        try:
+            import matplotlib.pyplot as plt
+            import seaborn as sns
+        except ImportError:
+            print("Plotting requires matplotlib and seaborn. Please install them.")
+            return
+
+        if not hasattr(self, 'y_original_'):
+            raise RuntimeError("You must call fit_resample() before plotting.")
+
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6), sharey=True)
+        
+        # --- LEFT PLOT: BEFORE RESAMPLING ---
+        sample_indices = np.random.choice(len(self.y_original_), min(len(self.y_original_), sample_size), replace=False)
+        print(self.y_original_[sample_indices])
+        print(self.y_original_[sample_indices].size)
+        print(self.bins_original_[sample_indices])
+        print(self.bins_original_[sample_indices].size)
+        y_before_sample = self.y_original_[sample_indices]
+        bins_before_sample = self.bins_original_[sample_indices]
+
+        sns.histplot(x=y_before_sample, hue=bins_before_sample, palette='viridis', kde=kde, ax=axes[0])
+        axes[0].set_title(f"Before Resampling (n={len(self.y_original_)})")
+        axes[0].set_xlabel("Target Value (e.g., Price)")
+        axes[0].get_legend().set_title("Bin")
+
+        # --- RIGHT PLOT: AFTER RESAMPLING ---
+        sample_indices_after = np.random.choice(len(self.y_resampled_), min(len(self.y_resampled_), sample_size), replace=False)
+        y_after_raw = self.y_resampled_[sample_indices_after]
+        
+        # Filter out non-finite values before plotting
+        finite_mask = np.isfinite(y_after_raw)
+        y_after_sample = y_after_raw[finite_mask]
+        
+        if len(y_after_sample) == 0:
+            print("Warning: No finite values found in resampled y data for plotting.")
+            return
+
+        # Use np.searchsorted for robust binning for the plot
+        sorted_edges = np.sort(self.bin_edges_)
+        indices = np.searchsorted(sorted_edges, y_after_sample, side='right')
+        bins_after_sample = indices - 1
+        max_bin_index = len(sorted_edges) - 2
+        bins_after_sample = np.clip(bins_after_sample, 0, max_bin_index)
+
+        sns.histplot(x=y_after_sample, hue=bins_after_sample, palette='viridis', kde=kde, ax=axes[1])
+        axes[1].set_title(f"After Resampling (n={len(self.y_resampled_)})")
+        axes[1].set_xlabel("Target Value (e.g., Price)")
+        axes[1].get_legend().set_title("Bin")
+
+        plt.suptitle("Target Distribution Before and After Balancing", fontsize=16)
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+
+        # Mine
+        axes[0].get_legend().remove()
+        axes[1].get_legend().remove()
+        plt.savefig('plots/test.jpg', dpi=300)
+        # plt.show()
+
     def fit_resample(self, X, y):
         """Resamples the dataset X and y."""
         print("Starting balancing resampling...")
@@ -248,9 +337,14 @@ class BalancingResampler(BaseEstimator, TransformerMixin):
         else:
             X_df = X.copy()
         y_s = pd.Series(y)
+        
+        # Store original data for plotting
+        self.y_original_ = y_s.to_numpy()
 
         n_bins_actual = self._get_n_bins(y_s)
-        bins = self._create_bins(y_s, n_bins_actual)
+        bins, self.bin_edges_ = self._create_bins(y_s, n_bins_actual) # Store bin edges
+        self.bins_original_ = bins.to_numpy() # Store original bins
+
         bin_counts = pd.Series(bins).value_counts()
         print(f"Using {n_bins_actual} bins with policy '{self.binning_policy}'.")
         print(f"Original bin counts:\n{bin_counts.sort_index()}")
@@ -280,6 +374,14 @@ class BalancingResampler(BaseEstimator, TransformerMixin):
                     scores = iso.fit(X_bin_numeric).decision_function(X_bin_numeric)
                     keep_indices = X_bin.index[np.argsort(scores)[-target_samples:]]
                     X_res, y_res = X_bin.loc[keep_indices], y_bin.loc[keep_indices]
+                elif self.undersample_policy == 'inlier': # NEW POLICY
+                    numeric_cols = [c for i, c in enumerate(X_bin.columns) if self.categorical_features is None or i not in self.categorical_features]
+                    X_bin_numeric = X_bin[numeric_cols]
+                    iso = IsolationForest(random_state=self.random_state)
+                    scores = iso.fit(X_bin_numeric).decision_function(X_bin_numeric)
+                    # Keep the samples with the LOWEST scores (the outliers)
+                    keep_indices = X_bin.index[np.argsort(scores)[:target_samples]]
+                    X_res, y_res = X_bin.loc[keep_indices], y_bin.loc[keep_indices]
                 else:
                     raise ValueError(f"Unknown undersample_policy: {self.undersample_policy}")
             
@@ -293,10 +395,14 @@ class BalancingResampler(BaseEstimator, TransformerMixin):
                     X_synthetic, y_synthetic = self._density_smote_oversample(X_bin, y_bin, n_to_generate)
                 else: # Handle SMOTE, SMOTER, SMOTENC
                     k_neighbors = min(self.smote_k_neighbors, n_samples_in_bin - 1)
-                    other_samples_mask = ~bin_mask
-                    if np.any(other_samples_mask):
-                        X_other = X_df[other_samples_mask].head(1)
-                        X_for_smote = pd.concat([X_bin, X_other])
+                    if k_neighbors < 1:
+                        # Cannot use SMOTE, fallback to random sampling
+                        X_synthetic = X_bin.sample(n=n_to_generate, replace=True, random_state=self.random_state)
+                        y_synthetic = pd.Series(np.random.choice(y_bin, size=len(X_synthetic)), name=y_s.name)
+                    else:
+                        other_samples_mask = ~bin_mask
+                        # To use imblearn's SMOTE, we need at least one sample from another class
+                        X_for_smote = pd.concat([X_bin, X_df[other_samples_mask].head(1)])
                         y_dummy = np.array([0] * n_samples_in_bin + [1])
                         
                         sampler = None
@@ -307,15 +413,13 @@ class BalancingResampler(BaseEstimator, TransformerMixin):
                             sampler = SMOTE(sampling_strategy={0: target_samples}, k_neighbors=k_neighbors, random_state=self.random_state)
                         
                         X_resampled_smote, _ = sampler.fit_resample(X_for_smote, y_dummy)
-                        X_synthetic_all = X_resampled_smote.iloc[:target_samples]
+                        X_synthetic_all = pd.DataFrame(X_resampled_smote, columns=X_df.columns).iloc[:target_samples]
                         X_synthetic = X_synthetic_all.iloc[n_samples_in_bin:]
-                    else:
-                        X_synthetic = X_bin.sample(n=n_to_generate, replace=True, random_state=self.random_state)
 
-                    if self.oversample_policy in ['smoter', 'smotenc']:
-                        y_synthetic = self._smoter_interpolate_y(X_bin, y_bin, X_synthetic)
-                    elif self.oversample_policy == 'smote':
-                        y_synthetic = pd.Series(np.random.choice(y_bin, size=len(X_synthetic)), name=y_s.name)
+                        if self.oversample_policy in ['smoter', 'smotenc']:
+                            y_synthetic = self._smoter_interpolate_y(X_bin, y_bin, X_synthetic)
+                        elif self.oversample_policy == 'smote':
+                            y_synthetic = pd.Series(np.random.choice(y_bin, size=len(X_synthetic)), name=y_s.name)
                 
                 X_res = pd.concat([X_bin, X_synthetic])
                 y_res = pd.concat([y_bin, y_synthetic])
@@ -329,6 +433,10 @@ class BalancingResampler(BaseEstimator, TransformerMixin):
 
         X_final = pd.concat(resampled_X, ignore_index=True)
         y_final = pd.concat(resampled_y, ignore_index=True)
+        
+        # Store resampled y for plotting
+        self.y_resampled_ = y_final.to_numpy()
 
         print("Balancing resampling complete.")
         return X_final, y_final
+
