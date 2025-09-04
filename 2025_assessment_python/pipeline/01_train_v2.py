@@ -48,6 +48,7 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from nn_models.nn_unconstrained import FeedForwardNNRegressor, FeedForwardNNRegressorWithEmbeddings
 from nn_models.unconstrained.BaselineModels2 import FeedForwardNNRegressorWithEmbeddings2
 from nn_models.unconstrained.BaselineModels3 import FeedForwardNNRegressorWithEmbeddings3
+from nn_models.unconstrained.BaselineModels4 import FeedForwardNNRegressorWithEmbeddings4
 from nn_models.nn_constrained_cpu_v2 import FeedForwardNNRegressorWithProjection # FeedForwardNNRegressorWithConstraints, 
 from nn_models.nn_constrained_cpu_v3 import ConstrainedRegressorProjectedWithEmbeddings
 from nn_models.unconstrained.TabTransformerRegressor import TabTransformerRegressor
@@ -67,7 +68,7 @@ from recipes.recipes_pipelined import build_model_pipeline, build_model_pipeline
 from balancing_models import BalancingResampler
 
 # 4. Cross Validation
-from temporal_bayes_cv import ModelHandler, TemporalCV#TemporalBayesCV, ModelSpec
+from temporal_bayes_cv import ModelHandler, TemporalCV 
 from optuna.pruners import SuccessiveHalvingPruner
 
 
@@ -169,25 +170,10 @@ val = train.iloc[split_index:]
 train = train.iloc[:split_index]
 
 
-# # TO REFINE: main pipeline
-# # Create a recipe for the training data which removes non-predictor columns and
-# # preps categorical data, see R/recipes.R for details
-# train_pipeline, X, y, train_IDs = model_main_pipeline(
-#     data=training_data_full,
-#     pred_vars=params['model']['predictor']['all'],
-#     cat_vars=params['model']['predictor']['categorical'],
-#     id_vars=params['model']['predictor']['id']
-# )
-# # # Fit and transform training data (applies categorical processing, etc.)
-# # X_transformed = pd.DataFrame(train_pipeline.fit_transform(X), index=X.index)
-
-
-
-
 #- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 # 3. Linear Model --------------------------------------------------------------
 #- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-print("Creating and fitting linear baseline model")
+print("Creating the CV process...")
 
 # Create a linear model recipe with additional imputation, transformations,
 # and feature interactions
@@ -199,469 +185,11 @@ val = val[params['model']['predictor']['all'] + params['model']['predictor']['id
 # train = train[params['model']['predictor']['all'] + params['model']['predictor']['id'] + ['meta_sale_price'] + ["meta_sale_date"]] # Sale date for CV split (?)
 test = test[params['model']['predictor']['all'] + params['model']['predictor']['id'] + ['meta_sale_price', 'meta_sale_date']]
 
-# Split the data in X, y
-X_train_prep, y_train_fit_log = train.drop(columns=['meta_sale_price']), train['meta_sale_price'] 
-X_val_prep, y_val_fit_log = val.drop(columns=['meta_sale_price']), val['meta_sale_price'] 
-X_test_prep, y_test_fit_log = test.drop(columns=['meta_sale_price']), test['meta_sale_price']
 
-# print("COLUMNS: ", X_train_prep.columns)
-
-# ===== New pipeline version ====
-model_lin_pipeline = build_model_pipeline(
-    pred_vars=params['model']['predictor']['all'],
-    cat_vars=params['model']['predictor']['categorical'],
-    id_vars=params['model']['predictor']['id']
-)
-
-if emb_pipeline_name == "build_model_pipeline_supress_onehot":
-    model_emb_pipeline = build_model_pipeline_supress_onehot( # WARNING: We only changed to this to perform changes on the pipeline
-        pred_vars=params['model']['predictor']['all'],
-        cat_vars=params['model']['predictor']['categorical'],
-        id_vars=params['model']['predictor']['id']
-    )
-elif emb_pipeline_name == "ModelMainRecipe":
-    model_emb_pipeline = ModelMainRecipe(
-        outcome= "meta_sale_price",
-        pred_vars=params['model']['predictor']['all'],
-        cat_vars=params['model']['predictor']['categorical'],
-        id_vars=params['model']['predictor']['id']
-    )
-elif emb_pipeline_name == "ModelMainRecipeImputer":
-    model_emb_pipeline = ModelMainRecipeImputer(
-            outcome= "meta_sale_price",
-            pred_vars=params['model']['predictor']['all'],
-            cat_vars=params['model']['predictor']['categorical'],
-            id_vars=params['model']['predictor']['id']
-    )
-
-# === Fitting datasets ===
-
-
-# 1. Fit / transform the data for linear models
-X_train_fit_lin = model_lin_pipeline.fit_transform(X_train_prep, y_train_fit_log)#.drop(columns=params['model']['predictor']['id'])
-X_test_fit_lin = model_lin_pipeline.transform(X_test_prep)#.drop(columns=params['model']['predictor']['id'])
-# ===== Resampler =====
-if apply_resampling:
-    resampler_lin = BalancingResampler( 
-        n_bins=100, binning_policy='uniform', max_diff_ratio=0.5,
-        undersample_policy='random', oversample_policy='smoter',
-        smote_k_neighbors=5, random_state=42
-    )
-    X_train_fit_lin, y_train_fit_log_lin = resampler_lin.fit_resample(X_train_fit_lin, y_train_fit_log) # only train is for resampling
-else:
-    y_train_fit_log_lin = y_train_fit_log
-
-
-# 2. Fit / transform the data for models with embeddings
-X_train_fit_emb = model_emb_pipeline.fit_transform(X_train_prep, y_train_fit_log).drop(columns=params['model']['predictor']['id'], errors="ignore")
-X_val_fit_emb = model_emb_pipeline.transform(X_val_prep).drop(columns=params['model']['predictor']['id'], errors="ignore")
-X_test_fit_emb = model_emb_pipeline.transform(X_test_prep).drop(columns=params['model']['predictor']['id'], errors="ignore")
-# X_train_fit_emb["char_recent_renovation"] = X_train_fit_emb["char_recent_renovation"].astype(bool) # QUESTION: Why is this not in cat_vars?
-# na_columns = X_train_fit_emb.isna().sum()[X_train_fit_emb.isna().sum() > 0].index
-# X_train_fit_emb[na_columns] = X_train_fit_emb[na_columns].fillna(value="unknown")
-cat_cols_emb = [i for i,col in enumerate(X_train_fit_emb.columns) if X_train_fit_emb[col].dtype == object  or X_train_fit_emb[col].dtype == "category"]
-# ===== Resampler =====
-if apply_resampling:
-    resampler_emb = BalancingResampler( 
-        n_bins=100, binning_policy='uniform', max_diff_ratio=0.5,
-        undersample_policy='random', oversample_policy='smotenc',
-        smote_k_neighbors=5, random_state=42,
-        categorical_features=cat_cols_emb
-    )
-    X_train_fit_emb, y_train_fit_log_emb = resampler_emb.fit_resample(X_train_fit_emb, y_train_fit_log) # only train is for resampling
-else:
-    y_train_fit_log_emb = y_train_fit_log
-# X_test_fit_emb["char_recent_renovation"] = X_test_fit_emb["char_recent_renovation"].astype(bool) # QUESTION: Why is this not in cat_vars?
-
-# # 3. Pass any object feature to category for embedded models (Light GBM, NN w/ embedding, etc.)
-# for col in X_train_fit_emb:
-#     if X_train_fit_emb[col].dtype == object:
-#         print("To category: ", col)
-#         X_train_fit_emb[col] = X_train_fit_emb[col].astype("category")
-# for col in X_test_fit_emb:
-#     if X_test_fit_emb[col].dtype == object:
-#         print("To category: ", col)
-#         X_test_fit_emb[col] = X_test_fit_emb[col].astype("category")
-
-
-
-# print("All features:")
-# for col in X_train_fit_emb.columns:
-#     if len(X_train_fit_emb[col].unique()) < 10:
-#         print(col, X_train_fit_emb[col].dtype, X_train_fit_emb[col].unique()) 
-#     else:
-#         print(col, X_train_fit_emb[col].dtype, X_train_fit_emb[col].unique()[:10]) 
-# # print(X_train_fit_emb.columns.tolist())
-# exit()
-# ==========================================================================================
-#                       Comparisson of the different models
-# ==========================================================================================
-
-print("Fitting models...")
-
-for model_name in model_names:
-
-    print("="*100)
-    print("Fitting the model: ", model_name)
-    print("="*100)
-
-    if model_name == "LightGBM":
-
-            
-        stop_iter         = params['model']['parameter']['stop_iter']
-        objective         = params['model']['objective']
-        verbose           = params['model']['verbose']
-        validation_prop   = params['model']['parameter']['validation_prop']   # e.g., 0.2
-        validation_type   = params['model']['parameter']['validation_type']   # "random" | "recent"
-        validation_metric = params['model']['parameter']['validation_metric'] # e.g., "rmse"
-        link_max_depth    = params['model']['parameter']['link_max_depth']    # bool
-        deterministic     = params['model']['deterministic']
-        force_row_wise    = params['model']['force_row_wise']
-        seed              = params['model']['seed']
-        categorical_cols  = params['model']['predictor']['categorical']       # names (if you keep categorical dtype)
-
-        params_dict = params["model"]["hyperparameter"]["default"]
-        max_depth = floor(log2(params_dict["num_leaves"])) + params_dict['add_to_linked_depth']
-        n_estimators_static = params['model']['hyperparameter']['default']['num_iterations']
-
-        # # Print each variable
-        # print(f"stop_iter: {stop_iter}")
-        # print(f"objective: {objective}")
-        # print(f"verbose: {verbose}")
-        # print(f"validation_prop: {validation_prop}")
-        # print(f"validation_type: {validation_type}")
-        # print(f"validation_metric: {validation_metric}")
-        # print(f"link_max_depth: {link_max_depth}")
-        # print(f"deterministic: {deterministic}")
-        # print(f"force_row_wise: {force_row_wise}")
-        # print(f"seed: {seed}")
-        # print(f"categorical_cols: {categorical_cols}")
-        # print(f"params_dict: {params_dict}")
-        # print(f"max_depth: {max_depth}")
-        # print(f"n_estimators_static: {n_estimators_static}")
-
-        # model = lgb.LGBMRegressor(
-        #     n_estimators=n_estimators_static,
-
-        #     # Determinism / engine controls
-        #     random_state=seed,
-        #     deterministic=deterministic,
-        #     force_row_wise=force_row_wise,
-        #     # n_jobs=num_threads, # Check the number CPU's first
-        #     verbose=verbose,
-
-        #     # Objective
-        #     objective=objective,
-
-        #     # Core complexity / tree params
-        #     learning_rate=params_dict['learning_rate'],
-        #     max_bin=int(params_dict['max_bin']),
-        #     num_leaves=int(params_dict["num_leaves"]),
-        #     feature_fraction=params_dict['feature_fraction'],
-        #     min_gain_to_split=params_dict['min_gain_to_split'],
-        #     min_data_in_leaf=int(params_dict['min_data_in_leaf']),
-        #     max_depth=int(max_depth) if max_depth != -1 else -1,
-
-        #     # Categorical-specific
-        #     max_cat_threshold=int(params_dict['max_cat_threshold']),
-        #     min_data_per_group=int(params_dict['min_data_per_group']),
-        #     cat_smooth=params_dict['cat_smooth'],
-        #     cat_l2=params_dict['cat_l2'],
-
-        #     # Regularization
-        #     reg_alpha=params_dict['lambda_l1'],
-        #     reg_lambda=params_dict['lambda_l2'],
-
-        #     # Trees (n_estimators) # (missing this information)
-        #     # n_estimators=int(params_dict['n_estimators'])
-        #     # if params_dict.get('n_estimators') is not None
-        #     # else (int(params_dict["n_estimators_static"]) if params_dict["n_estimators_static"] is not None else 1000)
-        # )    
-
-        # 1000 on 100k (only train (?)). Note: Is it not biased bc of validation set (?).
-        model = lgb.LGBMRegressor(cat_l2=22.95020213396379, cat_smooth=31.14663605311536,
-              deterministic=True, feature_fraction=0.6572673015780892,
-              force_row_wise=True, learning_rate=0.03341584496999874,
-              max_bin=323, max_cat_threshold=82, max_depth=12,
-              min_data_in_leaf=68, min_data_per_group=81,
-              min_gain_to_split=0.12374932835073327, n_estimators=2500,
-              num_leaves=366, objective='rmse', random_state=2025,
-              reg_alpha=0.06676779724096571, reg_lambda=30.039145583263345,
-              verbose=-1)
-
-        model.fit(
-            X_train_fit_emb, y_train_fit_log_emb,
-            eval_set=[(X_val_fit_emb, y_val_fit_log)],
-            eval_metric='rmse', 
-            callbacks=[
-                lgb.early_stopping(stopping_rounds=stop_iter),  # Early stopping here
-                lgb.log_evaluation(0)  # Suppress logging (use 1 for logging every round)
-            ]
-        )
-
-    elif model_name == "LinearRegression":
-        model = LinearRegression()
-        model.fit(X_train_fit_lin, y_train_fit_log_lin)
-
-    elif model_name == "FeedForwardNNRegressor":
-        model = FeedForwardNNRegressor(
-            input_features=X_train_fit_lin.shape[1], output_size=1,  
-            batch_size=16, learning_rate=0.001, num_epochs=50,
-            hidden_sizes=[200, 100]
-        )
-        model.fit(X_train_fit_lin, y_train_fit_log_lin)
-
-    elif model_name == "FeedForwardNNRegressorWithEmbeddings":
-        pred_vars = [col for col in params['model']['predictor']['all'] if col in X_train_fit_emb.columns] 
-        large_categories = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in pred_vars if c.startswith('loc_school_')]
-        # cat_vars = [col for col in params['model']['predictor']['categorical'] if col in X_train_fit_emb.columns]
-        # Default
-        # model = FeedForwardNNRegressorWithEmbeddings(
-        #     categorical_features=large_categories, output_size=1, random_state=42,
-        #     batch_size=16, learning_rate=0.001, num_epochs=15, 
-        #     hidden_sizes=[200, 100]
-        # )
-        # Temp:
-        model = FeedForwardNNRegressorWithEmbeddings(
-            categorical_features=large_categories, output_size=1, random_state=42,
-            learning_rate= 0.003702078773155906,
-            batch_size= 31,
-            num_epochs= 500,#34,
-            hidden_sizes=[95,82,79],
-        )
-        # print(X_train_fit_emb.isna().sum())
-        # exit()
-        model.fit(X_train_fit_emb, y_train_fit_log_emb)
-
-    elif model_name == "FeedForwardNNRegressorWithEmbeddings2":
-        pred_vars = [col for col in params['model']['predictor']['all'] if col in X_train_fit_emb.columns] 
-        large_categories = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in pred_vars if c.startswith('loc_school_')]
-        cat_vars = cat_vars=params['model']['predictor']['categorical']
-        # Temp
-        model = FeedForwardNNRegressorWithEmbeddings2(
-            categorical_features=large_categories, output_size=1, random_state=42,
-            # categorical_features=params['model']['predictor']['categorical'], output_size=1, random_state=42,
-            learning_rate= 1e-3,
-            batch_size= 40,
-            num_epochs= 50,
-            hidden_sizes=[1024, 512],
-            patience=10,
-        )
-        # print(X_train_fit_emb.isna().sum())
-        # exit()
-        # model.fit(X_train_fit_emb, y_train_fit_log_emb)
-        model.fit(X_train_fit_emb, y_train_fit_log_emb,
-            X_val=X_val_fit_emb, y_val=y_val_fit_log
-        )
-
-    elif model_name == "FeedForwardNNRegressorWithEmbeddings3":
-        pred_vars = [col for col in params['model']['predictor']['all'] if col in X_train_fit_emb.columns] 
-        large_categories = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in pred_vars if c.startswith('loc_school_')]
-        cat_vars = cat_vars=params['model']['predictor']['categorical']
-        # Temp
-        model = FeedForwardNNRegressorWithEmbeddings3(
-            large_categories, coord_features= ["loc_longitude", "loc_latitude"], output_size=1, random_state=42,
-            # cat_vars, coord_features= ["loc_longitude", "loc_latitude"], output_size=1, random_state=42,
-            use_fourier_features=False,
-            batch_size=25, learning_rate=0.001, num_epochs=50, 
-            hidden_sizes=[1024, 512], patience=10, 
-            loss_fn='mse', 
-            # n_bins=10, # binned_mse # gamma = 1.5
-        )
-        model.fit(X_train_fit_emb, y_train_fit_log_emb,
-            X_val=X_val_fit_emb, y_val=y_val_fit_log
-        )
-
-
-    elif model_name == "FeedForwardNNRegressorWithProjection":
-        pred_vars = [col for col in params['model']['predictor']['all'] if col in X_train_fit_emb.columns] 
-        large_categories = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in pred_vars if c.startswith('loc_school_')]
-        # cat_vars = [col for col in params['model']['predictor']['categorical'] if col in X_train_fit_emb.columns]
-        # Default
-        # model = FeedForwardNNRegressorWithProjection(
-        #     large_categories, output_size=1, random_state=42,
-        #     batch_size=16, learning_rate=0.001, num_epochs=10, 
-        #     hidden_sizes=[200, 100], 
-        #     dev_thresh=0.75
-        # )
-        # # 100k with 10 iters
-        # model = FeedForwardNNRegressorWithProjection(
-        #     large_categories, output_size=1, 
-        #     **{'learning_rate': 0.002911051996104486, 'batch_size': 19, 'num_epochs': 12, 'hidden_sizes': [195], 'dev_thresh': 0.8295835055926347}
-        # )
-        # 100k with 48 iters
-        model = FeedForwardNNRegressorWithProjection(
-            large_categories, output_size=1, random_state=42,
-            **{'learning_rate': 0.008284479096736002, 'batch_size': 27, 'num_epochs': 14, 'hidden_sizes': [187], 'dev_thresh': 0.9914267936547978}
-        )
-
-        # large_categories_indices = [X_train_fit_emb.columns.get_loc(col) for col in large_categories]
-        # model = ConstrainedRegressorProjectedWithEmbeddings(
-        #          categorical_features=large_categories_indices,
-        #          output_size=1,
-        #          batch_size=16,
-        #          learning_rate=0.001,
-        #          num_epochs=50,
-        #          hidden_sizes=[200, 100],
-        #          n_groups=3,
-        #          dev_thresh=0.15,
-        #          group_thresh=0.05,
-        #          device=None,
-        #          debug=False
-        # )
-        # model.fit(X_train_fit_emb, y_train_fit_log_emb, debug_mode=True)
-        model.fit(X_train_fit_emb, y_train_fit_log_emb)
-
-    elif model_name == "ConstrainedRegressorProjectedWithEmbeddings":
-        pred_vars = [col for col in params['model']['predictor']['all'] if col in X_train_fit_emb.columns] 
-        large_categories = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in pred_vars if c.startswith('loc_school_')]
-        large_categories_idx = [X_train_fit_emb.columns.tolist().index(col) for col in large_categories]
-        model = ConstrainedRegressorProjectedWithEmbeddings(
-                categorical_features=large_categories_idx,
-                hidden_sizes = [200],
-                batch_size = 32,
-                learning_rate= 1e-3,
-                num_epochs = 0.7,
-                n_groups = 3,
-                dev_thresh= 1,
-                group_thresh = 0.1,
-                use_group_balanced_sampler = False,
-                random_state = 42,
-                debug= False,
-        )
-
-        model.fit(X_train_fit_emb, y_train_fit_log_emb)
-
-    # =======================================================
-    #               More Unconstrained models
-    # =======================================================
-    elif model_name == "TabTransformerRegressor":
-        cat_vars = cat_vars=params['model']['predictor']['categorical']
-        coord_vars = ["loc_longitude", "loc_latitude"]
-        kwargs = {
-            'learning_rate': 0.0008922322100000605,
-            'batch_size': 111,
-            'num_epochs': 385,
-            'transformer_dim': 6 * 4,
-            'transformer_heads': 4,
-            'transformer_layers': 6,
-            'dropout': 0.11710575577244148,
-            'loss_fn': 'mse',
-            'patience': 13,
-            'fourier_type': 'positional',
-            'fourier_mapping_size': 45,
-            'fourier_sigma': 5,
-        }
-        model = TabTransformerRegressor4(
-            cat_vars, coord_vars, output_size=1, random_state=42,
-            # v4
-            engineer_time_features=False,
-            bin_yrblt=False,
-            cross_township_class=False,
-            **kwargs
-        )
-
-
-        model.fit(X_train_fit_emb, y_train_fit_log_emb,
-            X_val=X_val_fit_emb, y_val=y_val_fit_log
-        )
-
-    elif model_name == "WideAndDeepRegressor":
-        cat_vars = cat_vars=params['model']['predictor']['categorical']
-        # model = WideAndDeepRegressor(
-        #     categorical_features=cat_vars, output_size=1, random_state=42,
-        #     batch_size=16, learning_rate=0.001,
-        #     num_epochs=50, hidden_sizes=[200, 100]
-        # )
-        # Temp:
-        model = WideAndDeepRegressor(
-            categorical_features=cat_vars, output_size=1, random_state=42,
-            learning_rate= 0.0037121387535015093,
-            batch_size= 49,
-            num_epochs= 20, #10,
-            hidden_sizes=[403, 277, 173, 70],
-        )
-        model.fit(X_train_fit_emb, y_train_fit_log_emb)
-
-    elif model_name == "TabNetRegressor":
-        cat_vars = cat_vars=params['model']['predictor']['categorical']
-        coord_vars = ["loc_longitude", "loc_latitude"]
-        model = TabNetRegressor(
-            cat_vars, coord_vars, output_size=1, random_state=42,
-            batch_size=32, learning_rate=0.001, num_epochs=20, n_steps=3, 
-            feature_dim=4, attention_dim=4, sparsity_lambda=1e-5, loss_fn='mse', 
-        )
-        model.fit(X_train_fit_emb, y_train_fit_log_emb)
-
-    elif model_name == "SpatialGNNRegressor":
-        cat_vars = cat_vars=params['model']['predictor']['categorical']
-        coord_vars = ["loc_longitude", "loc_latitude"]
-        graph_cat_features = ['meta_nbhd_code', 'loc_school_elementary_district_geoid']
-
-        model = SpatialGNNRegressor(
-            cat_vars, coord_vars, graph_cat_features, output_size=1, random_state=42,
-            k_neighbors=10, batch_size=32, learning_rate=0.001, num_epochs=100,
-            gnn_type='gat', gat_heads=4,
-            gnn_hidden_dim=64, gnn_layers=3, mlp_hidden_sizes=[32, 16], loss_fn='huber',
-        )
-        model.fit(X_train_fit_emb, y_train_fit_log_emb)
-
-    if len(model_names) > 0: # If there is any model, predict
-
-        # =========== Prediction phase =========== 
-        print("Beggining the performance phase...")
-        if model_name in emb_model_names:
-            y_pred_train_log = model.predict(X_train_fit_emb)
-            y_pred_test_log = model.predict(X_test_fit_emb)
-            # print(y_test_fit_log)
-            # Exponential target to recover original values
-            y_train_fit = np.exp(y_train_fit_log_emb)
-        elif model_name in lin_model_names:
-            y_pred_train_log = model.predict(X_train_fit_lin)
-            y_pred_test_log = model.predict(X_test_fit_lin)
-            # Exponential target to recover original values
-            y_train_fit = np.exp(y_train_fit_log_lin)
-
-        # Exponential target to recover original values
-        # Sub: quick correction
-        min_log_price = np.percentile(y_pred_train_log, 1)
-        max_log_price = np.percentile(y_pred_train_log, 99)
-        y_pred_train_log = np.clip(y_pred_train_log, min_log_price, max_log_price)
-        min_log_price = np.percentile(y_pred_test_log, 1)
-        max_log_price = np.percentile(y_pred_test_log, 99)
-        y_pred_test_log = np.clip(y_pred_test_log, min_log_price, max_log_price)
-        y_pred_train = np.exp(y_pred_train_log)
-        y_pred_test = np.exp(y_pred_test_log)
-        y_test_fit = np.exp(y_test_fit_log)
-
-        # --- Evaluate Performance ---
-        # For regression, we can use metrics like Mean Squared Error (MSE).
-        train_mse = mean_squared_error(y_pred_train, y_train_fit)
-        test_mse = mean_squared_error(y_pred_test, y_test_fit)
-        train_r2 = r2_score(y_train_fit, y_pred_train)
-        test_r2 = r2_score(y_test_fit, y_pred_test)
-        # Ratios and fairness metrics
-        n_groups_, alpha_ = 3, 2 
-        r_pred_train = y_pred_train / y_train_fit
-        r_pred_test = y_pred_test / y_test_fit
-        f_metrics_train = compute_haihao_F_metrics(r_pred_train, y_train_fit, n_groups=n_groups_, alpha=alpha_)
-        f_metrics_test = compute_haihao_F_metrics(r_pred_test, y_test_fit, n_groups=n_groups_, alpha=alpha_)
-
-        print(f"RMSE train: {np.sqrt(train_mse):.3f}")
-        print(f"RMSE test: {np.sqrt(test_mse):.3f}")
-        print(fr"$R^2$ train: {train_r2:.3f}")
-        print(fr"$R^2$ test: {test_r2:.3f}")
-        print(fr"$F_dev$ ({alpha_}) train: {f_metrics_train['f_dev']:.3f}")
-        print(fr"$F_dev$ ({alpha_}) test: {f_metrics_test['f_dev']:.3f}")
-        print(fr"$F_grp$ ({n_groups_}) train: {f_metrics_train['f_grp']:.3f}")
-        print(fr"$F_grp$ ({n_groups_}) test: {f_metrics_test['f_grp']:.3f}")
-
-
-
-
-# exit()
 
 # ========== CV REFACTOR =============
+
+pred_vars = [col for col in params['model']['predictor']['all'] if col in train.columns]
 
 # --- General Parameters (YAML content) ---
 params = {
@@ -675,10 +203,11 @@ params = {
             'validation_set_fraction': 0.2,    # Validation set from the remaining data
             'initial_set': 3, 
             'max_iterations': 1000,
-            'run_name_suffix': 'multi_sample_test_4_2'
+            'run_name_suffix': 'multi_sample_test_1_Tab', #'multi_sample_test_4_5'
         },
     'model': {
-        'name': 'TabTransformerRegressor', # <-- SELECT MODEL HERE
+        'name': 'ResamplingPipeline', # <-- SELECT MODEL HERE
+        'base_model': 'LightGBM', # model to feed the resampler
         'objective': 'regression_l1', 'verbose': -1, 'deterministic': True,
         'force_row_wise': True, 'seed': 42,
         'predictor': {
@@ -710,7 +239,21 @@ params = {
                     "lambda_l1": [10**x for x in params['model']['hyperparameter']['range']['lambda_l1']], #[-3, 2]  # 10 ^ X,
                     "lambda_l2": [10**x for x in params['model']['hyperparameter']['range']['lambda_l2']], #[-3, 2]  # 10 ^ X,
                 },
-                'default': {'learning_rate': 0.05, 'num_leaves': 31}
+                'default': {
+                    'learning_rate': 0.011364186059408745,
+                    'max_bin': 178,
+                    'num_leaves': 167,
+                    'add_to_linked_depth': 7,
+                    'feature_fraction': 0.45512255576737853,
+                    'min_gain_to_split': 0.0015979247898933535,
+                    'min_data_in_leaf': 65,
+                    'max_cat_threshold': 51,
+                    'min_data_per_group': 339,
+                    'cat_smooth': 120.25007901496078,
+                    'cat_l2': 0.01382892133084935,
+                    'lambda_l1': 0.03360945895462623,
+                    'lambda_l2': 0.3003031020947675,
+                }
             },
             'LinearRegression': {
                 'range': { 'fit_intercept': [True, False] },
@@ -739,8 +282,14 @@ params = {
                     'cross_township_class':[True, False],
                 },
                 'default': {
-                    'learning_rate': 1e-3, 'batch_size': 16,
-                    'num_epochs': 50, 'hidden_sizes': [256, 128]
+                    'learning_rate': 0.0007360519059468381,
+                    'batch_size': 26,
+                    'num_epochs': 172,
+                    'hidden_sizes':[1796, 193, 140, 69],
+                    'fourier_type': 'basic',# 'use_fourier_features': True,
+                    'patience': 11,
+                    'loss_fn': 'huber',
+                    'gamma': 1.4092634199672638,
                 }
             },
             'FeedForwardNNRegressorWithProjection': {
@@ -758,13 +307,13 @@ params = {
             },
             'TabTransformerRegressor': {
                 'range': {
-                    'learning_rate': [1e-4, 1e-3], 'batch_size': [16, 256],
-                    'num_epochs': [100, 500], 'transformer_dim': [1, 6], # NOTE: heads as a divisor: transformer_dim = transformer_dim * heads
+                    'learning_rate': [1e-4, 1e-3], 'batch_size': [100, 256],
+                    'num_epochs': [100, 500], 'transformer_dim': [1, 8], # NOTE: heads as a divisor: transformer_dim = transformer_dim * heads
                     'transformer_heads': [4, 8], 'transformer_layers': [4, 8], 
                     'dropout':[0.05, 0.15], 'loss_fn': ['mse', 'focal_mse', 'huber'],
                     'patience':[8, 15], 
                     # v3
-                    'fourier_type' : ['none', 'positional', 'gaussian'], # 'basic',
+                    'fourier_type' : ['gaussian', 'none', 'basic','positional'], # 'basic',
                     'fourier_mapping_size' : [35, 55],
                     'fourier_sigma' : [3, 6],
                     # v4
@@ -773,9 +322,18 @@ params = {
                     'cross_township_class':[True, False],
                 },
                 'default': {
-                    'learning_rate': 0.001, 'batch_size': 32, 'num_epochs': 30,
-                    'mlp_hidden_dims': [64, 32], 'num_attention_layers': 2,
-                    'num_attention_heads': 4
+                    'learning_rate': 0.0008922322100000605,
+                    'batch_size': 111,
+                    'num_epochs': 385,
+                    'transformer_dim': 6 * 4,
+                    'transformer_heads': 4,
+                    'transformer_layers': 6,
+                    'dropout': 0.11710575577244148,
+                    'loss_fn': 'mse',
+                    'patience': 13,
+                    'fourier_type': 'positional',
+                    'fourier_mapping_size': 45,
+                    'fourier_sigma': 5,
                 }
             },
             'WideAndDeepRegressor': {
@@ -786,6 +344,22 @@ params = {
                 'default': {
                     'learning_rate': 0.001, 'batch_size': 64, 'num_epochs': 30,
                     'hidden_sizes': [256, 128]
+                }
+            },
+            # This new entry defines the search space for the RESAMPLER's parameters
+            'ResamplingPipeline': {
+                'range': {
+                    'n_bins': [5, 100],
+                    'binning_policy': ['uniform', 'quantile', 'outlier', 'kmeans'], # possible cause of error: 'decision_tree'
+                    'max_diff_ratio': [0.2, 0.8],
+                    'undersample_policy': ['random', 'outlier', 'inlier', 'tomek_links'],
+                    'oversample_policy': ['smotenc'], # possible cause of error: 'generalized_smotenc', 'density_smotenc'
+                    'smote_k_neighbors': [3, 15]
+                },
+                'default': { # Default resampler params if CV is off
+                    'n_bins': 10, 'binning_policy': 'quantile', 'max_diff_ratio': 0.5,
+                    'undersample_policy': 'outlier', 'oversample_policy': 'smoter',
+                    'smote_k_neighbors': 5
                 }
             },
         }
@@ -805,31 +379,38 @@ model_params.update({
 })
 model_params['early_stopping_enable'] = model_params['validation_prop'] > 0 and model_params['stop_iter'] > 0
 
-if params['model']['name'] in ["LightGBM"]:
+if params['model']['name'] in ["LightGBM"]: #or (params['model']['name'] == 'ResamplingPipeline' and params['model']['base_model'] in ["LightGBM"]):
+    print("LGBM pipeline")
     pipeline = ModelMainRecipe(
         outcome="meta_sale_price",
         pred_vars=params['model']['predictor']['all'],
         cat_vars=params['model']['predictor']['categorical'],
         id_vars=params['model']['predictor']['id']
     )
-elif params['model']['name'] in ['TabTransformerRegressor']:
+elif params['model']['name'] in ['TabTransformerRegressor'] or (params['model']['name'] == 'ResamplingPipeline' and params['model']['base_model'] in ["TabTransformerRegressor", "LightGBM"]):
+    print("NOT LGBM pipeline, but yes if imputed")
     pipeline = ModelMainRecipeImputer(
         outcome="meta_sale_price",
         pred_vars=params['model']['predictor']['all'],
         cat_vars=params['model']['predictor']['categorical'],
         id_vars=params['model']['predictor']['id']
     )
-elif params['model']['name'] in ["FeedForwardNNRegressorWithEmbeddings"]:
+elif params['model']['name'] in ["FeedForwardNNRegressorWithEmbeddings"] or (params['model']['name'] == 'ResamplingPipeline' and params['model']['base_model'] in ["FeedForwardNNRegressorWithEmbeddings"]):
+    print("NOT LGBM pipeline")
     pipeline = build_model_pipeline_supress_onehot( # WARNING: We only changed to this to perform changes on the pipeline
             pred_vars=params['model']['predictor']['all'],
             cat_vars=params['model']['predictor']['categorical'],
             id_vars=params['model']['predictor']['id']
         )
 
+print("ALGO")
+
 handler = ModelHandler(
     model_name=model_name_to_run,
     model_params=model_params,
-    hyperparameter_config=params['model']['hyperparameter'][model_name_to_run]
+    hyperparameter_config=params['model']['hyperparameter'][model_name_to_run],
+    base_model_name=params['model']['base_model'],
+    base_model_hyperparameter_config=params['model']['hyperparameter'][params['model']['base_model']],
 )
 
 temporal_cv_process = TemporalCV(
