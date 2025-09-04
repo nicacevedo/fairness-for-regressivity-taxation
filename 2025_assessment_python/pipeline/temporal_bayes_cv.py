@@ -15,19 +15,16 @@ from sklearn.preprocessing import StandardScaler
 from math import log2, floor
 from scipy.stats import gmean
 
-# === My models ===
+# === My models and resampler ===
 from nn_models.unconstrained.BaselineModels3 import FeedForwardNNRegressorWithEmbeddings3
 from nn_models.unconstrained.BaselineModels4 import FeedForwardNNRegressorWithEmbeddings4
 from nn_models.nn_constrained_cpu_v2 import FeedForwardNNRegressorWithProjection
-
-# === Missing models ===
 from nn_models.nn_constrained_cpu_v3 import ConstrainedRegressorProjectedWithEmbeddings
 from nn_models.unconstrained.TabTransformerRegressor3 import TabTransformerRegressor3
 from nn_models.unconstrained.TabTransformerRegressor4 import TabTransformerRegressor4
 from nn_models.unconstrained.WideAndDeepRegressor import WideAndDeepRegressor 
-# === End of Missing models ===
-
 from recipes.recipes_pipelined import ModelMainRecipe
+from balancing_models import BalancingResampler # Import the resampler
 
 # --- PyTorch Imports for the Neural Network Model ---
 import torch
@@ -39,14 +36,76 @@ from torch.utils.data import TensorDataset, DataLoader
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
+
+# ------------------------------------------------------------
+# NEW: Wrapper for Tuning Resampling as a "Model"
+# ------------------------------------------------------------
+class ResamplingPipelineWrapper:
+    """
+    A wrapper to treat a (resampler + fixed model) pipeline as a single
+    model for hyperparameter tuning. Optuna will tune the resampler's
+    parameters, and the fixed base model will be trained on the output.
+    """
+    def __init__(self, base_model, resampler_params):
+        self.base_model = base_model
+        # Separate categorical feature names to handle them during fit
+        self.cat_feature_names = resampler_params.pop('categorical_features_names', None)
+        self.resampler_params = resampler_params
+        self.resampler = None # Will be initialized in fit, once we have data columns
+
+        print("Initialized ResamplingPipelineWrapper with:")
+        print(f"  Base Model: {type(self.base_model).__name__}")
+        print(f"  Resampler Params to be tuned: {list(self.resampler_params.keys())}")
+
+    def fit(self, X, y, X_val=None, y_val=None):
+        print("Training the base model: ", self.base_model)
+        # Initialize the resampler here, now that we have the data (X)
+        current_resampler_params = self.resampler_params.copy()
+        if self.cat_feature_names:
+            # Convert feature names to column indices for the resampler
+            try:
+                cat_indices = [X.columns.get_loc(col) for col in self.cat_feature_names if col in X.columns]
+                current_resampler_params['categorical_features'] = cat_indices
+            except KeyError as e:
+                print(f"Warning: A categorical feature was not found in the dataframe columns: {e}")
+        
+        self.resampler = BalancingResampler(**current_resampler_params)
+
+        print("Resampling training data...")
+        X_resampled, y_resampled = self.resampler.fit_resample(X, y)
+
+        print(f"Training base model on resampled data ({len(X_resampled)} samples)...")
+        # The validation set is NOT resampled. It should reflect the true data distribution.
+        if isinstance(self.base_model, lgb.LGBMRegressor):
+            self.base_model.fit(X_resampled, y_resampled,
+                                eval_set=[(X_val, y_val)],
+                                eval_metric='rmse',
+                                callbacks=[lgb.early_stopping(stopping_rounds=50), lgb.log_evaluation(0)])
+        else:
+            # Assumes other models (like the custom NNs) have the fit(X, y, X_val, y_val) signature
+            self.base_model.fit(X_resampled, y_resampled, X_val=X_val, y_val=y_val)
+
+        return self
+
+    def predict(self, X):
+        return self.base_model.predict(X)
+
+    def set_params(self, **params):
+        # Allows scikit-learn compatibility, updates resampler params
+        self.resampler_params.update(params)
+        return self
+
 # ------------------------------------------------------------
 # Model Handler: Updated to include the new model
 # ------------------------------------------------------------
 class ModelHandler:
-    def __init__(self, model_name, model_params, hyperparameter_config):
+    def __init__(self, model_name, model_params, hyperparameter_config, base_model_name, base_model_hyperparameter_config):
         self.model_name = model_name
         self.static_params = model_params
         self.hp_config = hyperparameter_config
+        # New (for resampler)
+        self.base_model_name = base_model_name
+        self.base_model_hp_config = base_model_hyperparameter_config
 
     def _suggest_from_range(self, trial, name, rng):
         if isinstance(rng, list) and len(rng) > 0 and isinstance(rng[0], (bool, str)):
@@ -89,7 +148,8 @@ class ModelHandler:
             'FeedForwardNNRegressorWithProjection': self._create_feed_forward_nn_projection,
             'ConstrainedRegressorProjectedWithEmbeddings': self._create_constrained_nn_v3,
             'TabTransformerRegressor': self._create_tab_transformer,
-            'WideAndDeepRegressor': self._create_wide_and_deep
+            'WideAndDeepRegressor': self._create_wide_and_deep,
+            'ResamplingPipeline': self._create_resampling_pipeline_lgbm 
         }
         creator = model_creators.get(self.model_name)
         if creator:
@@ -114,30 +174,26 @@ class ModelHandler:
 
     def _create_linear_regression(self, params_dict):
         return LinearRegression(**params_dict)
-    
+
     def _create_feed_forward_nn_embedding(self, params_dict):
         nn_params = {
-            'random_state': self.static_params.get('seed'), # Pass seed
+            'random_state': self.static_params.get('seed'),
             'categorical_features': self.static_params['predictor']['large_categories'],
             'learning_rate': params_dict.get('learning_rate'),
             'batch_size': params_dict.get('batch_size'),
             'num_epochs': params_dict.get('num_epochs'),
             'hidden_sizes': params_dict.get('hidden_sizes'),
             'coord_features': self.static_params['predictor']['coord_features'],
-            # 'use_fourier_features':params_dict.get('use_fourier_features'),
             'patience':params_dict.get('patience'),
             'loss_fn':params_dict.get('loss_fn'),
             'gamma':params_dict.get('gamma'),
-            # v3
-            'fourier_type' : params_dict.get("fourier_type"),
-            'fourier_mapping_size' : params_dict.get("fourier_mapping_size"),
-            'fourier_sigma' : params_dict.get("fourier_sigma"),
-            # v4
-            'engineer_time_features':params_dict.get('engineer_time_features'), 
-            'bin_yrblt':params_dict.get('bin_yrblt'), 
-            'cross_township_class':params_dict.get('cross_township_class'),
+            'fourier_type' : params_dict.get("fourier_type", "none"),
+            'fourier_mapping_size' : params_dict.get("fourier_mapping_size", 16),
+            'fourier_sigma' : params_dict.get("fourier_sigma", 1.25),
+            'engineer_time_features':params_dict.get('engineer_time_features', False), 
+            'bin_yrblt':params_dict.get('bin_yrblt', False), 
+            'cross_township_class':params_dict.get('cross_township_class', False),
         }
-        # return FeedForwardNNRegressorWithEmbeddings3(**nn_params)
         return FeedForwardNNRegressorWithEmbeddings4(**nn_params)
 
     def _create_feed_forward_nn_projection(self, params_dict):
@@ -148,7 +204,7 @@ class ModelHandler:
             'num_epochs': params_dict.get('num_epochs'),
             'hidden_sizes': params_dict.get('hidden_sizes'),
             'dev_thresh': params_dict.get('dev_thresh'),
-            'random_state': self.static_params.get('seed') # Pass seed
+            'random_state': self.static_params.get('seed')
         }
         return FeedForwardNNRegressorWithProjection(**nn_params)
 
@@ -162,13 +218,13 @@ class ModelHandler:
             'dev_thresh': params_dict.get('dev_thresh'),
             'group_thresh': params_dict.get('group_thresh'),
             'n_groups': params_dict.get('n_groups'),
-            'random_state': self.static_params.get('seed') # Pass seed
+            'random_state': self.static_params.get('seed')
         }
         return ConstrainedRegressorProjectedWithEmbeddings(**nn_params)
 
     def _create_tab_transformer(self, params_dict):
         nn_params = {
-            'random_state': self.static_params.get('seed'), # Pass seed
+            'random_state': self.static_params.get('seed'),
             'categorical_features': self.static_params['predictor']['categorical'],
             'coord_features': self.static_params['predictor']['coord_features'],
             'batch_size': params_dict.get('batch_size'),
@@ -180,17 +236,13 @@ class ModelHandler:
             'dropout': params_dict.get('dropout'),
             'loss_fn': params_dict.get('loss_fn'),
             'patience':params_dict.get('patience'),
-            # v3
             'fourier_type': params_dict.get('fourier_type'),
             'fourier_mapping_size' : params_dict.get('fourier_mapping_size'),
             'fourier_sigma' : params_dict.get('fourier_sigma'),
-            # v4
             'engineer_time_features':params_dict.get('engineer_time_features'), 
             'bin_yrblt':params_dict.get('bin_yrblt'), 
             'cross_township_class':params_dict.get('cross_township_class'),
         }
-        print("PARAMS: ", (nn_params['transformer_dim'], nn_params['transformer_heads'], nn_params['transformer_layers']))
-        # return TabTransformerRegressor3(**nn_params)
         return TabTransformerRegressor4(**nn_params)
 
     def _create_wide_and_deep(self, params_dict):
@@ -200,9 +252,29 @@ class ModelHandler:
             'learning_rate': params_dict.get('learning_rate'),
             'num_epochs': params_dict.get('num_epochs'),
             'hidden_sizes': params_dict.get('hidden_sizes'),
-            'random_state': self.static_params.get('seed') # Pass seed
+            'random_state': self.static_params.get('seed')
         }
         return WideAndDeepRegressor(**nn_params)
+        
+    def _create_resampling_pipeline_lgbm(self, trial_params):
+        # The base model is fixed; Optuna tunes the resampler parameters
+        if self.base_model_name == "LightGBM":
+            base_model = self._create_lgbm(self.base_model_hp_config['default'])
+        elif self.base_model_name == "FeedForwardNNRegressorWithEmbeddings":
+            base_model = self._create_feed_forward_nn_embedding(self.base_model_hp_config['default'])
+        elif self.base_model_name == "TabTransformerRegressor":
+            base_model = self._create_tab_transformer(self.base_model_hp_config['default'])
+
+        resampler_params = trial_params.copy()
+        if 'n_estimators' in resampler_params:
+            del resampler_params['n_estimators']
+        resampler_params['random_state'] = self.static_params.get('seed')
+        
+        policy = resampler_params.get('oversample_policy', '')
+        if 'smotenc' in policy or 'generalized_smotenc' in policy or 'density_smotenc' in policy:
+            resampler_params['categorical_features_names'] = self.static_params['predictor']['categorical']
+
+        return ResamplingPipelineWrapper(base_model=base_model, resampler_params=resampler_params)
 
 # ------------------------------------------------------------
 # Temporal CV Class
@@ -212,7 +284,7 @@ class TemporalCV:
         self.model_handler = model_handler
         self.cv_params = cv_params
         self.cv_enable = cv_enable
-        self.data = data.sort_values(date_col).reset_index(drop=True) # Ensure data is sorted initially
+        self.data = data.sort_values(date_col).reset_index(drop=True)
         self.target_col = target_col
         self.date_col = date_col
         self.preproc_pipeline = preproc_pipeline
@@ -262,16 +334,10 @@ class TemporalCV:
             ni_range = self.model_handler.hp_config['range']['n_estimators']
             hp['n_estimators'] = trial.suggest_int('n_estimators', int(ni_range[0]), int(ni_range[1]))
         model = self.model_handler.create_model(hp)
-        validation_type = self.model_handler.static_params.get('validation_type', 'recent')
-        if validation_type == 'random': # (Not being used)
-            kf = KFold(n_splits=self.cv_params['num_folds'], shuffle=True, random_state=self.model_handler.static_params.get('seed'))
-            folds = list(kf.split(np.arange(len(self.data))))
-            X_full = self.data.drop(columns=[self.target_col, self.date_col])
-            y_full = self.data[self.target_col]
-        else:
-            df_sorted, folds = self._rolling_origin_splits(self.data, v=self.cv_params['num_folds'])
-            X_full = df_sorted.drop(columns=[self.target_col, self.date_col])
-            y_full = df_sorted[self.target_col]
+        
+        df_sorted, folds = self._rolling_origin_splits(self.data, v=self.cv_params['num_folds'])
+        X_full = df_sorted.drop(columns=[self.target_col, self.date_col])
+        y_full = df_sorted[self.target_col]
         
         all_scores = {
             'rmse_train': [], 'r2_train': [],
@@ -288,18 +354,8 @@ class TemporalCV:
             X_te_proc = pipeline_instance.transform(X_te)
             X_val_proc = pipeline_instance.transform(X_val) if X_val is not None else None
             
-            if self.model_handler.model_name == "LightGBM":
-                model.fit(X_tr_proc, y_tr,
-                    eval_set=[(X_val_proc, y_val)],
-                    eval_metric='rmse', 
-                    callbacks=[
-                        lgb.early_stopping(stopping_rounds=50),
-                        lgb.log_evaluation(0)
-                    ]
-                )
-            else:
-                model.fit(X_tr_proc, y_tr, 
-                          X_val=X_val_proc, y_val=y_val)
+            # The ResamplingPipelineWrapper handles the LGBM fit logic internally
+            model.fit(X_tr_proc, y_tr, X_val=X_val_proc, y_val=y_val)
             
             y_pred_train = model.predict(X_tr_proc)
             y_pred_val = model.predict(X_val_proc)
@@ -312,7 +368,6 @@ class TemporalCV:
             all_scores['rmse_test'].append(root_mean_squared_error(y_te, y_pred_test))
             all_scores['r2_test'].append(r2_score(y_te, y_pred_test))
 
-        # Store detailed statistics for every trial in user_attrs
         for key, scores in all_scores.items():
             if scores:
                 trial.set_user_attr(f'mean_{key}', float(np.mean(scores)))
@@ -332,12 +387,10 @@ class TemporalCV:
         print(f"Starting cross-validation for {self.model_handler.model_name} model...")
 
         def save_study_callback(study, trial):
-            # if trial.number > 0 and (trial.number + 1) % 5 == 0:
-            if True: # Always save
+            if True:
                 best_params_serializable = {k: (v.item() if hasattr(v, 'item') else v) for k, v in study.best_params.items()}
                 
                 df_trials = study.trials_dataframe()
-                # Convert datetime and timedelta columns to strings before saving
                 for col in df_trials.columns:
                     if pd.api.types.is_datetime64_any_dtype(df_trials[col]):
                         df_trials[col] = df_trials[col].dt.strftime('%Y-%m-%d %H:%M:%S')
@@ -374,7 +427,6 @@ class TemporalCV:
             best_trial_stats = self.study_.best_trial.user_attrs
 
             df_trials = self.study_.trials_dataframe()
-            # Convert datetime and timedelta columns to strings before final save
             for col in df_trials.columns:
                 if pd.api.types.is_datetime64_any_dtype(df_trials[col]):
                     df_trials[col] = df_trials[col].dt.strftime('%Y-%m-%d %H:%M:%S')
@@ -423,11 +475,11 @@ if __name__ == '__main__':
         'cv': { 
             'num_folds': 3, 
             'initial_set': 3, 
-            'max_iterations': 15,
-            'run_name_suffix': 'reproducible_nn_test'
+            'max_iterations': 5, # Reduced for demo
+            'run_name_suffix': 'resampler_tuning_test'
         },
         'model': {
-            'name': 'WideAndDeepRegressor', # <-- SELECT MODEL HERE
+            'name': 'ResamplingPipeline',
             'objective': 'regression_l1', 'verbose': -1, 'deterministic': True,
             'force_row_wise': True, 'seed': 42,
             'predictor': {
@@ -440,34 +492,25 @@ if __name__ == '__main__':
                 'validation_metric': 'rmse', 'link_max_depth': True,
             },
             'hyperparameter': {
-                'LightGBM': {},
-                'RandomForestRegressor': {},
-                'LinearRegression': {},
-                'FeedForwardNNRegressorWithEmbeddings': {},
-                'FeedForwardNNRegressorWithProjection': {},
-                'ConstrainedRegressorProjectedWithEmbeddings': {},
-                'TabTransformerRegressor': {
+                'ResamplingPipeline': {
                     'range': {
-                        'learning_rate': [1e-4, 1e-2], 'batch_size': [16, 64],
-                        'num_epochs': [20, 50], 'mlp_hidden_dims': [[1, 3], [32, 128]],
-                        'num_attention_layers': [1, 4], 'num_attention_heads': [2, 8]
+                        'n_bins': [5, 20],
+                        'binning_policy': ['uniform', 'quantile', 'kmeans'],
+                        'max_diff_ratio': [0.2, 0.8],
+                        'undersample_policy': ['random', 'outlier', 'inlier'],
+                        'oversample_policy': ['smoter', 'smotenc', 'generalized_smotenc', 'density_smotenc'],
+                        'smote_k_neighbors': [3, 10]
                     },
                     'default': {
-                        'learning_rate': 0.001, 'batch_size': 32, 'num_epochs': 30,
-                        'mlp_hidden_dims': [64, 32], 'num_attention_layers': 2,
-                        'num_attention_heads': 4
+                        'n_bins': 10, 'binning_policy': 'quantile', 'max_diff_ratio': 0.5,
+                        'undersample_policy': 'outlier', 'oversample_policy': 'smoter',
+                        'smote_k_neighbors': 5
                     }
                 },
-                'WideAndDeepRegressor': {
-                    'range': {
-                        'learning_rate': [1e-4, 1e-2], 'batch_size': [16, 128],
-                        'num_epochs': [20, 50], 'hidden_sizes': [[2, 4], [64, 512]]
-                    },
-                    'default': {
-                        'learning_rate': 0.001, 'batch_size': 64, 'num_epochs': 30,
-                        'hidden_sizes': [256, 128]
-                    }
-                }
+                'LightGBM': {}, 'RandomForestRegressor': {}, 'LinearRegression': {},
+                'FeedForwardNNRegressorWithEmbeddings': {}, 'FeedForwardNNRegressorWithProjection': {},
+                'ConstrainedRegressorProjectedWithEmbeddings': {}, 'TabTransformerRegressor': {},
+                'WideAndDeepRegressor': {}
             }
         }
     }
@@ -478,9 +521,6 @@ if __name__ == '__main__':
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    # The following two lines are often recommended for full reproducibility with CUDA
-    # torch.backends.cudnn.deterministic = True
-    # torch.backends.cudnn.benchmark = False
 
     # --- Execution Logic ---
     model_name_to_run = params['model']['name']
@@ -519,3 +559,4 @@ if __name__ == '__main__':
         run_name_suffix=params['cv'].get('run_name_suffix', 'default')
     )
     temporal_cv_process.run()
+
