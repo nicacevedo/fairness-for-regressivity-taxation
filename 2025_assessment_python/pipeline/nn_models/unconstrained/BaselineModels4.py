@@ -9,6 +9,7 @@ import random
 import warnings
 
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
 
 # Assume 'device' is configured (e.g., device = torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -113,7 +114,7 @@ class NNWithEmbeddings(nn.Module):
     with flexible Fourier feature encoding for coordinates.
     """
     def __init__(self, embedding_specs, num_numerical_features, num_coord_features,
-                 fourier_type, fourier_mapping_size, fourier_sigma, layer_sizes):
+                 fourier_type, fourier_mapping_size, fourier_sigma, layer_sizes, dropout=0.5):
         super().__init__()
         
         # --- Feature Encoders ---
@@ -142,6 +143,8 @@ class NNWithEmbeddings(nn.Module):
             all_layers.append((f"linear_{i}", nn.Linear(input_size, size)))
             if activation:
                 all_layers.append((f"relu_{i}", activation))
+            # Add dropout after each layer
+            all_layers.append((f"dropout_{i}", nn.Dropout(p=dropout)))
             input_size = size
             
         self.layers = nn.Sequential(OrderedDict(all_layers))
@@ -163,7 +166,7 @@ class NNWithEmbeddings(nn.Module):
         return self.layers(x)
 
 # ==============================================================================
-# 4. The Regressor Wrapper Class (Upgraded with Feature Engineering)
+# 4. The Regressor Wrapper Class (Upgraded with Feature Engineering and Scaling)
 # ==============================================================================
 class FeedForwardNNRegressorWithEmbeddings4:
 
@@ -171,7 +174,8 @@ class FeedForwardNNRegressorWithEmbeddings4:
                  engineer_time_features=False, bin_yrblt=False, cross_township_class=False,
                  fourier_type='none', fourier_mapping_size=16, fourier_sigma=1.25,
                  output_size=1, batch_size=16, learning_rate=0.001, num_epochs=10, 
-                 hidden_sizes=[1024], patience=10, loss_fn='mse', n_bins=10, gamma=1.0, random_state=None):
+                 hidden_sizes=[1024], patience=10, loss_fn='mse', n_bins=10, gamma=1.0, random_state=None,
+                 dropout=0.5, l2_lambda=0, l1_lambda=0, use_scaler=False):
         
         self.original_categorical_features = categorical_features[:]
         self.original_coord_features = coord_features[:]
@@ -180,6 +184,8 @@ class FeedForwardNNRegressorWithEmbeddings4:
         self.engineer_time_features = engineer_time_features
         self.bin_yrblt = bin_yrblt
         self.cross_township_class = cross_township_class
+        self.use_scaler = use_scaler
+        self.scaler = None
 
         # Core model parameters
         self.fourier_type = fourier_type
@@ -191,6 +197,9 @@ class FeedForwardNNRegressorWithEmbeddings4:
         self.learning_rate = learning_rate
         self.num_epochs = num_epochs
         self.hidden_sizes = hidden_sizes
+        self.dropout = dropout
+        self.l2_lambda = l2_lambda
+        self.l1_lambda = l1_lambda
         self.patience = patience
         self.loss_fn_name = loss_fn
         self.n_bins = n_bins
@@ -261,7 +270,17 @@ class FeedForwardNNRegressorWithEmbeddings4:
             X_val, y_val = self._engineer_features(X_val), y_val.copy()
         else:
             X_train, X_val, y_train, y_val = train_test_split(X_eng, y, test_size=0.2, random_state=self.random_state)
-
+        
+        # --- Scaling numerical features ---
+        if self.use_scaler:
+            self.scaler = StandardScaler()
+            # Fit the scaler on the training numerical data only
+            X_train_num_scaled = self.scaler.fit_transform(X_train[self.numerical_features])
+            X_val_num_scaled = self.scaler.transform(X_val[self.numerical_features])
+        else:
+            X_train_num_scaled = X_train[self.numerical_features].values
+            X_val_num_scaled = X_val[self.numerical_features].values
+            
         # --- Prepare Tensors and Dataloaders ---
         self.embedding_specs = []
         for col in self.categorical_features:
@@ -272,16 +291,16 @@ class FeedForwardNNRegressorWithEmbeddings4:
             embedding_dim = min(50, (num_categories_with_unknown + 1) // 2)
             self.embedding_specs.append((num_categories_with_unknown, embedding_dim))
 
-        def _create_tensors(X_df, y_series):
-            X_cat_tensors = [torch.tensor(X_df[col].map(self.category_mappings[col]).fillna(0).values, dtype=torch.long) for col in self.categorical_features]
-            X_cat = torch.stack(X_cat_tensors, dim=1) if X_cat_tensors else torch.empty(len(X_df), 0, dtype=torch.long)
-            X_num = torch.tensor(X_df[self.numerical_features].astype(float).values, dtype=torch.float32)
-            X_coord = torch.tensor(X_df[self.coord_features].astype(float).values, dtype=torch.float32)
+        def _create_tensors(X_df_cat, X_num_scaled, X_df_coord, y_series):
+            X_cat_tensors = [torch.tensor(X_df_cat[col].map(self.category_mappings[col]).fillna(0).values, dtype=torch.long) for col in self.categorical_features]
+            X_cat = torch.stack(X_cat_tensors, dim=1) if X_cat_tensors else torch.empty(len(X_df_cat), 0, dtype=torch.long)
+            X_num = torch.tensor(X_num_scaled, dtype=torch.float32)
+            X_coord = torch.tensor(X_df_coord[self.coord_features].astype(float).values, dtype=torch.float32)
             y_tensor = torch.tensor(y_series.values.reshape(-1, 1), dtype=torch.float32)
             return X_cat, X_num, X_coord, y_tensor
 
-        X_cat_train, X_num_train, X_coord_train, y_train_tensor = _create_tensors(X_train, y_train)
-        X_cat_val, X_num_val, X_coord_val, y_val_tensor = _create_tensors(X_val, y_val)
+        X_cat_train, X_num_train, X_coord_train, y_train_tensor = _create_tensors(X_train, X_train_num_scaled, X_train, y_train)
+        X_cat_val, X_num_val, X_coord_val, y_val_tensor = _create_tensors(X_val, X_val_num_scaled, X_val, y_val)
 
         train_dataset = TensorDataset(X_cat_train, X_num_train, X_coord_train, y_train_tensor)
         val_dataset = TensorDataset(X_cat_val, X_num_val, X_coord_val, y_val_tensor)
@@ -296,7 +315,8 @@ class FeedForwardNNRegressorWithEmbeddings4:
             fourier_type=self.fourier_type,
             fourier_mapping_size=self.fourier_mapping_size,
             fourier_sigma=self.fourier_sigma,
-            layer_sizes=self.hidden_sizes + [self.output_size]
+            layer_sizes=self.hidden_sizes + [self.output_size],
+            dropout=self.dropout
         ).to(device)
         
         if self.loss_fn_name == 'huber': criterion = nn.HuberLoss()
@@ -306,7 +326,10 @@ class FeedForwardNNRegressorWithEmbeddings4:
             criterion = BinnedMSELoss(y_min=y_min, y_max=y_max, n_bins=self.n_bins, gamma=self.gamma)
         else: criterion = nn.MSELoss()
         
-        optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        if self.l2_lambda == 0:
+            optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        else:        
+            optimizer = optim.AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=self.l2_lambda)
         
         # --- Training Loop ---
         best_val_loss = float('inf')
@@ -320,6 +343,12 @@ class FeedForwardNNRegressorWithEmbeddings4:
                 batch_cat, batch_num, batch_coord, batch_y = batch_cat.to(device), batch_num.to(device), batch_coord.to(device), batch_y.to(device)
                 outputs = self.model(batch_cat, batch_num, batch_coord)
                 loss = criterion(outputs, batch_y)
+
+                # Add L1 regularization
+                if self.l1_lambda > 0:
+                    l1_penalty = sum(torch.sum(torch.abs(param)) for param in self.model.parameters())
+                    loss += self.l1_lambda * l1_penalty
+
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -332,6 +361,12 @@ class FeedForwardNNRegressorWithEmbeddings4:
                     batch_cat, batch_num, batch_coord, batch_y = batch_cat.to(device), batch_num.to(device), batch_coord.to(device), batch_y.to(device)
                     outputs = self.model(batch_cat, batch_num, batch_coord)
                     loss = criterion(outputs, batch_y)
+
+                    # Add L1 regularization to validation loss (optional, for monitoring)
+                    if self.l1_lambda > 0:
+                        l1_penalty = sum(torch.sum(torch.abs(param)) for param in self.model.parameters())
+                        loss += self.l1_lambda * l1_penalty
+
                     total_val_loss += loss.item()
 
             avg_train_loss = total_train_loss / len(train_loader) if len(train_loader) > 0 else 0
@@ -358,13 +393,15 @@ class FeedForwardNNRegressorWithEmbeddings4:
         
         X_pred = self._engineer_features(X)
         
-        # if self.numerical_features:
-        #     X_pred.loc[:, self.numerical_features] = self.scaler.transform(X_pred[self.numerical_features])
-
+        if self.use_scaler and self.scaler:
+            X_pred_num_scaled = self.scaler.transform(X_pred[self.numerical_features])
+        else:
+            X_pred_num_scaled = X_pred[self.numerical_features].values
+        
         X_cat_tensors = [torch.tensor(X_pred[col].map(self.category_mappings[col]).fillna(0).values, dtype=torch.long) for col in self.categorical_features]
         X_cat = torch.stack(X_cat_tensors, dim=1) if X_cat_tensors else torch.empty(len(X_pred), 0, dtype=torch.long)
         
-        X_num = torch.tensor(X_pred[self.numerical_features].values, dtype=torch.float32)
+        X_num = torch.tensor(X_pred_num_scaled, dtype=torch.float32)
         X_coord = torch.tensor(X_pred[self.coord_features].values, dtype=torch.float32)
         
         test_dataset = TensorDataset(X_cat, X_num, X_coord)
@@ -385,4 +422,3 @@ class FeedForwardNNRegressorWithEmbeddings4:
             if hasattr(self, key):
                 setattr(self, key, value)
         return self
-

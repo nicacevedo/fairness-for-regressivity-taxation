@@ -193,6 +193,10 @@ class ModelHandler:
             'engineer_time_features':params_dict.get('engineer_time_features', False), 
             'bin_yrblt':params_dict.get('bin_yrblt', False), 
             'cross_township_class':params_dict.get('cross_township_class', False),
+            'dropout' : params_dict.get('dropout', 0),
+            'l1_lambda' : params_dict.get('l1_lambda', 0),
+            'l2_lambda' : params_dict.get('l2_lambda', 0),
+            'use_scaler': params_dict.get('use_scaler', True),
         }
         return FeedForwardNNRegressorWithEmbeddings4(**nn_params)
 

@@ -23,6 +23,7 @@ from sklearn.metrics import mean_squared_error, r2_score
 
 # Custom models
 from nn_models.unconstrained.BaselineModels4 import FeedForwardNNRegressorWithEmbeddings4
+from nn_models.unconstrained.BaselineModels5 import FeedForwardNNRegressorWithEmbeddings5
 from nn_models.unconstrained.TabTransformerRegressor4 import TabTransformerRegressor4
 from nn_models.unconstrained.WideAndDeepRegressor import WideAndDeepRegressor
 from nn_models.unconstrained.TabNetRegressor import TabNetRegressor
@@ -78,7 +79,7 @@ def get_model_configurations(params: dict, seed: int) -> dict:
             "preprocessor": "LightGBM"
         },
         "FeedForwardNN": {
-            "model_class": FeedForwardNNRegressorWithEmbeddings4,
+            "model_class": FeedForwardNNRegressorWithEmbeddings5,
             "params": {
                 'learning_rate': 0.0007360519059468381,
                 'categorical_features': large_categories,
@@ -91,6 +92,13 @@ def get_model_configurations(params: dict, seed: int) -> dict:
                 'patience': 11,
                 'loss_fn': 'huber',
                 'gamma':1.4092634199672638,
+                # Mine
+                'dropout': 0,
+                # 'dropout': 0.0007693680499241461,
+                # 'l1_lambda': 2.714100311651801e-06,
+                # 'l2_lambda': 0.0031372889601764937,
+                'use_scaler': True,
+                'normalization_type': 'batch_norm' #'none', 'batch_norm', or 'layer_norm'
             },
             "preprocessor": "embedding_linear"
         },
@@ -127,7 +135,7 @@ def get_model_configurations(params: dict, seed: int) -> dict:
 # 2. Data Loading and Preparation
 # ==============================================================================
 
-def load_and_prepare_data(config: dict) -> tuple:
+def load_and_prepare_data(config: dict, test_on_val=False) -> tuple:
     """
     Loads, filters, samples, and splits the dataset into train, validation, and test sets.
     """
@@ -162,6 +170,14 @@ def load_and_prepare_data(config: dict) -> tuple:
     train_split_idx = int(len(train_val) * config['cv']['split_prop'])
     train = train_val.iloc[:train_split_idx]
     val = train_val.iloc[train_split_idx:]
+
+    if test_on_val:
+        # split now the trainint+validation
+        test = val.copy() # val is the new test
+        train_split_idx = int(len(train) * config['cv']['split_prop'])
+        val = train.iloc[train_split_idx:]
+        train = train.iloc[:train_split_idx]
+
     
     return train, val, test
 
@@ -302,7 +318,7 @@ def main():
     models_to_run = ["FeedForwardNN"]#["LightGBM", "FeedForwardNN", "TabTransformer"]
     
     # --- Data Pipeline (Run once) ---
-    train_df, val_df, test_df = load_and_prepare_data(config)
+    train_df, val_df, test_df = load_and_prepare_data(config, test_on_val=True) # CHANGE: to use val or test as the assessment set
     preprocessors = create_preprocessors(config)
     processed_data = preprocess_data(preprocessors, train_df, val_df, test_df)
     
