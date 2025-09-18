@@ -16,11 +16,12 @@ from math import log2, floor
 from scipy.stats import gmean
 
 # === My models and resampler ===
-from nn_models.unconstrained.BaselineModels3 import FeedForwardNNRegressorWithEmbeddings3
-from nn_models.unconstrained.BaselineModels4 import FeedForwardNNRegressorWithEmbeddings4
+# from nn_models.unconstrained.BaselineModels3 import FeedForwardNNRegressorWithEmbeddings3
+# from nn_models.unconstrained.BaselineModels4 import FeedForwardNNRegressorWithEmbeddings4
+from nn_models.unconstrained.BaselineModels5 import FeedForwardNNRegressorWithEmbeddings5
 from nn_models.nn_constrained_cpu_v2 import FeedForwardNNRegressorWithProjection
 from nn_models.nn_constrained_cpu_v3 import ConstrainedRegressorProjectedWithEmbeddings
-from nn_models.unconstrained.TabTransformerRegressor3 import TabTransformerRegressor3
+# from nn_models.unconstrained.TabTransformerRegressor3 import TabTransformerRegressor3
 from nn_models.unconstrained.TabTransformerRegressor4 import TabTransformerRegressor4
 from nn_models.unconstrained.WideAndDeepRegressor import WideAndDeepRegressor 
 from recipes.recipes_pipelined import ModelMainRecipe
@@ -182,7 +183,7 @@ class ModelHandler:
             'learning_rate': params_dict.get('learning_rate'),
             'batch_size': params_dict.get('batch_size'),
             'num_epochs': params_dict.get('num_epochs'),
-            'hidden_sizes': params_dict.get('hidden_sizes'),
+            'hidden_sizes': [1024, 512, 128, 64],#params_dict.get('hidden_sizes'),
             'coord_features': self.static_params['predictor']['coord_features'],
             'patience':params_dict.get('patience'),
             'loss_fn':params_dict.get('loss_fn'),
@@ -197,8 +198,10 @@ class ModelHandler:
             'l1_lambda' : params_dict.get('l1_lambda', 0),
             'l2_lambda' : params_dict.get('l2_lambda', 0),
             'use_scaler': params_dict.get('use_scaler', True),
+            'loss_alpha' : params_dict.get('loss_alpha', 3),
+            'normalization_type': params_dict.get('normalization_type', 'none'),
         }
-        return FeedForwardNNRegressorWithEmbeddings4(**nn_params)
+        return FeedForwardNNRegressorWithEmbeddings5(**nn_params)
 
     def _create_feed_forward_nn_projection(self, params_dict):
         nn_params = {

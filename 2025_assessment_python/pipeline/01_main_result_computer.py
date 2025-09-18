@@ -22,13 +22,21 @@ import lightgbm as lgb
 from sklearn.metrics import mean_squared_error, r2_score
 
 # Custom models
-from nn_models.unconstrained.BaselineModels4 import FeedForwardNNRegressorWithEmbeddings4
+# from nn_models.unconstrained.BaselineModels4 import FeedForwardNNRegressorWithEmbeddings4
 from nn_models.unconstrained.BaselineModels5 import FeedForwardNNRegressorWithEmbeddings5
 from nn_models.unconstrained.TabTransformerRegressor4 import TabTransformerRegressor4
 from nn_models.unconstrained.WideAndDeepRegressor import WideAndDeepRegressor
 from nn_models.unconstrained.TabNetRegressor import TabNetRegressor
 
+# Residual models
+from nn_models.unconstrained.BaselineModels6 import FeedForwardNNRegressorWithResiduals
+from residual_models.ensemble_models import LGBMRegressorWithResiduals
+
+# Classficiation models
+from nn_models.unconstrained.DiscretizedNNClassifier import DiscretizedNNClassifier
+
 # Custom utilities
+from balancing_models import BalancingResampler
 from src_.custom_metrics import create_diagnostic_plots, compute_all_metrics
 from recipes.recipes_pipelined import build_model_pipeline, build_model_pipeline_supress_onehot, ModelMainRecipe, ModelMainRecipeImputer
 
@@ -78,8 +86,60 @@ def get_model_configurations(params: dict, seed: int) -> dict:
             },
             "preprocessor": "LightGBM"
         },
+        "LightGBMResiduals": {
+            "model_class": LGBMRegressorWithResiduals,
+            "params": {
+                "random_state":seed,
+                "residual_model_split": 0.3,
+                "lgbm_params": {
+                    'objective': 'rmse',
+                    'random_state': seed,
+                    'n_estimators': params['model']['hyperparameter']['default']['num_iterations'],
+                    'max_depth': floor(log2(167)) + params["model"]["hyperparameter"]["default"]['add_to_linked_depth'],
+                    'verbose': -1,
+                    'learning_rate': 0.011364186059408745,
+                    'max_bin': 178,
+                    'num_leaves': 167,
+                    'feature_fraction': 0.45512255576737853,
+                    'min_gain_to_split': 0.0015979247898933535,
+                    'min_data_in_leaf': 65,
+                    'max_cat_threshold': 51,
+                    'min_data_per_group': 339,
+                    'cat_smooth': 120.25007901496078,
+                    'cat_l2': 0.01382892133084935,
+                    'lambda_l1': 0.03360945895462623,
+                    'lambda_l2': 0.3003031020947675,
+                    },
+            },
+            "preprocessor": "LightGBM",            
+        },
         "FeedForwardNN": {
             "model_class": FeedForwardNNRegressorWithEmbeddings5,
+            "params": {
+                'learning_rate': 0.004,#0.0007360519059468381,
+                'categorical_features': large_categories,
+                'coord_features': coord_vars,
+                'random_state': seed,
+                'batch_size': 64,#26,
+                'num_epochs': 200,#172,
+                'hidden_sizes':[1024*4, 1024*2, 1024, 512, 256, 128, 64, 32], #[1796, 193, 140, 69],
+                'fourier_type': 'basic',
+                'patience': 11,
+                'gamma': 5, #1.4092634199672638, # focal mse gamma
+                'loss_fn': 'focal_mse',#'quantile_weighted_mse',
+                # Mine
+                'dropout': 0,
+                # 'dropout': 0.0007693680499241461,
+                # 'l1_lambda': 2.714100311651801e-06,
+                # 'l2_lambda': 0.0031372889601764937,
+                'use_scaler': True,
+                'loss_alpha': 35,
+                'normalization_type': 'none' #'none', 'batch_norm', or 'layer_norm'
+            },
+            "preprocessor": "embedding_linear"
+        },
+        "FeedForwardNNResiduals":{
+            "model_class": FeedForwardNNRegressorWithResiduals,
             "params": {
                 'learning_rate': 0.0007360519059468381,
                 'categorical_features': large_categories,
@@ -90,15 +150,49 @@ def get_model_configurations(params: dict, seed: int) -> dict:
                 'hidden_sizes': [1796, 193, 140, 69],
                 'fourier_type': 'basic',
                 'patience': 11,
-                'loss_fn': 'huber',
-                'gamma':1.4092634199672638,
+                'gamma': 0, #1.4092634199672638, # focal mse gamma
+                'loss_fn': 'huber',#'focal_mse',#'quantile_weighted_mse',
                 # Mine
                 'dropout': 0,
                 # 'dropout': 0.0007693680499241461,
                 # 'l1_lambda': 2.714100311651801e-06,
                 # 'l2_lambda': 0.0031372889601764937,
                 'use_scaler': True,
-                'normalization_type': 'batch_norm' #'none', 'batch_norm', or 'layer_norm'
+                'loss_alpha': 35,
+                'normalization_type': 'none', #'none', 'batch_norm', or 'layer_norm'
+                # Residuals
+                'residual_model_split': 0.3, 
+                'num_residual_epochs': 200, 
+                'validation_split': 0.1, 
+                'residual_loss_fn': 'huber'
+            },
+            "preprocessor": "embedding_linear"
+        },
+        "DiscretizedNNClassifier":{
+            "model_class": DiscretizedNNClassifier,
+            "params": {
+                'learning_rate': 0.004,#07360519059468381,
+                'categorical_features': large_categories,
+                'coord_features': coord_vars,
+                'random_state': seed,
+                'batch_size': 512,#26,
+                'num_epochs': 200,#172,
+                'hidden_sizes': [1024*4, 1024*2, 1024, 512],#[1796, 193, 140, 69],
+                'fourier_type': 'basic',
+                'patience': 11,
+                # 'gamma': 0, #1.4092634199672638, # focal mse gamma
+                # 'loss_fn': 'focal_mse',#'quantile_weighted_mse',
+                # Mine
+                'dropout': 0,
+                # 'dropout': 0.0007693680499241461,
+                # 'l1_lambda': 2.714100311651801e-06,
+                # 'l2_lambda': 0.0031372889601764937,
+                'use_scaler': True,
+                # 'loss_alpha': 35,
+                'normalization_type': 'none', #'none', 'batch_norm', or 'layer_norm'
+                # Classification
+                "n_bins":200,
+                "binning_method":'uniform',
             },
             "preprocessor": "embedding_linear"
         },
@@ -142,7 +236,6 @@ def load_and_prepare_data(config: dict, test_on_val=False) -> tuple:
     print("Preparing model training data...")
     params = config['data_prep']
     
-    # Corrected: Removed the ID columns from the desired columns list
     desired_columns = config['model']['predictor']['all'] + \
                       ['meta_sale_price', 'meta_sale_date', "ind_pin_is_multicard", "sv_is_outlier"]
 
@@ -239,19 +332,44 @@ def preprocess_data(preprocessors: dict, train_df: pd.DataFrame, val_df: pd.Data
     return processed_data
 
 # ==============================================================================
-# 4. Model Training and Evaluation (Refactored for Multi-Run)
+# 4. Model Training and Evaluation (Refactored for Multi-Split Metrics)
 # ==============================================================================
 
 def train_and_evaluate(model_name: str, model_config: dict, data_splits: tuple, is_last_run: bool):
     """
     Initializes, trains, predicts, and evaluates a single model.
-    Returns a dictionary of test set metrics.
+    Returns a dictionary of metrics for train, val, and test sets.
     """
     print("-" * 50)
     print(f"Running model: {model_name}")
     print("-" * 50)
     
     X_train, y_train, X_val, y_val, X_test, y_test = data_splits
+
+    # MINE: resampling
+    config = get_config()
+    print("Checking if we do resampling: ", config['data_prep'].get('apply_resampling', False))
+    if config['data_prep'].get('apply_resampling', False):
+        if model_name in ["FeedForwardNN", "DiscretizedNNClassifier"]:
+            cat_vars = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in config['model']['predictor']['all'] if c.startswith('loc_school_')]
+            cat_vars = [X_train.columns.tolist().index(col) for col in cat_vars] # Large vars
+            print("We just selected the number of the cols that are features")
+        else:
+            raise print("NO MODEL NAMED: ", model_name)
+        # cat_vars = [X_train.columns.tolist().index(col) for col in config['model']['predictor']['categorical']]
+        resampler = BalancingResampler(
+            n_bins= 200,#68,
+            binning_policy= 'uniform',#'quantile',
+            max_diff_ratio= 0.27657655868482417,
+            undersample_policy= 'random',
+            oversample_policy= 'generalized_smotenc',
+            smote_k_neighbors= 16,
+            categorical_features=cat_vars,
+        )
+        print("We are going to resample")
+        X_train, y_train = resampler.fit_resample(X_train, y_train)
+    # END MINE
+
     
     # --- Model Initialization ---
     model = model_config['model_class'](**model_config['params'])
@@ -263,75 +381,85 @@ def train_and_evaluate(model_name: str, model_config: dict, data_splits: tuple, 
     if model_name == "LightGBM":
         fit_params['eval_set'] = [(X_val, y_val)]
     
-    if "FeedForward" in model_name or "TabTransformer" in model_name:
+    if model_name != "LightGBM":#"FeedForward" in model_name or "TabTransformer" in model_name:
          model.fit(X_train, y_train, X_val=X_val, y_val=y_val)
     else:
         model.fit(X_train, y_train, **fit_params)
 
     print(f"Training for {model_name} finished in {time() - start_time:.2f} seconds.")
 
-    # --- Prediction on Assessment (Test) Data ---
+    # --- Prediction on All Splits ---
+    print("Generating predictions on all data splits...")
+    y_pred_train_log = model.predict(X_train)
+    y_pred_val_log = model.predict(X_val)
     y_pred_test_log = model.predict(X_test)
-    
-    # --- Post-processing ---
-    p1, p99 = np.percentile(y_pred_test_log, [1, 99])
-    np.clip(y_pred_test_log, p1, p99, out=y_pred_test_log)
-        
-    y_test_exp = np.exp(y_test)
-    y_pred_test_exp = np.exp(y_pred_test_log)
 
-    # --- Evaluation ---
-    test_metrics = compute_all_metrics(y_test_exp, y_pred_test_exp)
-    test_metrics['r2'] = r2_score(y_test_exp, y_pred_test_exp)
+    # --- Helper for Post-processing and Evaluation ---
+    def postprocess_and_evaluate(y_true_log, y_pred_log):
+        p1, p99 = np.percentile(y_pred_log, [1, 99])
+        np.clip(y_pred_log, p1, p99, out=y_pred_log)
+        y_true_exp = np.exp(y_true_log)
+        y_pred_exp = np.exp(y_pred_log)
+        metrics = compute_all_metrics(y_true_exp, y_pred_exp)
+        metrics['r2'] = r2_score(y_true_exp, y_pred_exp)
+        return metrics
 
-    # Corrected: Added fairness metrics to the per-run printout
-    print(f"Assessment Metrics for {model_name}: RMSE={test_metrics['rmse']:.4f}, R²={test_metrics['r2']:.4f}, F_dev={test_metrics['f_dev']:.4f}, F_grp={test_metrics['f_grp']:.4f}")
+    # --- Evaluation for all splits ---
+    train_metrics = postprocess_and_evaluate(y_train, y_pred_train_log)
+    val_metrics = postprocess_and_evaluate(y_val, y_pred_val_log)
+    test_metrics = postprocess_and_evaluate(y_test, y_pred_test_log)
+
+    print(f"  Train Metrics:    RMSE={train_metrics['rmse']:.4f}, R²={train_metrics['r2']:.4f}, F_dev={train_metrics['f_dev']:.4f}, F_grp={train_metrics['f_grp']:.4f}")
+    print(f"  Validation Metrics: RMSE={val_metrics['rmse']:.4f}, R²={val_metrics['r2']:.4f}, F_dev={val_metrics['f_dev']:.4f}, F_grp={val_metrics['f_grp']:.4f}")
+    print(f"  Assessment Metrics: RMSE={test_metrics['rmse']:.4f}, R²={test_metrics['r2']:.4f}, F_dev={test_metrics['f_dev']:.4f}, F_grp={test_metrics['f_grp']:.4f}")
     
-    # --- Plotting (Only for the last run) ---
+    # --- Plotting (Only for the last run, uses original train/test preds) ---
     if is_last_run:
         print(f"Generating diagnostic plots for {model_name} (final run)...")
-        y_pred_train_log = model.predict(X_train)
-        p1_train, p99_train = np.percentile(y_pred_train_log, [1, 99])
-        np.clip(y_pred_train_log, p1_train, p99_train, out=y_pred_train_log)
         y_train_exp = np.exp(y_train)
         y_pred_train_exp = np.exp(y_pred_train_log)
-
+        y_test_exp = np.exp(y_test)
+        y_pred_test_exp = np.exp(y_pred_test_log)
         create_diagnostic_plots(
             y_train=y_train_exp, y_test=y_test_exp,
             y_pred_train=y_pred_train_exp, y_pred_test=y_pred_test_exp,
-            suffix=f"_{model_name}_final_run"
+            suffix=f"_{model_name}_final_run" + config['plotting'].get('save_suffix', ''), 
+            save_plots=config['plotting'].get('save_plots', True), 
+            log_scale=config['plotting'].get('log_scale', False),
         )
     
-    return test_metrics
+    return {'train': train_metrics, 'val': val_metrics, 'test': test_metrics}
 
 # ==============================================================================
-# 5. Main Execution (Refactored for Multi-Run)
+# 5. Main Execution (Refactored for Multi-Run and Multi-Split)
 # ==============================================================================
 
 def main():
     """Main script execution function."""
     config = get_config()
     main_seed = config['model']['seed']
-    num_runs = config['data_prep'].get('num_evaluation_runs', 5) # Get number of runs, default to 5
+    num_runs = config['data_prep'].get('num_evaluation_runs', 5)
     
-    # Define which models to run from the configuration
-    models_to_run = ["FeedForwardNN"]#["LightGBM", "FeedForwardNN", "TabTransformer"]
+    models_to_run = ["FeedForwardNN"]#["DiscretizedNNClassifier"]# ["LightGBMResiduals"]#["FeedForwardNNResiduals"]#["FeedForwardNN", "LightGBM"]
     
-    # --- Data Pipeline (Run once) ---
-    train_df, val_df, test_df = load_and_prepare_data(config, test_on_val=True) # CHANGE: to use val or test as the assessment set
+    train_df, val_df, test_df = load_and_prepare_data(config, test_on_val=config['data_prep'].get('test_on_val', False))
     preprocessors = create_preprocessors(config)
     processed_data = preprocess_data(preprocessors, train_df, val_df, test_df)
     
-    # --- Multi-Run Evaluation Loop ---
-    all_run_metrics = {model_name: {metric: [] for metric in ['rmse', 'r2', 'f_dev', 'f_grp']} for model_name in models_to_run}
+    # Restructure to hold metrics for each split
+    all_run_metrics = {
+        model_name: {
+            split: {metric: [] for metric in ['rmse', 'r2', 'f_dev', 'f_grp']}
+            for split in ['train', 'val', 'test']
+        }
+        for model_name in models_to_run
+    }
 
-    # --- List of seed to use ---
     np.random.seed(42)
     seeds = np.random.randint(0, 1e4, num_runs)
     np.random.seed(None)
 
     for i in range(num_runs):
-        # run_seed = main_seed + i
         run_seed = seeds[i]
         print(f"\n{'='*30} STARTING RUN {i+1}/{num_runs} (Seed: {run_seed}) {'='*30}\n")
         
@@ -343,14 +471,14 @@ def main():
                 preprocessor_key = model_config['preprocessor']
                 
                 if preprocessor_key in processed_data:
-                    # Pass a flag to indicate if it's the last run for plotting
                     is_last_run = (i == num_runs - 1)
-                    test_metrics = train_and_evaluate(name, model_config, processed_data[preprocessor_key], is_last_run)
+                    all_metrics = train_and_evaluate(name, model_config, processed_data[preprocessor_key], is_last_run)
                     
-                    # Store metrics for this run
-                    for metric_name, value in test_metrics.items():
-                        if metric_name in all_run_metrics[name]:
-                            all_run_metrics[name][metric_name].append(value)
+                    # Store metrics for each split
+                    for split_name, metrics in all_metrics.items():
+                        for metric_name, value in metrics.items():
+                            if metric_name in all_run_metrics[name][split_name]:
+                                all_run_metrics[name][split_name][metric_name].append(value)
                 else:
                     print(f"Warning: Preprocessor '{preprocessor_key}' not found for model '{name}'. Skipping.")
             else:
@@ -361,13 +489,15 @@ def main():
     print(f"FINAL AGGREGATED RESULTS (ACROSS {num_runs} RUNS)")
     print("=" * 80)
 
-    for model_name, metrics_dict in all_run_metrics.items():
-        print(f"\n--- {model_name} Assessment Performance (Mean ± Std Dev) ---")
-        for metric_name, values in metrics_dict.items():
-            if values:
-                mean_val = np.mean(values)
-                std_val = np.std(values)
-                print(f"{metric_name.upper():<8}: {mean_val:.4f} ± {std_val:.4f}")
+    for model_name, splits_dict in all_run_metrics.items():
+        print(f"\n--- {model_name} Performance (Mean ± Std Dev) ---")
+        for split_name, metrics_dict in splits_dict.items():
+            print(f"  Split: {split_name.capitalize()}")
+            for metric_name, values in metrics_dict.items():
+                if values:
+                    mean_val = np.mean(values)
+                    std_val = np.std(values)
+                    print(f"    {metric_name.upper():<8}: {mean_val:.4f} ± {std_val:.4f}")
 
 
 if __name__ == "__main__":

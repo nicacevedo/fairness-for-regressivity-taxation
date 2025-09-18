@@ -203,7 +203,7 @@ params = {
             'validation_set_fraction': 0.2,    # Validation set from the remaining data
             'initial_set': 3, 
             'max_iterations': 1000,
-            'run_name_suffix': 'robustifying_test_1',#'multi_sample_test_1_2_Tab', #'multi_sample_test_4_5'
+            'run_name_suffix': 'robustifying_test_5',#'multi_sample_test_1_2_Tab', #'multi_sample_test_4_5'
         },
     'model': {
         'name': 'FeedForwardNNRegressorWithEmbeddings', # <-- SELECT MODEL HERE
@@ -262,28 +262,31 @@ params = {
             'FeedForwardNNRegressorWithEmbeddings': {
                 'range': {
                     'learning_rate': [5e-4, 5e-3],
-                    'batch_size': [16,64],#[20, 120],
+                    'batch_size': [16,128],#[20, 120],
                     'num_epochs': [200,200],#[100, 500],
                     # Defines search space for hidden layers:
                     # [[min_layers, max_layers], [min_units, max_units]]
-                    'hidden_sizes': [[4,6], [64, 4096]],#[[1, 8], [16, 5000]],
+                    # 'hidden_sizes': [[4,6], [64, 4096]],#[[1, 8], [16, 5000]],
                     # 'use_fourier_features':[True, False],
-                    'patience': [10,11],#[8, 12], 
-                    'loss_fn': ['huber'],#['mse',  'huber'], #'focal_mse',
+                    'patience': [8, 12], 
+                    'loss_fn': ['huber', 'mse', 'quantile_weighted_mse'],#['mse',  'huber'], #'focal_mse',
                     # 'n_bins' : [],
-                    'gamma' : [1.4, 1.4], #[1, 1.5],
+                    # 'gamma' : [1, 1.5], # Only used in focal_mse and binned_mse
                     # V3
-                    'fourier_type' : ['basic'], #['basic', 'positional', 'gaussian'], # 'none', 
-                    # 'fourier_mapping_size' : [16],#[25, 45],
-                    # 'fourier_sigma' : [1, 5],
+                    'fourier_type' : ['none', 'basic'],#, 'positional', 'gaussian'], # , 
+                    'fourier_mapping_size' : [16, 35],
+                    'fourier_sigma' : [1, 4],
                     #v4
                     # 'engineer_time_features':[False, True],
                     # 'bin_yrblt':[True, False],
                     # 'cross_township_class':[True, False],
-                    'dropout' : [0.0, 0.5],
-                    'l1_lambda' : [1e-7, 1e-1],
-                    'l2_lambda' : [1e-6, 1e1],
-                    'use_scaler':[True, False],
+                    # v5
+                    'dropout' : [0.0, 0.0],
+                    'l1_lambda' : [0, 1e-2],
+                    'l2_lambda' : [0, 1e0],
+                    'use_scaler':[True],
+                    'loss_alpha':[0,10],
+                    'normalization_type':['none'],
                 },
                 'default': {
                     'learning_rate': 0.0007360519059468381,

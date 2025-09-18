@@ -52,26 +52,94 @@ class FourierFeatures(nn.Module):
             x_proj = 2 * np.pi * x.unsqueeze(-1) * self.freq_bands.view(1, 1, -1)
             x_proj_flat = x_proj.view(x.shape[0], -1)
             return torch.cat([torch.sin(x_proj_flat), torch.cos(x_proj_flat)], dim=-1)
-        elif fourier_type == 'basic':
+        elif self.fourier_type == 'basic':
             x_proj = 2 * np.pi * x
             return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
-        elif fourier_type == 'none':
+        elif self.fourier_type == 'none':
             return x
 
 # ==============================================================================
-# 2. Advanced Loss Functions (Unchanged)
+# 2. Advanced Loss Functions
 # ==============================================================================
-class FocalMSELoss(nn.Module):
-    """Focal Mean Squared Error Loss to focus on hard-to-predict samples."""
-    def __init__(self, gamma=1.0):
+class MAPELoss(nn.Module):
+    """Mean Absolute Percentage Error Loss"""
+    def __init__(self, eps=1e-8, reduction="mean"):
         super().__init__()
-        self.gamma = gamma
-        self.mse = nn.MSELoss(reduction='none')
+        self.eps = eps
+        self.reduction = reduction
 
     def forward(self, y_pred, y_true):
-        mse_loss = self.mse(y_pred, y_true)
-        focal_weight = mse_loss.detach() ** self.gamma
-        return (focal_weight * mse_loss).mean()
+        # Avoid division by zero
+        denom = torch.clamp(y_true.abs(), min=self.eps)
+        loss = (y_pred - y_true).abs() / denom * 100
+
+        if self.reduction == "mean":
+            return loss.mean()
+        elif self.reduction == "sum":
+            return loss.sum()
+        else:
+            return loss  # no reduction, return per-sample MAPE
+
+# Mean squared relative error (similar to MAPE)
+class MSRELoss(nn.Module): 
+    """Mean Absolute Percentage Error Loss"""
+    def __init__(self, eps=1e-8, reduction="mean"):
+        super().__init__()
+        self.eps = eps
+        self.reduction = reduction
+
+    def forward(self, y_pred, y_true):
+        # Avoid division by zero
+        denom = torch.clamp(y_true**2, min=self.eps)
+        loss = (y_pred - y_true)**2 / denom * 100# The multiplication may be 100^2, but not sure if needed
+
+        if self.reduction == "mean":
+            return loss.mean()
+        elif self.reduction == "sum":
+            return loss.sum()
+        else:
+            return loss  # no reduction, return per-sample MAPE
+
+
+class L1LossWithMax(nn.Module):
+    """
+    Extended L1 loss with an optional 'max' reduction (ℓ∞ norm).
+    - reduction='mean': standard MAE (default in PyTorch)
+    - reduction='sum': sum of absolute errors
+    - reduction='none': per-sample absolute errors
+    - reduction='max': maximum absolute error (ℓ∞ loss)
+    """
+    def __init__(self, reduction: str = "mean"):
+        super().__init__()
+        if reduction not in ("mean", "sum", "none", "max"):
+            raise ValueError(f"Invalid reduction: {reduction}")
+        self.reduction = reduction
+
+    def forward(self, y_pred, y_true):
+        abs_err = (y_pred - y_true).abs()
+        if self.reduction == "mean":
+            return abs_err.mean()
+        elif self.reduction == "sum":
+            return abs_err.sum()
+        elif self.reduction == "none":
+            return abs_err
+        elif self.reduction == "max":
+            return abs_err.max()
+
+class FocalMSELoss(nn.Module):
+    """Focal Mean Squared Error Loss to focus on hard-to-predict samples."""
+    def __init__(self, gamma=1.0, delta=1e-3, base_metric=nn.MSELoss):#base_metric=nn.MSELoss):
+        super().__init__()
+        self.gamma = gamma
+        self.delta = delta
+        self.metric = base_metric(reduction='none')
+
+    def forward(self, y_pred, y_true):
+        metric_loss = self.metric(y_pred, y_true)
+        # Added a correction: w(l) = (l + eps) ^ gamma, for robustnes to small values
+        # Note: It may also be relative to the average loss of the batch.  
+        focal_weight = (metric_loss.detach() + self.delta) ** self.gamma 
+        return (focal_weight * metric_loss).mean()
 
 class BinnedMSELoss(nn.Module):
     """
@@ -104,6 +172,30 @@ class BinnedMSELoss(nn.Module):
             return torch.tensor(0.0, device=device, requires_grad=True)
             
         return weighted_loss.sum() / num_non_empty_bins
+
+class QuantileWeightedLoss(nn.Module):
+    """
+    A custom loss function that re-weights the base MSE loss based on the
+    quantile of the true target value. This puts more emphasis on samples
+    in the tails of the distribution.
+    """
+    def __init__(self, alpha):
+        super().__init__()
+        self.alpha = alpha
+        self.mse = nn.MSELoss(reduction='none')
+
+    def forward(self, y_pred, y_true, sample_weights):
+        """
+        Calculates the weighted MSE loss.
+
+        Args:
+            y_pred (torch.Tensor): The model's predictions.
+            y_true (torch.Tensor): The true target values.
+            sample_weights (torch.Tensor): The pre-computed weights for each sample.
+        """
+        mse_loss = self.mse(y_pred, y_true)
+        weighted_loss = mse_loss * sample_weights
+        return weighted_loss.mean()
 
 # ==============================================================================
 # 3. The Core Neural Network Model (Updated with Normalization)
@@ -152,7 +244,8 @@ class NNWithEmbeddings(nn.Module):
             if activation:
                 all_layers.append((f"relu_{i}", activation))
             # Add dropout after each layer
-            all_layers.append((f"dropout_{i}", nn.Dropout(p=dropout)))
+            if dropout > 0:
+                all_layers.append((f"dropout_{i}", nn.Dropout(p=dropout)))
             input_size = size
             
         self.layers = nn.Sequential(OrderedDict(all_layers))
@@ -174,7 +267,7 @@ class NNWithEmbeddings(nn.Module):
         return self.layers(x)
 
 # ==============================================================================
-# 4. The Regressor Wrapper Class (Upgraded with Feature Engineering and Scaling)
+# 4. The Regressor Wrapper Class (Updated with new loss function)
 # ==============================================================================
 """
 Inputs:
@@ -192,9 +285,10 @@ Inputs:
 - num_epochs: The number of training epochs.
 - hidden_sizes: A list of integers representing the number of neurons in each hidden layer.
 - patience: The number of epochs to wait for improvement before early stopping.
-- loss_fn: The name of the loss function to use ('mse', 'huber', 'focal_mse', or 'binned_mse').
+- loss_fn: The name of the loss function to use ('mse', 'huber', 'focal_mse', 'binned_mse', or 'quantile_weighted_mse').
 - n_bins: The number of bins for the 'binned_mse' loss function.
 - gamma: The gamma parameter for the 'focal_mse' and 'binned_mse' loss functions.
+- loss_alpha: The alpha parameter for the 'quantile_weighted_mse' loss function.
 - random_state: A seed for random number generators to ensure reproducibility.
 - dropout: The dropout probability for regularization.
 - l2_lambda: The L2 regularization strength.
@@ -208,7 +302,7 @@ class FeedForwardNNRegressorWithEmbeddings5:
                  engineer_time_features=False, bin_yrblt=False, cross_township_class=False,
                  fourier_type='none', fourier_mapping_size=16, fourier_sigma=1.25,
                  output_size=1, batch_size=16, learning_rate=0.001, num_epochs=10, 
-                 hidden_sizes=[1024], patience=10, loss_fn='mse', n_bins=10, gamma=1.0, random_state=None,
+                 hidden_sizes=[1024], patience=10, loss_fn='mse', n_bins=10, gamma=1.0, loss_alpha=1.0, random_state=None,
                  dropout=0.5, l2_lambda=0, l1_lambda=0, use_scaler=False, normalization_type='none'):
         
         self.original_categorical_features = categorical_features[:]
@@ -238,6 +332,7 @@ class FeedForwardNNRegressorWithEmbeddings5:
         self.loss_fn_name = loss_fn
         self.n_bins = n_bins
         self.gamma = gamma
+        self.loss_alpha = loss_alpha
         self.model = None
         self.category_mappings = {}
         self.embedding_specs = []
@@ -300,8 +395,8 @@ class FeedForwardNNRegressorWithEmbeddings5:
         self.numerical_features = [col for col in X_eng.columns if col not in self.categorical_features and col not in self.coord_features]
 
         # --- Validation Split on Engineered Data ---
+        X_train, y_train = X_eng, y.copy()
         if X_val is not None and y_val is not None:
-            X_train, y_train = X_eng, y.copy()
             X_val, y_val = self._engineer_features(X_val), y_val.copy()
         else:
             X_train, X_val, y_train, y_val = train_test_split(X_eng, y, test_size=0.2, random_state=self.random_state)
@@ -337,10 +432,25 @@ class FeedForwardNNRegressorWithEmbeddings5:
         X_cat_train, X_num_train, X_coord_train, y_train_tensor = _create_tensors(X_train, X_train_num_scaled, X_train, y_train)
         X_cat_val, X_num_val, X_coord_val, y_val_tensor = _create_tensors(X_val, X_val_num_scaled, X_val, y_val)
 
-        train_dataset = TensorDataset(X_cat_train, X_num_train, X_coord_train, y_train_tensor)
-        val_dataset = TensorDataset(X_cat_val, X_num_val, X_coord_val, y_val_tensor)
-        train_loader = DataLoader(dataset=train_dataset, batch_size=self.batch_size, shuffle=True)
-        val_loader = DataLoader(dataset=val_dataset, batch_size=self.batch_size * 2)
+        # Handle the new loss function by pre-computing sample weights
+        if self.loss_fn_name == 'quantile_weighted_mse':
+            # Calculate quantiles for the entire training set
+            y_train_quantiles = y_train.rank(pct=True)
+            # Apply the weighting formula
+            train_weights = (1 + np.exp(-self.loss_alpha * y_train_quantiles) )#+ np.exp(-self.loss_alpha * (1 - y_train_quantiles))
+            train_weights_tensor = torch.tensor(train_weights.values.reshape(-1, 1), dtype=torch.float32)
+
+            # Create the training dataset including the weights
+            train_dataset = TensorDataset(X_cat_train, X_num_train, X_coord_train, y_train_tensor, train_weights_tensor)
+            train_loader = DataLoader(dataset=train_dataset, batch_size=self.batch_size, shuffle=True)
+            # Validation dataset does not need weights
+            val_dataset = TensorDataset(X_cat_val, X_num_val, X_coord_val, y_val_tensor)
+            val_loader = DataLoader(dataset=val_dataset, batch_size=self.batch_size * 2)
+        else:
+            train_dataset = TensorDataset(X_cat_train, X_num_train, X_coord_train, y_train_tensor)
+            val_dataset = TensorDataset(X_cat_val, X_num_val, X_coord_val, y_val_tensor)
+            train_loader = DataLoader(dataset=train_dataset, batch_size=self.batch_size, shuffle=True)
+            val_loader = DataLoader(dataset=val_dataset, batch_size=self.batch_size * 2)
 
         # --- Model Initialization ---
         self.model = NNWithEmbeddings(
@@ -360,9 +470,11 @@ class FeedForwardNNRegressorWithEmbeddings5:
         elif self.loss_fn_name == 'binned_mse':
             y_min, y_max = y_train.min(), y_train.max()
             criterion = BinnedMSELoss(y_min=y_min, y_max=y_max, n_bins=self.n_bins, gamma=self.gamma)
+        elif self.loss_fn_name == 'quantile_weighted_mse':
+            criterion = QuantileWeightedLoss(alpha=self.loss_alpha)
         else: criterion = nn.MSELoss()
         
-        if self.l2_lambda == 0:
+        if self.l2_lambda < 1e-6:
             optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
         else:        
             optimizer = optim.AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=self.l2_lambda)
@@ -375,20 +487,34 @@ class FeedForwardNNRegressorWithEmbeddings5:
         for epoch in range(self.num_epochs):
             self.model.train()
             total_train_loss = 0
-            for batch_cat, batch_num, batch_coord, batch_y in train_loader:
-                batch_cat, batch_num, batch_coord, batch_y = batch_cat.to(device), batch_num.to(device), batch_coord.to(device), batch_y.to(device)
-                outputs = self.model(batch_cat, batch_num, batch_coord)
-                loss = criterion(outputs, batch_y)
+            if self.loss_fn_name == 'quantile_weighted_mse':
+                for batch_cat, batch_num, batch_coord, batch_y, batch_weights in train_loader:
+                    batch_cat, batch_num, batch_coord, batch_y, batch_weights = batch_cat.to(device), batch_num.to(device), batch_coord.to(device), batch_y.to(device), batch_weights.to(device)
+                    outputs = self.model(batch_cat, batch_num, batch_coord)
+                    loss = criterion(outputs, batch_y, batch_weights)
+                    
+                    if self.l1_lambda >= 1e-8:
+                        l1_penalty = sum(torch.sum(torch.abs(param)) for param in self.model.parameters())
+                        loss += self.l1_lambda * l1_penalty
 
-                # Add L1 regularization
-                if self.l1_lambda > 0:
-                    l1_penalty = sum(torch.sum(torch.abs(param)) for param in self.model.parameters())
-                    loss += self.l1_lambda * l1_penalty
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    total_train_loss += loss.item()
+            else:
+                for batch_cat, batch_num, batch_coord, batch_y in train_loader:
+                    batch_cat, batch_num, batch_coord, batch_y = batch_cat.to(device), batch_num.to(device), batch_coord.to(device), batch_y.to(device)
+                    outputs = self.model(batch_cat, batch_num, batch_coord)
+                    loss = criterion(outputs, batch_y)
 
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                total_train_loss += loss.item()
+                    if self.l1_lambda >= 1e-8:
+                        l1_penalty = sum(torch.sum(torch.abs(param)) for param in self.model.parameters())
+                        loss += self.l1_lambda * l1_penalty
+
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    total_train_loss += loss.item()
             
             self.model.eval()
             total_val_loss = 0
@@ -396,7 +522,13 @@ class FeedForwardNNRegressorWithEmbeddings5:
                 for batch_cat, batch_num, batch_coord, batch_y in val_loader:
                     batch_cat, batch_num, batch_coord, batch_y = batch_cat.to(device), batch_num.to(device), batch_coord.to(device), batch_y.to(device)
                     outputs = self.model(batch_cat, batch_num, batch_coord)
-                    loss = criterion(outputs, batch_y)
+                    
+                    if self.loss_fn_name == 'quantile_weighted_mse':
+                         # For validation, we can't use the precomputed weights from the train set
+                         # so we'll just use regular MSE for monitoring.
+                         loss = nn.MSELoss()(outputs, batch_y)
+                    else:
+                         loss = criterion(outputs, batch_y)
 
                     # Add L1 regularization to validation loss (optional, for monitoring)
                     if self.l1_lambda > 0:

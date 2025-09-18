@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 from scipy.stats import kurtosis, skew, rankdata
+from sklearn.metrics import r2_score
 
 # ==============================================================================
 # 1. Core Metric Calculations (Refactored for Efficiency and Readability)
@@ -152,6 +153,7 @@ def compute_all_metrics(y_true: pd.Series, y_pred: pd.Series, n_groups: int = 3,
     
     metrics = {
         'rmse': np.sqrt(np.mean((y_pred - y_true)**2)),
+        'r2': r2_score(y_true, y_pred),
         'f_dev': calculate_f_dev(ratio, quantiles, alpha),
         'f_grp': calculate_f_grp(ratio, groups),
         'ratio_std': np.std(ratio),
@@ -189,6 +191,10 @@ def create_diagnostic_plots(
     # --- Plotting ---
     
     def _plot_real_vs_pred(y_true, y_pred, metrics, label, color, filename):
+        if y_true.size > 1000:
+            sample_idx = np.random.choice(range(y_true.size), 1000, replace=False)
+            y_true = y_true.iloc[sample_idx]
+            y_pred = y_pred[sample_idx]
         plt.figure(figsize=(8, 5))
         plt.scatter(y_true, y_pred, facecolor='none', label=label, color=color, alpha=0.5)
         plt.plot([y_true.min(), y_true.max()], [y_true.min(), y_true.max()], color="red", label="y = x")
@@ -201,30 +207,58 @@ def create_diagnostic_plots(
             plt.xscale("log")
             plt.yscale("log")
         if save_plots:
-            plt.savefig(f"img/{filename}{suffix}.pdf")
+            plt.savefig(f"img/versus/{filename}{suffix}.jpg", dpi=300)
         plt.show()
 
     def _plot_ratio_vs_price(y_true, y_pred, metrics, label, color, filename):
+        if y_true.size > 1000:
+            sample_idx = np.random.choice(range(y_true.size), 1000, replace=False)
+            y_true = y_true.iloc[sample_idx]
+            y_pred = y_pred[sample_idx]
         ratio = y_pred / y_true
         plt.figure(figsize=(8, 5))
         plt.scatter(y_true, ratio, facecolor='none', label=label, color=color, alpha=0.5)
         plt.hlines(1, y_true.min(), y_true.max(), colors="red", label="Fair Ratio (1.0)")
         plt.legend()
-        plt.title(f"RMSE={metrics['rmse']:.2f} | F_dev={metrics['f_dev']:.3f}, F_grp={metrics['f_grp']:.3f}\n"
+        plt.title(f"RMSE={metrics['rmse']:.2f} | R2={metrics['r2']:.2f} | F_dev={metrics['f_dev']:.3f}, F_grp={metrics['f_grp']:.3f}\n"
                   f"Ratio: std={metrics['ratio_std']:.3f}, skew={metrics['ratio_skew']:.3f}")
         plt.xlabel("True Values")
         plt.ylabel("Assessment Ratio (Pred / True)")
         if log_scale:
             plt.xscale("log")
+            # plt.yscale("log")
         if save_plots:
-            plt.savefig(f"img/{filename}{suffix}.pdf")
+            plt.savefig(f"img/ratio/{filename}{suffix}.jpg", dpi=300)
+        plt.show()
+
+    def _plot_residuals_vs_price(y_true, y_pred, metrics, label, color, filename):
+        if y_true.size > 1000:
+            sample_idx = np.random.choice(range(y_true.size), 1000, replace=False)
+            y_true = y_true.iloc[sample_idx]
+            y_pred = y_pred[sample_idx]
+        residuals = y_true - y_pred
+        plt.figure(figsize=(8, 5))
+        plt.scatter(y_true, residuals, facecolor='none', label=label, color=color, alpha=0.5)
+        plt.legend()
+        plt.title(f"RMSE={metrics['rmse']:.2f} | R2={metrics['r2']:.2f} | F_dev={metrics['f_dev']:.3f}, F_grp={metrics['f_grp']:.3f}\n"
+                  f"Ratio: std={metrics['ratio_std']:.3f}, skew={metrics['ratio_skew']:.3f}")
+        plt.xlabel("True Values")
+        plt.ylabel("Assessment Residuals (True - Pred)")
+        if log_scale:
+            plt.xscale("log")
+            # plt.yscale("log")
+        if save_plots:
+            plt.savefig(f"img/residuals/{filename}{suffix}.jpg", dpi=300)
         plt.show()
 
     # Generate plots for Test set
     _plot_real_vs_pred(y_test, y_pred_test, test_metrics, "Test", "blue", "real_vs_pred_test")
     _plot_ratio_vs_price(y_test, y_pred_test, test_metrics, "Test Ratio", "black", "ratio_vs_price_test")
+    _plot_residuals_vs_price(y_test, y_pred_test, test_metrics, "Test Residuals", "green", "residuals_vs_price_test")
 
     # Generate plots for Train set
-    _plot_real_vs_pred(y_train, y_pred_train, train_metrics, "Train", "green", "real_vs_pred_train")
-    _plot_ratio_vs_price(y_train, y_pred_train, train_metrics, "Train Ratio", "darkorange", "ratio_vs_price_train")
+    _plot_real_vs_pred(y_train, y_pred_train, train_metrics, "Train", "cyan", "real_vs_pred_train")
+    _plot_ratio_vs_price(y_train, y_pred_train, train_metrics, "Train Ratio", "gray", "ratio_vs_price_train")
+    _plot_residuals_vs_price(y_train, y_pred_train, train_metrics, "Train Residuals", "lime", "residuals_vs_price_train")
+
 
