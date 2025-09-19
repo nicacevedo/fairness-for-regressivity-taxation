@@ -6,12 +6,12 @@ data_prep:
   seed: 2025 # sample selection seed
   num_evaluation_runs: 10
   test_on_val: true
-  apply_resampling: true
+  apply_resampling: false
 
 plotting:
   save_plots: true
-  save_suffix: "_test_regression_resampled"
-  log_scale: false # on the x axis
+  save_suffix: "_test_T_classifier_v2_ce"
+  log_scale: true # on the x axis
 
 
 

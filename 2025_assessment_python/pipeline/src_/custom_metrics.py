@@ -199,7 +199,7 @@ def create_diagnostic_plots(
         plt.scatter(y_true, y_pred, facecolor='none', label=label, color=color, alpha=0.5)
         plt.plot([y_true.min(), y_true.max()], [y_true.min(), y_true.max()], color="red", label="y = x")
         plt.legend()
-        plt.title(f"RMSE={metrics['rmse']:.2f} | F_dev={metrics['f_dev']:.3f}, F_grp={metrics['f_grp']:.3f}\n"
+        plt.title(f"RMSE={metrics['rmse']:.2f} | R2={metrics['r2']:.2f} | F_dev={metrics['f_dev']:.3f}, F_grp={metrics['f_grp']:.3f}\n"
                   f"Ratio: std={metrics['ratio_std']:.3f}, skew={metrics['ratio_skew']:.3f}")
         plt.xlabel("True Values")
         plt.ylabel("Predicted Values")

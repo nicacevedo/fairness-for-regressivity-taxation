@@ -34,6 +34,8 @@ from residual_models.ensemble_models import LGBMRegressorWithResiduals
 
 # Classficiation models
 from nn_models.unconstrained.DiscretizedNNClassifier import DiscretizedNNClassifier
+from nn_models.unconstrained.DiscretizedNNClassifier2 import DiscretizedNNClassifier2
+from nn_models.unconstrained.DiscretizedTabTransformerClassifier import DiscretizedTabTransformerClassifier
 
 # Custom utilities
 from balancing_models import BalancingResampler
@@ -169,13 +171,13 @@ def get_model_configurations(params: dict, seed: int) -> dict:
             "preprocessor": "embedding_linear"
         },
         "DiscretizedNNClassifier":{
-            "model_class": DiscretizedNNClassifier,
+            "model_class": DiscretizedNNClassifier2,
             "params": {
                 'learning_rate': 0.004,#07360519059468381,
                 'categorical_features': large_categories,
                 'coord_features': coord_vars,
                 'random_state': seed,
-                'batch_size': 2*16*2048,#512,#26,
+                'batch_size': 4*2048,#2*16*2048,#512,#26,
                 'num_epochs': 200,#172,
                 'hidden_sizes': [512*2**(i) for i in range(4)], #[1024*4, 1024*2, 1024, 512],#[1796, 193, 140, 69],
                 'fourier_type': 'basic',
@@ -194,9 +196,25 @@ def get_model_configurations(params: dict, seed: int) -> dict:
                 "n_bins":50,
                 "binning_method":'quantile',
                 'min_samples_per_bin':4,
+                # v2:  loss controls
+                "loss_mode":'prob_mse', 
+                "huber_delta":1.0, 
+                "smoothing_sigma":1,#0.0, # standard deviation of Gaussian used to generate soft targets for prob_mse and smooth_ce. Controls how much probability mass spreads to neighboring bins.
+                "ce_label_smoothing":0.0, # passes label smoothing to PyTorch’s CrossEntropyLoss (only used if loss_mode='ce').
+                "use_class_weights":False, # if True, computes inverse-frequency weights per class and applies them in CE loss. Helps counteract class imbalance.
+                "default_predict_mode":'expected', # determines what predict() returns: 'expected': regression-style output using weighted sum of bin centers. 'argmax': class → center (your original behavior).
             },
             "preprocessor": "embedding_linear"
         },
+            # loss_mode ∈ {
+            #     'ce',            # standard cross-entropy
+            #     'ev_mse',        # [this ones suck?]expected value (p@bin_values) vs y  with MSE
+            #     'ev_mae',        # [this ones suck?]... with MAE
+            #     'ev_huber',      # [this ones suck?]... with Huber (delta=huber_delta)
+            #     'emd',           # [this ones suck?]Earth Mover's Distance (Wasserstein-1 on ordered bins)
+            #     'prob_mse',      # MSE between p and (one-hot or gaussian-smoothed) target
+            #     'smooth_ce'      # cross-entropy with distance-based soft targets
+            # }
         "TabTransformer": {
             "model_class": TabTransformerRegressor4,
             "params": {
@@ -215,6 +233,49 @@ def get_model_configurations(params: dict, seed: int) -> dict:
                 'fourier_type': 'positional',
                 'fourier_mapping_size': 45,
                 'fourier_sigma': 5
+            },
+            "preprocessor": "embedding"
+        },
+        "DiscretizedTabTransformerClassifier":{
+            "model_class": DiscretizedTabTransformerClassifier,
+            "params": {
+                'learning_rate': 0.0008922322100000605,
+                'categorical_features': cat_vars,
+                'coord_features': coord_vars,
+                'random_state': seed,
+                'batch_size': 2*2048,#4*2048,#2*16*2048,#512,#26,
+                'num_epochs': 400,#172,
+                # 'hidden_sizes': [512*2**(i) for i in range(4)], #[1024*4, 1024*2, 1024, 512],#[1796, 193, 140, 69],
+                'patience': 11,
+                # Loss
+                # 'loss_fn': 'focal_mse',#'quantile_weighted_mse',
+                # 'gamma': 0, #1.4092634199672638, # focal mse gamma
+                # 'loss_alpha': 35,
+                # Transformer
+                'd_model': 128,#6 * 4,
+                'nhead': 16,#4,
+                'num_layers': 6,#6,
+                # Fourier features
+                'fourier_type': 'positional',
+                'fourier_mapping_size': 45,
+                'fourier_sigma': 5,
+                # Regularization
+                'dropout': 0.11,
+                # 'dropout': 0.0007693680499241461,
+                # 'l1_lambda': 2.714100311651801e-06,
+                # 'l2_lambda': 0.0031372889601764937,
+                'use_scaler': True,
+                # Classification
+                "n_bins":50,
+                "binning_method":'quantile',
+                'min_samples_per_bin':4,
+                # v2:  loss controls
+                "loss_mode":'ce', 
+                "huber_delta":1.0, 
+                "smoothing_sigma":1,#0.0, # standard deviation of Gaussian used to generate soft targets for prob_mse and smooth_ce. Controls how much probability mass spreads to neighboring bins.
+                "ce_label_smoothing":0.0, # passes label smoothing to PyTorch’s CrossEntropyLoss (only used if loss_mode='ce').
+                "use_class_weights":False, # if True, computes inverse-frequency weights per class and applies them in CE loss. Helps counteract class imbalance.
+                "default_predict_mode":'expected', # determines what predict() returns: 'expected': regression-style output using weighted sum of bin centers. 'argmax': class → center (your original behavior).
             },
             "preprocessor": "embedding"
         },
@@ -355,6 +416,10 @@ def train_and_evaluate(model_name: str, model_config: dict, data_splits: tuple, 
             cat_vars = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in config['model']['predictor']['all'] if c.startswith('loc_school_')]
             cat_vars = [X_train.columns.tolist().index(col) for col in cat_vars] # Large vars
             print("We just selected the number of the cols that are features")
+        elif model_name in ["TabTransformer","DiscretizedTabTransformerClassifier"]:
+            cat_vars = config['model']['predictor']['categorical']
+            cat_vars = [X_train.columns.tolist().index(col) for col in cat_vars] # Large vars
+            print("We just selected the number of the cols that are features")
         else:
             raise print("NO MODEL NAMED: ", model_name)
         # cat_vars = [X_train.columns.tolist().index(col) for col in config['model']['predictor']['categorical']]
@@ -444,7 +509,7 @@ def main():
     main_seed = config['model']['seed']
     num_runs = config['data_prep'].get('num_evaluation_runs', 5)
     
-    models_to_run = ["FeedForwardNN"]#["DiscretizedNNClassifier"]#["DiscretizedNNClassifier"]# ["LightGBMResiduals"]#["FeedForwardNNResiduals"]#["FeedForwardNN", "LightGBM"]
+    models_to_run = ["DiscretizedTabTransformerClassifier"]#["DiscretizedTabTransformerClassifier"]#["TabTransformer"]#["DiscretizedNNClassifier"]#["DiscretizedNNClassifier"]# ["LightGBMResiduals"]#["FeedForwardNNResiduals"]#["FeedForwardNN", "LightGBM"]
     
     train_df, val_df, test_df = load_and_prepare_data(config, test_on_val=config['data_prep'].get('test_on_val', False))
     preprocessors = create_preprocessors(config)
