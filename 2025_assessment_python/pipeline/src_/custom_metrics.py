@@ -238,12 +238,13 @@ def create_diagnostic_plots(
             y_pred = y_pred[sample_idx]
         residuals = y_true - y_pred
         plt.figure(figsize=(8, 5))
-        plt.scatter(y_true, residuals, facecolor='none', label=label, color=color, alpha=0.5)
+        plt.scatter(y_pred, -residuals, facecolor='none', label=label, color=color, alpha=0.5)
+        plt.hlines(0, y_pred.min(), y_pred.max(), colors="red", label="Perfect Fit")
         plt.legend()
         plt.title(f"RMSE={metrics['rmse']:.2f} | R2={metrics['r2']:.2f} | F_dev={metrics['f_dev']:.3f}, F_grp={metrics['f_grp']:.3f}\n"
                   f"Ratio: std={metrics['ratio_std']:.3f}, skew={metrics['ratio_skew']:.3f}")
-        plt.xlabel("True Values")
-        plt.ylabel("Assessment Residuals (True - Pred)")
+        plt.xlabel("Pred Values")
+        plt.ylabel("Assessment (-)Residuals (Pred - True)")
         if log_scale:
             plt.xscale("log")
             # plt.yscale("log")
@@ -251,14 +252,37 @@ def create_diagnostic_plots(
             plt.savefig(f"img/residuals/{filename}{suffix}.jpg", dpi=300)
         plt.show()
 
+    def _plot_prc_residuals_vs_price(y_true, y_pred, metrics, label, color, filename):
+        if y_true.size > 1000:
+            sample_idx = np.random.choice(range(y_true.size), 1000, replace=False)
+            y_true = y_true.iloc[sample_idx]
+            y_pred = y_pred[sample_idx]
+        residuals = y_true - y_pred
+        plt.figure(figsize=(8, 5))
+        plt.scatter(y_pred, -residuals/y_pred, facecolor='none', label=label, color=color, alpha=0.5)
+        plt.hlines(0, y_pred.min(), y_pred.max(), colors="red", label="Perfect Fit")
+        plt.legend()
+        plt.title(f"RMSE={metrics['rmse']:.2f} | R2={metrics['r2']:.2f} | F_dev={metrics['f_dev']:.3f}, F_grp={metrics['f_grp']:.3f}\n"
+                  f"Ratio: std={metrics['ratio_std']:.3f}, skew={metrics['ratio_skew']:.3f}")
+        plt.xlabel("Pred Values")
+        plt.ylabel("Assessment (-) Percent. Residuals (Pred - True)/Pred")
+        if log_scale:
+            plt.xscale("log")
+            # plt.yscale("log")
+        if save_plots:
+            plt.savefig(f"img/prc_residuals/{filename}{suffix}.jpg", dpi=300)
+        plt.show()
+
     # Generate plots for Test set
     _plot_real_vs_pred(y_test, y_pred_test, test_metrics, "Test", "blue", "real_vs_pred_test")
     _plot_ratio_vs_price(y_test, y_pred_test, test_metrics, "Test Ratio", "black", "ratio_vs_price_test")
     _plot_residuals_vs_price(y_test, y_pred_test, test_metrics, "Test Residuals", "green", "residuals_vs_price_test")
+    _plot_prc_residuals_vs_price(y_test, y_pred_test, test_metrics, "Test Residuals", "saddlebrown", "residuals_vs_price_test")
 
     # Generate plots for Train set
     _plot_real_vs_pred(y_train, y_pred_train, train_metrics, "Train", "cyan", "real_vs_pred_train")
     _plot_ratio_vs_price(y_train, y_pred_train, train_metrics, "Train Ratio", "gray", "ratio_vs_price_train")
     _plot_residuals_vs_price(y_train, y_pred_train, train_metrics, "Train Residuals", "lime", "residuals_vs_price_train")
+    _plot_prc_residuals_vs_price(y_train, y_pred_train, train_metrics, "Train Residuals", "peru", "residuals_vs_price_train")
 
 

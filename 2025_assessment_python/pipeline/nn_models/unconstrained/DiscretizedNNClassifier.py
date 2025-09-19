@@ -139,7 +139,7 @@ class DiscretizedNNClassifier:
     def __init__(self, categorical_features, coord_features=[],
                  engineer_time_features=False, bin_yrblt=False, cross_township_class=False,
                  fourier_type='none', fourier_mapping_size=16, fourier_sigma=1.25,
-                 n_bins=10, binning_method='quantile', batch_size=16, learning_rate=0.001,
+                 n_bins=10, min_samples_per_bin=3, binning_method='quantile', batch_size=16, learning_rate=0.001,
                  num_epochs=10, hidden_sizes=[1024], patience=10,
                  random_state=None, dropout=0.5, l2_lambda=0, l1_lambda=0,
                  use_scaler=False, normalization_type='none'):
@@ -160,6 +160,7 @@ class DiscretizedNNClassifier:
         self.fourier_sigma = fourier_sigma
         self.numerical_features = []
         self.n_bins = n_bins
+        self.min_samples_per_bin = min_samples_per_bin
         self.binning_method = binning_method
         self.batch_size = batch_size
         self.learning_rate = learning_rate
@@ -217,36 +218,58 @@ class DiscretizedNNClassifier:
         # --- Binning the target variable ---
         if self.binning_method == 'quantile':
             y_bins, bin_edges = pd.qcut(y, q=self.n_bins, labels=False, retbins=True, duplicates='drop')
-            y_bin_labels = y_bins.values
-            self.bin_info['edges'] = bin_edges
-            self.bin_info['medians'] = [y.loc[y_bins == i].median() for i in range(len(bin_edges) - 1)]
-            self.bin_info['means'] = [y.loc[y_bins == i].mean() for i in range(len(bin_edges) - 1)]
-            self.bin_info['num_bins'] = len(bin_edges) - 1
-            if self.n_bins != self.bin_info['num_bins']:
-                warnings.warn(f"Number of bins reduced to {self.bin_info['num_bins']} due to duplicate quantiles.", UserWarning)
         elif self.binning_method == 'uniform':
             y_bins, bin_edges = pd.cut(y, bins=self.n_bins, labels=False, retbins=True, duplicates='drop')
-            y_bin_labels = y_bins.values
-            self.bin_info['edges'] = bin_edges
-            self.bin_info['medians'] = [(bin_edges[i] + bin_edges[i+1]) / 2 for i in range(len(bin_edges) - 1)]
-            self.bin_info['num_bins'] = len(bin_edges) - 1
         elif self.binning_method == 'kmeans':
             kmeans = KMeans(n_clusters=self.n_bins, random_state=self.random_state, n_init='auto')
-            y_bin_labels = kmeans.fit_predict(y.values.reshape(-1, 1))
-            self.bin_info['centers'] = sorted(kmeans.cluster_centers_.flatten())
-            self.bin_info['labels'] = y_bin_labels
-            self.bin_info['num_bins'] = self.n_bins
+            y_bins = pd.Series(kmeans.fit_predict(y.values.reshape(-1, 1)))
+            bin_edges = np.sort(kmeans.cluster_centers_.flatten())
         else:
             raise ValueError("Invalid binning_method. Choose from 'quantile', 'uniform', 'kmeans'.")
         
+        # Re-map bin labels to be consecutive from 0, and drop small bins
+        bin_counts = y_bins.value_counts()
+        valid_bins = bin_counts[bin_counts >= self.min_samples_per_bin].index
+        
+        if len(valid_bins) < 2:
+            raise ValueError("Not enough valid bins after filtering. Try reducing `min_samples_per_bin` or `n_bins`.")
+
+        y_valid_mask = y_bins.isin(valid_bins)
+        y_valid_bins = y_bins[y_valid_mask]
+        
+        X_eng = X_eng[y_valid_mask].reset_index(drop=True)
+        y = y[y_valid_mask].reset_index(drop=True)
+        y_bins = y_valid_bins.reset_index(drop=True)
+
+        unique_labels = sorted(y_bins.unique())
+        label_mapping = {old_label: new_label for new_label, old_label in enumerate(unique_labels)}
+        y_bin_labels = y_bins.map(label_mapping).values
+        
+        self.bin_info['num_bins'] = len(unique_labels)
+        if self.binning_method == 'quantile' or self.binning_method == 'uniform':
+            # Create a clean, ordered list of bin edges for easy access
+            sorted_bin_edges = np.sort([bin_edges[i] for i in unique_labels])
+            self.bin_info['edges'] = sorted_bin_edges
+            self.bin_info['medians'] = [y.loc[y_bins == old_label].median() for old_label in unique_labels]
+            self.bin_info['means'] = [y.loc[y_bins == old_label].mean() for old_label in unique_labels]
+        elif self.binning_method == 'kmeans':
+            self.bin_info['centers'] = np.sort([c for i, c in enumerate(bin_edges) if i in valid_bins])
+
         # Store bin info for the validation set
         if X_val is not None and y_val is not None:
-            if self.binning_method == 'quantile' or self.binning_method == 'uniform':
-                y_val_labels = pd.cut(y_val, bins=self.bin_info['edges'], labels=False, include_lowest=True).values
-                # Handle NaNs from out-of-bin values
-                y_val_labels = np.nan_to_num(y_val_labels, nan=self.bin_info['num_bins'] - 1).astype(int)
+            X_val_eng = self._engineer_features(X_val)
+            # Use original bin edges to classify validation data
+            if self.binning_method in ['quantile', 'uniform']:
+                y_val_labels_raw = pd.cut(y_val, bins=bin_edges, labels=False, include_lowest=True)
             elif self.binning_method == 'kmeans':
-                y_val_labels = kmeans.predict(y_val.values.reshape(-1, 1))
+                y_val_labels_raw = pd.Series(kmeans.predict(y_val.values.reshape(-1, 1)), index=y_val.index)
+
+            # Only keep validation samples that fall into valid bins
+            y_val_labels_valid_mask = y_val_labels_raw.isin(valid_bins)
+            
+            X_val_eng = X_val_eng[y_val_labels_valid_mask].reset_index(drop=True)
+            y_val = y_val[y_val_labels_valid_mask].reset_index(drop=True)
+            y_val_labels = y_val_labels_raw[y_val_labels_valid_mask].reset_index(drop=True).map(label_mapping).values
         
         # --- Dynamically Determine Feature Lists After Engineering ---
         current_categorical = self.original_categorical_features[:]
@@ -270,7 +293,7 @@ class DiscretizedNNClassifier:
         if X_val is None or y_val is None:
             X_train, X_val, y_train_labels, y_val_labels = train_test_split(X_eng, y_bin_labels, test_size=0.2, random_state=self.random_state, stratify=y_bin_labels)
         else:
-            X_train, X_val = X_eng, self._engineer_features(X_val)
+            X_train, X_val = X_eng, X_val_eng
         
         # --- Scaling numerical features ---
         if self.use_scaler:
@@ -389,7 +412,7 @@ class DiscretizedNNClassifier:
         print("\n" + "="*50)
         print("Final Classification Report on Validation Set")
         print("="*50)
-        print(classification_report(y_val_true_bins, y_val_pred_bins))
+        print(classification_report(y_val_true_bins, y_val_pred_bins,  zero_division=0))
         print("Confusion Matrix:\n", confusion_matrix(y_val_true_bins, y_val_pred_bins))
         
         y_val_pred_numeric = self._convert_to_numeric(y_val_pred_bins)
@@ -406,9 +429,13 @@ class DiscretizedNNClassifier:
             return np.array([self.bin_info['centers'][i] for i in y_pred_bins])
         elif self.binning_method == 'quantile':
             return np.array([self.bin_info['medians'][i] for i in y_pred_bins])
-        else: # uniform
-            return np.array([ (self.bin_info['edges'][i] + self.bin_info['edges'][i+1]) / 2 for i in y_pred_bins])
-
+        else:  # uniform
+            edges = self.bin_info['edges']
+            return np.array([
+                (edges[i] + edges[i+1]) / 2 if i < len(edges) - 1 else edges[i]
+                for i in y_pred_bins
+            ])
+            
     def _predict_classes(self, X_df):
         if self.model is None:
             raise RuntimeError("You must call fit() before calling predict().")

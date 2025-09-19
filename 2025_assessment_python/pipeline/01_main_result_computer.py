@@ -113,31 +113,6 @@ def get_model_configurations(params: dict, seed: int) -> dict:
             },
             "preprocessor": "LightGBM",            
         },
-        "FeedForwardNN": {
-            "model_class": FeedForwardNNRegressorWithEmbeddings5,
-            "params": {
-                'learning_rate': 0.004,#0.0007360519059468381,
-                'categorical_features': large_categories,
-                'coord_features': coord_vars,
-                'random_state': seed,
-                'batch_size': 64,#26,
-                'num_epochs': 200,#172,
-                'hidden_sizes':[1024*4, 1024*2, 1024, 512, 256, 128, 64, 32], #[1796, 193, 140, 69],
-                'fourier_type': 'basic',
-                'patience': 11,
-                'gamma': 5, #1.4092634199672638, # focal mse gamma
-                'loss_fn': 'focal_mse',#'quantile_weighted_mse',
-                # Mine
-                'dropout': 0,
-                # 'dropout': 0.0007693680499241461,
-                # 'l1_lambda': 2.714100311651801e-06,
-                # 'l2_lambda': 0.0031372889601764937,
-                'use_scaler': True,
-                'loss_alpha': 35,
-                'normalization_type': 'none' #'none', 'batch_norm', or 'layer_norm'
-            },
-            "preprocessor": "embedding_linear"
-        },
         "FeedForwardNNResiduals":{
             "model_class": FeedForwardNNRegressorWithResiduals,
             "params": {
@@ -168,6 +143,31 @@ def get_model_configurations(params: dict, seed: int) -> dict:
             },
             "preprocessor": "embedding_linear"
         },
+        "FeedForwardNN": {
+            "model_class": FeedForwardNNRegressorWithEmbeddings5,
+            "params": {
+                'learning_rate': 0.004,#0.0007360519059468381,
+                'categorical_features': large_categories,
+                'coord_features': coord_vars,
+                'random_state': seed,
+                'batch_size': 4*2048,#64,#26,
+                'num_epochs': 200,#172,
+                'hidden_sizes': [512*2**(i) for i in range(4)],#[1024*4, 1024*2, 1024, 512, 256, 128, 64, 32], #[1796, 193, 140, 69],
+                'fourier_type': 'basic',
+                'patience': 11,
+                # 'gamma': 5, #1.4092634199672638, # focal mse gamma
+                'loss_fn': 'huber',#'focal_mse',#'quantile_weighted_mse',
+                # Mine
+                'dropout': 0,
+                # 'dropout': 0.0007693680499241461,
+                # 'l1_lambda': 2.714100311651801e-06,
+                # 'l2_lambda': 0.0031372889601764937,
+                'use_scaler': True,
+                'loss_alpha': 35,
+                'normalization_type': 'none' #'none', 'batch_norm', or 'layer_norm'
+            },
+            "preprocessor": "embedding_linear"
+        },
         "DiscretizedNNClassifier":{
             "model_class": DiscretizedNNClassifier,
             "params": {
@@ -175,9 +175,9 @@ def get_model_configurations(params: dict, seed: int) -> dict:
                 'categorical_features': large_categories,
                 'coord_features': coord_vars,
                 'random_state': seed,
-                'batch_size': 512,#26,
+                'batch_size': 2*16*2048,#512,#26,
                 'num_epochs': 200,#172,
-                'hidden_sizes': [1024*4, 1024*2, 1024, 512],#[1796, 193, 140, 69],
+                'hidden_sizes': [512*2**(i) for i in range(4)], #[1024*4, 1024*2, 1024, 512],#[1796, 193, 140, 69],
                 'fourier_type': 'basic',
                 'patience': 11,
                 # 'gamma': 0, #1.4092634199672638, # focal mse gamma
@@ -191,8 +191,9 @@ def get_model_configurations(params: dict, seed: int) -> dict:
                 # 'loss_alpha': 35,
                 'normalization_type': 'none', #'none', 'batch_norm', or 'layer_norm'
                 # Classification
-                "n_bins":200,
-                "binning_method":'uniform',
+                "n_bins":50,
+                "binning_method":'quantile',
+                'min_samples_per_bin':4,
             },
             "preprocessor": "embedding_linear"
         },
@@ -335,7 +336,7 @@ def preprocess_data(preprocessors: dict, train_df: pd.DataFrame, val_df: pd.Data
 # 4. Model Training and Evaluation (Refactored for Multi-Split Metrics)
 # ==============================================================================
 
-def train_and_evaluate(model_name: str, model_config: dict, data_splits: tuple, is_last_run: bool):
+def train_and_evaluate(model_name: str, model_config: dict, data_splits: tuple, is_last_run: bool, resampling_seed=None, plot_suffix='', resample=False):
     """
     Initializes, trains, predicts, and evaluates a single model.
     Returns a dictionary of metrics for train, val, and test sets.
@@ -349,7 +350,7 @@ def train_and_evaluate(model_name: str, model_config: dict, data_splits: tuple, 
     # MINE: resampling
     config = get_config()
     print("Checking if we do resampling: ", config['data_prep'].get('apply_resampling', False))
-    if config['data_prep'].get('apply_resampling', False):
+    if resample:#config['data_prep'].get('apply_resampling', False):
         if model_name in ["FeedForwardNN", "DiscretizedNNClassifier"]:
             cat_vars = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in config['model']['predictor']['all'] if c.startswith('loc_school_')]
             cat_vars = [X_train.columns.tolist().index(col) for col in cat_vars] # Large vars
@@ -358,13 +359,16 @@ def train_and_evaluate(model_name: str, model_config: dict, data_splits: tuple, 
             raise print("NO MODEL NAMED: ", model_name)
         # cat_vars = [X_train.columns.tolist().index(col) for col in config['model']['predictor']['categorical']]
         resampler = BalancingResampler(
-            n_bins= 200,#68,
-            binning_policy= 'uniform',#'quantile',
-            max_diff_ratio= 0.27657655868482417,
-            undersample_policy= 'random',
-            oversample_policy= 'generalized_smotenc',
+            n_bins= 200,#68, # Between 100 and 500
+            binning_policy= 'kmeans',#'quantile',
+            max_diff_ratio= 0.27657655868482417, # between 0.2 and 0.3
+            undersample_policy= 'tomek_links',#'random', # between tomek_links and inlier
+            oversample_policy= 'smotenc', # Between smotenc and density
+            # generalized_smote_weighting='gravity',
             smote_k_neighbors= 16,
             categorical_features=cat_vars,
+            low_count_policy=None,
+            random_state=config['data_prep'].get('seed', None),
         )
         print("We are going to resample")
         X_train, y_train = resampler.fit_resample(X_train, y_train)
@@ -423,7 +427,7 @@ def train_and_evaluate(model_name: str, model_config: dict, data_splits: tuple, 
         create_diagnostic_plots(
             y_train=y_train_exp, y_test=y_test_exp,
             y_pred_train=y_pred_train_exp, y_pred_test=y_pred_test_exp,
-            suffix=f"_{model_name}_final_run" + config['plotting'].get('save_suffix', ''), 
+            suffix=f"_{model_name}_final_run" + plot_suffix,
             save_plots=config['plotting'].get('save_plots', True), 
             log_scale=config['plotting'].get('log_scale', False),
         )
@@ -440,7 +444,7 @@ def main():
     main_seed = config['model']['seed']
     num_runs = config['data_prep'].get('num_evaluation_runs', 5)
     
-    models_to_run = ["FeedForwardNN"]#["DiscretizedNNClassifier"]# ["LightGBMResiduals"]#["FeedForwardNNResiduals"]#["FeedForwardNN", "LightGBM"]
+    models_to_run = ["FeedForwardNN"]#["DiscretizedNNClassifier"]#["DiscretizedNNClassifier"]# ["LightGBMResiduals"]#["FeedForwardNNResiduals"]#["FeedForwardNN", "LightGBM"]
     
     train_df, val_df, test_df = load_and_prepare_data(config, test_on_val=config['data_prep'].get('test_on_val', False))
     preprocessors = create_preprocessors(config)
@@ -472,7 +476,7 @@ def main():
                 
                 if preprocessor_key in processed_data:
                     is_last_run = (i == num_runs - 1)
-                    all_metrics = train_and_evaluate(name, model_config, processed_data[preprocessor_key], is_last_run)
+                    all_metrics = train_and_evaluate(name, model_config, processed_data[preprocessor_key], is_last_run, plot_suffix=config['plotting'].get('save_suffix', ''), resample=config['data_prep'].get('apply_resampling', False))
                     
                     # Store metrics for each split
                     for split_name, metrics in all_metrics.items():

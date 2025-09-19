@@ -2,16 +2,16 @@
 data_prep:
   input_path: "input/training_data.parquet"
   use_sample: true # Instead of the full dataset
-  sample_size: 10000
+  sample_size: 100000
   seed: 2025 # sample selection seed
-  num_evaluation_runs: 1
+  num_evaluation_runs: 10
   test_on_val: true
-  apply_resampling: false
+  apply_resampling: true
 
 plotting:
   save_plots: true
-  save_suffix: "_test"
-  log_scale: true # on the x axis
+  save_suffix: "_test_regression_resampled"
+  log_scale: false # on the x axis
 
 
 
