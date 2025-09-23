@@ -40,6 +40,7 @@ from nn_models.unconstrained.DiscretizedTabTransformerClassifier import Discreti
 # Custom utilities
 from balancing_models import BalancingResampler
 from src_.custom_metrics import create_diagnostic_plots, compute_all_metrics
+from src_.custom_metrics import AmpMSELoss, FocalMSELoss
 from recipes.recipes_pipelined import build_model_pipeline, build_model_pipeline_supress_onehot, ModelMainRecipe, ModelMainRecipeImputer
 
 
@@ -60,11 +61,16 @@ def get_model_configurations(params: dict, seed: int) -> dict:
     large_categories = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in params['model']['predictor']['all'] if c.startswith('loc_school_')]
     coord_vars = ["loc_longitude", "loc_latitude"]
 
+    # LightGBM loss
+    objective = AmpMSELoss(tau=10)
+    # objective = FocalMSELoss(n_exp = 0, delta=1e-3, m_amp=1)
+
     return {
         "LightGBM": {
             "model_class": lgb.LGBMRegressor,
             "params": {
-                'objective': 'rmse',
+                # 'objective': 'huber',
+                'objective':objective.loss_,
                 'random_state': seed,
                 'n_estimators': params['model']['hyperparameter']['default']['num_iterations'],
                 'max_depth': floor(log2(167)) + params["model"]["hyperparameter"]["default"]['add_to_linked_depth'],
@@ -83,7 +89,8 @@ def get_model_configurations(params: dict, seed: int) -> dict:
                 'lambda_l2': 0.3003031020947675,
             },
             "fit_params": {
-                "eval_metric": 'rmse',
+                # "eval_metric" : 'huber',
+                "eval_metric": objective.eval_,#
                 "callbacks": [lgb.early_stopping(stopping_rounds=50, verbose=False)]
             },
             "preprocessor": "LightGBM"
@@ -152,7 +159,7 @@ def get_model_configurations(params: dict, seed: int) -> dict:
                 'categorical_features': large_categories,
                 'coord_features': coord_vars,
                 'random_state': seed,
-                'batch_size': 4*2048,#64,#26,
+                'batch_size': 512,#4*2048,#64,#26,
                 'num_epochs': 200,#172,
                 'hidden_sizes': [512*2**(i) for i in range(4)],#[1024*4, 1024*2, 1024, 512, 256, 128, 64, 32], #[1796, 193, 140, 69],
                 'fourier_type': 'basic',
@@ -173,35 +180,35 @@ def get_model_configurations(params: dict, seed: int) -> dict:
         "DiscretizedNNClassifier":{
             "model_class": DiscretizedNNClassifier2,
             "params": {
-                'learning_rate': 0.004,#07360519059468381,
+                'learning_rate': 0.004,#0.0007360519059468381,
                 'categorical_features': large_categories,
                 'coord_features': coord_vars,
                 'random_state': seed,
-                'batch_size': 4*2048,#2*16*2048,#512,#26,
+                'batch_size': 1024,#4*2048,#2*16*2048,#512,#26,
                 'num_epochs': 200,#172,
-                'hidden_sizes': [512*2**(i) for i in range(4)], #[1024*4, 1024*2, 1024, 512],#[1796, 193, 140, 69],
-                'fourier_type': 'basic',
-                'patience': 11,
-                # 'gamma': 0, #1.4092634199672638, # focal mse gamma
-                # 'loss_fn': 'focal_mse',#'quantile_weighted_mse',
+                'hidden_sizes': [512*2**(i) for i in range(4)][::-1], #[1024*4, 1024*2, 1024, 512],#[1796, 193, 140, 69],
+                'fourier_type': 'positional',
+                'fourier_mapping_size': 32, # WARNING: default=16
+                'fourier_sigma': 1.25, # WARNING: default=1.25
+                'patience': 3,
                 # Mine
-                'dropout': 0,
-                # 'dropout': 0.0007693680499241461,
-                # 'l1_lambda': 2.714100311651801e-06,
-                # 'l2_lambda': 0.0031372889601764937,
+                'dropout': 0.25, #1e-6, #0.0007693680499241461,
+                'l1_lambda': 1e-4,#2.714100311651801e-06,
+                'l2_lambda': 1e-3,#0.0031372889601764937,
                 'use_scaler': True,
-                # 'loss_alpha': 35,
                 'normalization_type': 'none', #'none', 'batch_norm', or 'layer_norm'
                 # Classification
-                "n_bins":50,
-                "binning_method":'quantile',
+                "n_bins": 50,
+                "binning_method":'uniform',
                 'min_samples_per_bin':4,
                 # v2:  loss controls
-                "loss_mode":'prob_mse', 
+                "loss_mode":'ce', 
+                "val_loss_mode":'ce', 
                 "huber_delta":1.0, 
                 "smoothing_sigma":1,#0.0, # standard deviation of Gaussian used to generate soft targets for prob_mse and smooth_ce. Controls how much probability mass spreads to neighboring bins.
                 "ce_label_smoothing":0.0, # passes label smoothing to PyTorch’s CrossEntropyLoss (only used if loss_mode='ce').
-                "use_class_weights":False, # if True, computes inverse-frequency weights per class and applies them in CE loss. Helps counteract class imbalance.
+                "use_class_weights": True, # if True, computes inverse-frequency weights per class and applies them in CE loss. Helps counteract class imbalance.
+                "weight_exp": 0.75, # Between 0.5 and 1 for uniform w/o resamp  # Weight exponent to add to the class weight (MINE)
                 "default_predict_mode":'expected', # determines what predict() returns: 'expected': regression-style output using weighted sum of bin centers. 'argmax': class → center (your original behavior).
             },
             "preprocessor": "embedding_linear"
@@ -416,7 +423,7 @@ def train_and_evaluate(model_name: str, model_config: dict, data_splits: tuple, 
             cat_vars = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in config['model']['predictor']['all'] if c.startswith('loc_school_')]
             cat_vars = [X_train.columns.tolist().index(col) for col in cat_vars] # Large vars
             print("We just selected the number of the cols that are features")
-        elif model_name in ["TabTransformer","DiscretizedTabTransformerClassifier"]:
+        elif model_name in ["TabTransformer","DiscretizedTabTransformerClassifier", "LightGBM"]:
             cat_vars = config['model']['predictor']['categorical']
             cat_vars = [X_train.columns.tolist().index(col) for col in cat_vars] # Large vars
             print("We just selected the number of the cols that are features")
@@ -509,7 +516,7 @@ def main():
     main_seed = config['model']['seed']
     num_runs = config['data_prep'].get('num_evaluation_runs', 5)
     
-    models_to_run = ["DiscretizedTabTransformerClassifier"]#["DiscretizedTabTransformerClassifier"]#["TabTransformer"]#["DiscretizedNNClassifier"]#["DiscretizedNNClassifier"]# ["LightGBMResiduals"]#["FeedForwardNNResiduals"]#["FeedForwardNN", "LightGBM"]
+    models_to_run = ["DiscretizedNNClassifier"]#["DiscretizedTabTransformerClassifier"]#["TabTransformer"]#["DiscretizedNNClassifier"]#["DiscretizedNNClassifier"]# ["LightGBMResiduals"]#["FeedForwardNNResiduals"]#["FeedForwardNN", "LightGBM"]
     
     train_df, val_df, test_df = load_and_prepare_data(config, test_on_val=config['data_prep'].get('test_on_val', False))
     preprocessors = create_preprocessors(config)

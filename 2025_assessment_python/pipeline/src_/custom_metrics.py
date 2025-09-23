@@ -286,3 +286,42 @@ def create_diagnostic_plots(
     _plot_prc_residuals_vs_price(y_train, y_pred_train, train_metrics, "Train Residuals", "peru", "residuals_vs_price_train")
 
 
+#===============================================
+#            Light GBM Loss functions
+#===============================================
+
+# 1. Amplified MSE: f(x;t)=(1+t)x^2
+class AmpMSELoss:
+    def __init__(self, tau=0):
+        self.tau = tau
+    def loss_(self, y_true, y_pred):
+        grad = 2 * (1+self.tau) * (y_pred - y_true)  # Gradient of squared error
+        hess = 2 * (1+self.tau) * np.ones_like(y_true)  # Hessian of squared error
+        return grad, hess  
+    def eval_(self, y_true, y_pred):
+        mse = (1+self.tau) * np.mean((y_pred - y_true) ** 2 )
+        return 'amplified_mse', mse, False  # False means lower is better
+    
+# 2. Focal MSE: f(x;n,d)=x^2(x^(2n) + d)
+class FocalMSELoss:
+    def __init__(self, n_exp, delta=0.001, m_amp=1):
+        self.n_exp = n_exp
+        self.delta = delta
+        self.m_amp = m_amp
+    def loss_(self, y_true, y_pred):
+        error = ( y_pred - y_true )**2
+        w = ( error + self.delta ) ** self.n_exp
+        grad = 2 * w * error 
+        hess = 2 * w * np.ones_like(error)
+        # grad = (
+        #         (2*self.n_exp + 2) * error ** (2*self.n_exp + 1) + 2*self.delta*error
+        #    )   # Gradient of squared error
+        # hess = self.m_amp **2 *(
+        #     (2*self.n_exp + 2) * (2*self.n_exp + 1) * error ** (2*self.n_exp) + 2*self.delta
+        #     ) #*np.ones_like(error)  # Hessian of squared error
+        return grad, hess  
+    def eval_(self, y_true, y_pred):
+        error = ( y_pred - y_true ) ** 2
+        w = (error + self.delta) ** self.n_exp
+        mse = np.mean( w * error)
+        return 'amplified_mse', mse, False  # False means lower is better

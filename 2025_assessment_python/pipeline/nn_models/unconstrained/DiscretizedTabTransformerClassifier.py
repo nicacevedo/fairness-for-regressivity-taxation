@@ -10,6 +10,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from sklearn.metrics import classification_report, confusion_matrix, mean_absolute_error, r2_score, root_mean_squared_error
+from sklearn.isotonic import IsotonicRegression
 
 # Device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -55,41 +56,65 @@ class FourierFeatures(nn.Module):
             return x
 
 # ======================================================================
-# 2) Tokenizers & TabTransformer backbone
+# 2) Utility: RMSNorm (often good for tabular)
+# ======================================================================
+class RMSNorm(nn.Module):
+    def __init__(self, d_model, eps=1e-8):
+        super().__init__()
+        self.eps = eps
+        self.scale = nn.Parameter(torch.ones(d_model))
+    def forward(self, x):
+        rms = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).sqrt()
+        return self.scale * (x / rms)
+
+# ======================================================================
+# 3) Tokenizers & TabTransformer backbone (with per-feature tokens, type/column embeddings, pre-norm)
 # ======================================================================
 class NumericalFeatureTokenizer(nn.Module):
-    """Project each numerical feature to a token of size d_model."""
-    def __init__(self, num_numerical_features, d_model):
+    """Project each numerical feature to a token of size d_model via learnable affine; optional tiny MLP."""
+    def __init__(self, num_numerical_features, d_model, hidden=0):
         super().__init__()
         self.num_features = num_numerical_features
         self.d_model = d_model
         self.weights = nn.Parameter(torch.randn(num_numerical_features, d_model))
         self.biases = nn.Parameter(torch.randn(num_numerical_features, d_model))
-
+        if hidden > 0:
+            self.mlp = nn.Sequential(nn.Linear(d_model, hidden), nn.GELU(), nn.Linear(hidden, d_model))
+        else:
+            self.mlp = None
     def forward(self, x_num):
         if x_num.numel() == 0:
             return x_num.new_zeros((x_num.size(0), 0, self.d_model))
-        x_num = x_num.unsqueeze(-1)
-        return x_num * self.weights + self.biases
+        x = x_num.unsqueeze(-1) * self.weights + self.biases  # (B, F, d)
+        if self.mlp is not None:
+            x = self.mlp(x)
+        return x
 
 class TabTransformer(nn.Module):
     def __init__(self, embedding_specs, num_numerical_features, num_coord_features,
                  fourier_type, fourier_mapping_size, fourier_sigma,
-                 d_model=64, nhead=8, num_layers=4, dropout=0.1, num_classes=10):
+                 d_model=64, nhead=8, num_layers=4, dropout=0.1,
+                 token_dropout=0.0, use_rmsnorm=True, pre_norm=True,
+                 num_token_hidden=0):
         super().__init__()
         self.d_model = d_model
+        self.pre_norm = pre_norm
         self.cls_token = nn.Parameter(torch.randn(1, 1, d_model))
 
-        # Categorical -> embeddings -> tokens
-        self.embedding_layers = nn.ModuleList([nn.Embedding(num, dim) for num, dim in embedding_specs])
-        total_emb_dim = sum(dim for _, dim in embedding_specs)
-        self.cat_projector = None
-        if len(embedding_specs) > 0:
-            # Project concatenated embeddings to one token per categorical feature
-            self.cat_projector = nn.Linear(total_emb_dim, d_model * len(embedding_specs))
+        # --- Categorical tokens: one token per categorical feature ---
+        self.cat_embeddings = nn.ModuleList([nn.Embedding(num, dim) for num, dim in embedding_specs])
+        self.cat_proj = nn.ModuleList([nn.Linear(dim, d_model) for _, dim in embedding_specs])
+
+        # Column embeddings (position-like, one per feature token) + token type embeddings
+        self.max_cat = len(embedding_specs)
+        self.num_numerical_features = num_numerical_features
+        self.num_coord_features = num_coord_features
+        total_token_slots = 1 + self.max_cat + self.num_numerical_features + (1 if num_coord_features > 0 else 0)  # +CLS
+        self.column_embed = nn.Embedding(total_token_slots, d_model)
+        self.type_embed = nn.Embedding(3, d_model)  # 0=cat,1=num,2=coord
 
         # Numeric -> tokens
-        self.num_tokenizer = NumericalFeatureTokenizer(num_numerical_features, d_model)
+        self.num_tokenizer = NumericalFeatureTokenizer(num_numerical_features, d_model, hidden=num_token_hidden)
 
         # Coordinates -> optional Fourier -> projector -> one token
         self.fourier = None
@@ -98,67 +123,131 @@ class TabTransformer(nn.Module):
             self.fourier = FourierFeatures(num_coord_features, fourier_mapping_size, fourier_type=fourier_type, sigma=fourier_sigma)
             self.coord_projector = nn.Linear(self.fourier.output_dim, d_model)
 
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dropout=dropout, batch_first=True, dim_feedforward=4*d_model)
+        # Normalization for tokens
+        self.token_norm = RMSNorm(d_model) if use_rmsnorm else nn.LayerNorm(d_model)
+        self.token_dropout = nn.Dropout(p=token_dropout) if token_dropout > 0 else nn.Identity()
+
+        # Transformer encoder (pre-norm)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=nhead, dropout=dropout, batch_first=True,
+            dim_feedforward=4*d_model, norm_first=True if pre_norm else False)
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.output = nn.Linear(d_model, num_classes)
 
     def forward(self, x_cat, x_num, x_coord):
         B = x_num.size(0)
         tokens = []
+        slot_idx = 1  # 0 is reserved for CLS
 
         # Categorical tokens
-        if len(self.embedding_layers) > 0:
-            cat_embs = [emb(x_cat[:, i]) for i, emb in enumerate(self.embedding_layers)]
-            cat_embs = torch.cat(cat_embs, dim=1)  # (B, sum_dim)
-            cat_tokens = self.cat_projector(cat_embs).view(B, len(self.embedding_layers), self.d_model)
-            tokens.append(cat_tokens)
+        if len(self.cat_embeddings) > 0:
+            for i, (emb, proj) in enumerate(zip(self.cat_embeddings, self.cat_proj)):
+                t = proj(emb(x_cat[:, i]))  # (B,d)
+                t = t + self.type_embed.weight[0]
+                t = t + self.column_embed.weight[slot_idx]
+                tokens.append(t.unsqueeze(1))
+                slot_idx += 1
 
         # Numeric tokens
         if x_num.size(1) > 0:
-            tokens.append(self.num_tokenizer(x_num))
+            num_toks = self.num_tokenizer(x_num)  # (B,F,d)
+            # add embeddings
+            for j in range(num_toks.size(1)):
+                num_toks[:, j, :] += self.type_embed.weight[1] + self.column_embed.weight[slot_idx]
+                slot_idx += 1
+            tokens.append(num_toks)
 
         # Coord token (optional)
         if x_coord.size(1) > 0 and self.fourier is not None and self.coord_projector is not None:
             coord_feat = self.fourier(x_coord)
-            coord_token = self.coord_projector(coord_feat).unsqueeze(1)  # (B,1,d)
-            tokens.append(coord_token)
+            coord_token = self.coord_projector(coord_feat)  # (B,d)
+            coord_token = coord_token + self.type_embed.weight[2] + self.column_embed.weight[slot_idx]
+            tokens.append(coord_token.unsqueeze(1))
+            slot_idx += 1
 
-        # If no tokens at all, make a dummy zero token to avoid errors
+        # If no tokens at all, make a dummy zero token
         if len(tokens) == 0:
             tokens.append(torch.zeros(B, 1, self.d_model, device=x_num.device, dtype=x_num.dtype))
 
-        cls = self.cls_token.expand(B, -1, -1)
-        x = torch.cat([cls] + tokens, dim=1)
+        x = torch.cat(tokens, dim=1)  # (B,T,d)
+        x = self.token_norm(x)
+        x = self.token_dropout(x)
+
+        cls = self.cls_token.expand(B, 1, -1)
+        x = torch.cat([cls, x], dim=1)
         h = self.encoder(x)
         cls_out = h[:, 0, :]
-        return self.output(cls_out)  # logits (B, C)
+        return cls_out  # (B,d)
 
 # ======================================================================
-# 3) Discretized TabTransformer Classifier (mirrors MLP classifier logic)
+# 4) Heads: (a) Softmax classification, (b) Ordinal CORAL head
+# ======================================================================
+class SoftmaxHead(nn.Module):
+    def __init__(self, d_model, num_classes):
+        super().__init__()
+        self.fc = nn.Linear(d_model, num_classes)
+    def forward(self, h, temperature=1.0):
+        logits = self.fc(h)
+        if temperature != 1.0:
+            logits = logits / temperature
+        return logits
+
+class CORALOrdinalHead(nn.Module):
+    """Cumulative link: produce K-1 logits for thresholds. P(y>=k) = sigmoid(b_k + w^T h)."""
+    def __init__(self, d_model, num_classes):
+        super().__init__()
+        assert num_classes >= 2
+        self.weight = nn.Linear(d_model, 1, bias=False)
+        self.theta = nn.Parameter(torch.linspace(-1.0, 1.0, steps=num_classes-1))  # monotone thresholds if sorted during training
+        nn.init.zeros_(self.weight.weight)
+        self.num_classes = num_classes
+    def forward(self, h):
+        logits = self.weight(h).squeeze(-1).unsqueeze(-1) + self.theta  # (B, K-1)
+        return logits
+    @staticmethod
+    def probs_from_logits(threshold_logits):
+        # threshold_logits: (B, K-1) for P(y>=k)
+        ps = torch.sigmoid(threshold_logits)
+        B, K_1 = ps.shape
+        K = K_1 + 1
+        # Recover class probabilities from cumulative probabilities
+        p_ge = torch.cat([torch.ones(B, 1, device=ps.device), ps], dim=1)
+        p_lt = torch.cat([1 - ps, torch.zeros(B, 1, device=ps.device)], dim=1)
+        p = p_ge - p_lt  # (B, K)
+        return p.clamp_min(1e-12)
+
+# ======================================================================
+# 5) Discretized TabTransformer Classifier with geometry-aware + ordinal + hybrid losses
 # ======================================================================
 class DiscretizedTabTransformerClassifier:
     """
-    A bin-based classifier using a TabTransformer backbone and geometry-aware losses.
-
-    loss_mode in {
-        'ce', 'ev_mse', 'ev_mae', 'ev_huber', 'emd', 'prob_mse', 'smooth_ce'
-    }
+    A bin-based classifier using a TabTransformer backbone with:
+      - geometry-aware losses (ce, ev_mse, ev_mae, ev_huber, emd, prob_mse, smooth_ce)
+      - ordinal CORAL head (loss_mode 'ordinal_ce')
+      - hybrid losses ('ce+emd', 'ordinal+emd')
+      - temperature scaling and entropy regularization
     """
     def __init__(self, categorical_features, coord_features=None,
                  engineer_time_features=False, bin_yrblt=False, cross_township_class=False,
                  # transformer
                  d_model=64, nhead=8, num_layers=4, dropout=0.1,
+                 token_dropout=0.0, use_rmsnorm=True, pre_norm=True, num_token_hidden=0,
                  # fourier / inputs
                  fourier_type='none', fourier_mapping_size=16, fourier_sigma=1.25,
                  # binning
                  n_bins=10, min_samples_per_bin=3, binning_method='quantile',
                  # training
                  batch_size=32, learning_rate=1e-3, num_epochs=50, patience=10, random_state=None,
+                 # schedule & optimization
+                 weight_decay=1e-4, warmup_frac=0.1, cosine_schedule=True,
+                 grad_clip_norm=1.0, mixed_precision=True,
                  # regularization
-                 l2_lambda=0.0, l1_lambda=0.0, use_scaler=False,
+                 l1_lambda=0.0, use_scaler=False,
                  # loss controls
                  loss_mode='ce', huber_delta=1.0, smoothing_sigma=0.0, ce_label_smoothing=0.0,
-                 use_class_weights=False,
+                 use_class_weights=False, temperature=1.0, entropy_reg=0.0,
+                 lambda_geom=0.1,  # for hybrids (e.g., CE + lambda*EMD)
+                 # calibration
+                 fit_isotonic=False,
                  # inference
                  default_predict_mode='expected'):
         # Feature lists
@@ -175,6 +264,10 @@ class DiscretizedTabTransformerClassifier:
         self.nhead = nhead
         self.num_layers = num_layers
         self.dropout = dropout
+        self.token_dropout = token_dropout
+        self.use_rmsnorm = use_rmsnorm
+        self.pre_norm = pre_norm
+        self.num_token_hidden = num_token_hidden
 
         # Fourier
         self.fourier_type = fourier_type
@@ -193,8 +286,14 @@ class DiscretizedTabTransformerClassifier:
         self.patience = patience
         self.random_state = random_state
 
+        # Schedules & Opt
+        self.weight_decay = weight_decay
+        self.warmup_frac = warmup_frac
+        self.cosine_schedule = cosine_schedule
+        self.grad_clip_norm = grad_clip_norm
+        self.mixed_precision = mixed_precision and torch.cuda.is_available()
+
         # Regularization / scaling
-        self.l2_lambda = l2_lambda
         self.l1_lambda = l1_lambda
         self.use_scaler = use_scaler
         self.scaler = None
@@ -205,12 +304,21 @@ class DiscretizedTabTransformerClassifier:
         self.smoothing_sigma = float(smoothing_sigma)
         self.ce_label_smoothing = float(ce_label_smoothing)
         self.use_class_weights = bool(use_class_weights)
+        self.temperature = float(temperature)
+        self.entropy_reg = float(entropy_reg)
+        self.lambda_geom = float(lambda_geom)
+
+        # Calibration
+        self.fit_isotonic = bool(fit_isotonic)
+        self.iso_reg = None
 
         # Inference
         self.default_predict_mode = default_predict_mode
 
         # Internal state
         self.model = None
+        self.head_softmax = None
+        self.head_ordinal = None
         self.category_mappings = {}
         self.embedding_specs = []
         self.categorical_features = []
@@ -393,9 +501,9 @@ class DiscretizedTabTransformerClassifier:
         train_loader = DataLoader(TensorDataset(X_cat_tr, X_num_tr, X_coord_tr, y_tr_lbl, y_tr_cont), batch_size=self.batch_size, shuffle=True)
         val_loader = DataLoader(TensorDataset(X_cat_va, X_num_va, X_coord_va, y_va_lbl, y_va_cont), batch_size=max(1, self.batch_size * 2), shuffle=False)
 
-        # Model
+        # Model backbone
         num_classes = self.bin_info['num_bins']
-        self.model = TabTransformer(
+        backbone = TabTransformer(
             embedding_specs=self.embedding_specs,
             num_numerical_features=len(self.numerical_features),
             num_coord_features=len(self.coord_features),
@@ -406,8 +514,14 @@ class DiscretizedTabTransformerClassifier:
             nhead=self.nhead,
             num_layers=self.num_layers,
             dropout=self.dropout,
-            num_classes=num_classes,
+            token_dropout=self.token_dropout,
+            use_rmsnorm=self.use_rmsnorm,
+            pre_norm=self.pre_norm,
+            num_token_hidden=self.num_token_hidden,
         ).to(device)
+        self.backbone = backbone
+        self.head_softmax = SoftmaxHead(self.d_model, num_classes).to(device)
+        self.head_ordinal = CORALOrdinalHead(self.d_model, num_classes).to(device)
 
         # Loss setup
         if self.use_class_weights:
@@ -421,11 +535,24 @@ class DiscretizedTabTransformerClassifier:
         if class_weights is not None:
             ce_kwargs['weight'] = class_weights
         ce_criterion = nn.CrossEntropyLoss(**ce_kwargs)
+        bce_logits = nn.BCEWithLogitsLoss()
 
-        if self.l2_lambda < 1e-8:
-            optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
-        else:
-            optimizer = optim.AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=self.l2_lambda)
+        # Optimizer & schedule
+        params = list(self.backbone.parameters()) + list(self.head_softmax.parameters()) + list(self.head_ordinal.parameters())
+        optimizer = optim.AdamW(params, lr=self.learning_rate, weight_decay=self.weight_decay)
+        total_steps = max(1, int(np.ceil(self.num_epochs * len(train_loader))))
+        warmup_steps = int(self.warmup_frac * total_steps)
+
+        def lr_lambda(step):
+            if step < warmup_steps:
+                return float(step + 1) / float(max(1, warmup_steps))
+            if not self.cosine_schedule:
+                return 1.0
+            progress = (step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+            return 0.5 * (1.0 + np.cos(np.pi * progress))
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+        scaler = torch.amp.GradScaler(enabled=self.mixed_precision)
 
         bin_values = torch.tensor(self.bin_info['bin_values'], dtype=torch.float32, device=device).view(1, -1)
 
@@ -451,25 +578,44 @@ class DiscretizedTabTransformerClassifier:
                 onehot.scatter_(1, indices.view(-1, 1), 1.0)
                 return onehot
 
+        def _entropy(p):
+            return -(p.clamp_min(1e-12) * (p.clamp_min(1e-12)).log()).sum(dim=1).mean()
+
         # Train
         best_val = float('inf')
         best_state = None
         patience_cnt = 0
+        global_step = 0
 
         for epoch in range(self.num_epochs):
-            self.model.train()
+            self.backbone.train(); self.head_softmax.train(); self.head_ordinal.train()
             tr_sum = 0.0
             for b_cat, b_num, b_coord, b_y_lbl, b_y_cont in train_loader:
                 b_cat, b_num, b_coord = b_cat.to(device), b_num.to(device), b_coord.to(device)
                 b_y_lbl = b_y_lbl.to(device)
                 b_y_cont = b_y_cont.to(device)
 
-                logits = self.model(b_cat, b_num, b_coord)
-                if self.loss_mode == 'ce':
-                    loss = ce_criterion(logits, b_y_lbl)
-                else:
-                    p = torch.softmax(logits, dim=1)
-                    if self.loss_mode == 'ev_mse':
+                optimizer.zero_grad(set_to_none=True)
+                with torch.amp.autocast(device_type='cuda', enabled=self.mixed_precision):
+                    h = self.backbone(b_cat, b_num, b_coord)
+
+                    if self.loss_mode in ['ce', 'ev_mse', 'ev_mae', 'ev_huber', 'emd', 'prob_mse', 'smooth_ce', 'ce+emd']:
+                        logits = self.head_softmax(h, temperature=self.temperature)
+                        p = torch.softmax(logits, dim=1)
+
+                    if self.loss_mode == 'ordinal_ce' or self.loss_mode == 'ordinal+emd':
+                        thresh_logits = self.head_ordinal(h)  # (B,K-1)
+                        # Build binary targets: t_k = 1{y >= k}
+                        K = num_classes
+                        thresholds = torch.arange(1, K, device=b_y_lbl.device).view(1, -1)
+                        targets_ord = (b_y_lbl.view(-1, 1) >= thresholds).float()
+                        ord_loss = bce_logits(thresh_logits, targets_ord)
+                        p_ord = CORALOrdinalHead.probs_from_logits(thresh_logits)
+
+                    # Primary loss branches
+                    if self.loss_mode == 'ce':
+                        loss = ce_criterion(logits, b_y_lbl)
+                    elif self.loss_mode == 'ev_mse':
                         y_hat = (p * bin_values).sum(dim=1)
                         loss = torch.mean((y_hat - b_y_cont) ** 2)
                     elif self.loss_mode == 'ev_mae':
@@ -487,51 +633,102 @@ class DiscretizedTabTransformerClassifier:
                         t = _soft_target(b_y_lbl)
                         logp = torch.log_softmax(logits, dim=1)
                         loss = -torch.mean(torch.sum(t * logp, dim=1))
+                    elif self.loss_mode == 'ce+emd':
+                        ce_loss = ce_criterion(logits, b_y_lbl)
+                        emd_loss = _emd_loss(p, b_y_lbl)
+                        loss = ce_loss + self.lambda_geom * emd_loss
+                    elif self.loss_mode == 'ordinal_ce':
+                        loss = ord_loss
+                    elif self.loss_mode == 'ordinal+emd':
+                        emd_loss = _emd_loss(p_ord, b_y_lbl)
+                        loss = ord_loss + self.lambda_geom * emd_loss
                     else:
                         raise ValueError(f"Unknown loss_mode: {self.loss_mode}")
 
-                if self.l1_lambda >= 1e-12:
-                    l1_pen = sum(param.abs().sum() for param in self.model.parameters())
-                    loss = loss + self.l1_lambda * l1_pen
+                    # Entropy regularization (encourage/penalize peakedness)
+                    if self.entropy_reg != 0.0:
+                        if 'ordinal' in self.loss_mode:
+                            p_use = p_ord
+                        else:
+                            p_use = p
+                        loss = loss + self.entropy_reg * _entropy(p_use)
 
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                    # L1
+                    if self.l1_lambda >= 1e-12:
+                        l1_pen = sum(param.abs().sum() for param in list(self.backbone.parameters()) + list(self.head_softmax.parameters()) + list(self.head_ordinal.parameters()))
+                        loss = loss + self.l1_lambda * l1_pen
+
+                scaler.scale(loss).backward()
+                if self.grad_clip_norm is not None and self.grad_clip_norm > 0:
+                    scaler.unscale_(optimizer)
+                    nn.utils.clip_grad_norm_(params, max_norm=self.grad_clip_norm)
+                scaler.step(optimizer)
+                scaler.update()
+
+                scheduler.step(); global_step += 1
                 tr_sum += float(loss.item())
 
             # Validation
-            self.model.eval()
+            self.backbone.eval(); self.head_softmax.eval(); self.head_ordinal.eval()
             va_sum = 0.0
             with torch.no_grad():
                 for b_cat, b_num, b_coord, b_y_lbl, b_y_cont in val_loader:
                     b_cat, b_num, b_coord = b_cat.to(device), b_num.to(device), b_coord.to(device)
                     b_y_lbl = b_y_lbl.to(device)
                     b_y_cont = b_y_cont.to(device)
-                    logits = self.model(b_cat, b_num, b_coord)
+                    h = self.backbone(b_cat, b_num, b_coord)
+
+                    if self.loss_mode in ['ce', 'ev_mse', 'ev_mae', 'ev_huber', 'emd', 'prob_mse', 'smooth_ce', 'ce+emd']:
+                        logits = self.head_softmax(h, temperature=self.temperature)
+                        p = torch.softmax(logits, dim=1)
+
+                    if self.loss_mode == 'ordinal_ce' or self.loss_mode == 'ordinal+emd':
+                        thresh_logits = self.head_ordinal(h)
+                        K = num_classes
+                        thresholds = torch.arange(1, K, device=b_y_lbl.device).view(1, -1)
+                        targets_ord = (b_y_lbl.view(-1, 1) >= thresholds).float()
+                        ord_loss = bce_logits(thresh_logits, targets_ord)
+                        p_ord = CORALOrdinalHead.probs_from_logits(thresh_logits)
+
                     if self.loss_mode == 'ce':
                         vloss = ce_criterion(logits, b_y_lbl)
+                    elif self.loss_mode == 'ev_mse':
+                        y_hat = (p * bin_values).sum(dim=1)
+                        vloss = torch.mean((y_hat - b_y_cont) ** 2)
+                    elif self.loss_mode == 'ev_mae':
+                        y_hat = (p * bin_values).sum(dim=1)
+                        vloss = torch.mean(torch.abs(y_hat - b_y_cont))
+                    elif self.loss_mode == 'ev_huber':
+                        y_hat = (p * bin_values).sum(dim=1)
+                        vloss = torch.mean(_huber(y_hat, b_y_cont, self.huber_delta))
+                    elif self.loss_mode == 'emd':
+                        vloss = _emd_loss(p, b_y_lbl)
+                    elif self.loss_mode == 'prob_mse':
+                        t = _soft_target(b_y_lbl)
+                        vloss = torch.mean((p - t) ** 2)
+                    elif self.loss_mode == 'smooth_ce':
+                        t = _soft_target(b_y_lbl)
+                        logp = torch.log_softmax(logits, dim=1)
+                        vloss = -torch.mean(torch.sum(t * logp, dim=1))
+                    elif self.loss_mode == 'ce+emd':
+                        ce_loss = ce_criterion(logits, b_y_lbl)
+                        emd_loss = _emd_loss(p, b_y_lbl)
+                        vloss = ce_loss + self.lambda_geom * emd_loss
+                    elif self.loss_mode == 'ordinal_ce':
+                        vloss = ord_loss
+                    elif self.loss_mode == 'ordinal+emd':
+                        emd_loss = _emd_loss(p_ord, b_y_lbl)
+                        vloss = ord_loss + self.lambda_geom * emd_loss
                     else:
-                        p = torch.softmax(logits, dim=1)
-                        if self.loss_mode == 'ev_mse':
-                            y_hat = (p * bin_values).sum(dim=1)
-                            vloss = torch.mean((y_hat - b_y_cont) ** 2)
-                        elif self.loss_mode == 'ev_mae':
-                            y_hat = (p * bin_values).sum(dim=1)
-                            vloss = torch.mean(torch.abs(y_hat - b_y_cont))
-                        elif self.loss_mode == 'ev_huber':
-                            y_hat = (p * bin_values).sum(dim=1)
-                            vloss = torch.mean(_huber(y_hat, b_y_cont, self.huber_delta))
-                        elif self.loss_mode == 'emd':
-                            vloss = _emd_loss(p, b_y_lbl)
-                        elif self.loss_mode == 'prob_mse':
-                            t = _soft_target(b_y_lbl)
-                            vloss = torch.mean((p - t) ** 2)
-                        elif self.loss_mode == 'smooth_ce':
-                            t = _soft_target(b_y_lbl)
-                            logp = torch.log_softmax(logits, dim=1)
-                            vloss = -torch.mean(torch.sum(t * logp, dim=1))
+                        raise ValueError(f"Unknown loss_mode: {self.loss_mode}")
+
+                    if self.entropy_reg != 0.0:
+                        if 'ordinal' in self.loss_mode:
+                            p_use = p_ord
                         else:
-                            raise ValueError(f"Unknown loss_mode: {self.loss_mode}")
+                            p_use = p
+                        vloss = vloss + self.entropy_reg * _entropy(p_use)
+
                     va_sum += float(vloss.item())
 
             avg_tr = tr_sum / max(1, len(train_loader))
@@ -541,7 +738,11 @@ class DiscretizedTabTransformerClassifier:
 
             if avg_va < best_val - 1e-9:
                 best_val = avg_va
-                best_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
+                best_state = {
+                    'backbone': {k: v.cpu().clone() for k, v in self.backbone.state_dict().items()},
+                    'head_softmax': {k: v.cpu().clone() for k, v in self.head_softmax.state_dict().items()},
+                    'head_ordinal': {k: v.cpu().clone() for k, v in self.head_ordinal.state_dict().items()},
+                }
                 patience_cnt = 0
             else:
                 patience_cnt += 1
@@ -550,9 +751,28 @@ class DiscretizedTabTransformerClassifier:
                     break
 
         if best_state is not None:
-            self.model.load_state_dict(best_state)
+            self.backbone.load_state_dict(best_state['backbone'])
+            self.head_softmax.load_state_dict(best_state['head_softmax'])
+            self.head_ordinal.load_state_dict(best_state['head_ordinal'])
 
-        # Final reports
+        # ===== Optional calibration for expected-value regression =====
+        if self.fit_isotonic:
+            with torch.no_grad():
+                logits_val = []
+                for b_cat, b_num, b_coord, _, _ in val_loader:
+                    b_cat, b_num, b_coord = b_cat.to(device), b_num.to(device), b_coord.to(device)
+                    h = self.backbone(b_cat, b_num, b_coord)
+                    lg = self.head_softmax(h, temperature=self.temperature)
+                    logits_val.append(lg.cpu().numpy())
+                logits_val = np.vstack(logits_val)
+                p_val = torch.softmax(torch.tensor(logits_val), dim=1).numpy()
+                centers = np.asarray(self.bin_info['centers']).reshape(1, -1)
+                y_hat_val = (p_val * centers).sum(axis=1)
+                y_true_val = y.iloc[X_val_eng.index].values
+                self.iso_reg = IsotonicRegression(out_of_bounds='clip')
+                self.iso_reg.fit(y_hat_val, y_true_val)
+
+        # ===== Final validation report (classification + regression) =====
         y_val_pred_bins = self._predict_classes_df(X_val_eng)
         y_val_true_bins = y_val_labels
         print("\n" + "="*50)
@@ -592,16 +812,17 @@ class DiscretizedTabTransformerClassifier:
 
         ds = TensorDataset(X_cat, torch.tensor(X_num_scaled, dtype=torch.float32), X_coord)
         loader = DataLoader(ds, batch_size=max(1, self.batch_size * 2), shuffle=False)
-        return loader, Xp.index
+        return loader, Xp.index                       
 
     def _predict_logits(self, X_df):
         loader, _ = self._prepare_predict_tensors(X_df)
-        self.model.eval()
+        self.backbone.eval(); self.head_softmax.eval(); self.head_ordinal.eval()
         outs = []
         with torch.no_grad():
             for b_cat, b_num, b_coord in loader:
                 b_cat, b_num, b_coord = b_cat.to(device), b_num.to(device), b_coord.to(device)
-                logits = self.model(b_cat, b_num, b_coord)
+                h = self.backbone(b_cat, b_num, b_coord)
+                logits = self.head_softmax(h, temperature=self.temperature)
                 outs.append(logits.cpu().numpy())
         return np.vstack(outs)
 
@@ -618,6 +839,8 @@ class DiscretizedTabTransformerClassifier:
         p = torch.softmax(torch.tensor(logits), dim=1).numpy()
         centers = np.asarray(self.bin_info['centers']).reshape(1, -1)
         y_hat = (p * centers).sum(axis=1)
+        if self.iso_reg is not None:
+            y_hat = self.iso_reg.predict(y_hat)
         return y_hat
 
     def predict(self, X_df, mode=None):

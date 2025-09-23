@@ -4,6 +4,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from collections import OrderedDict
 import random
 from sklearn.model_selection import train_test_split
@@ -142,8 +143,8 @@ class DiscretizedNNClassifier2:
                  patience=10, random_state=None, dropout=0.5, l2_lambda=0.0, l1_lambda=0.0,
                  use_scaler=False, normalization_type='none',
                  # NEW: loss controls
-                 loss_mode='ce', huber_delta=1.0, smoothing_sigma=0.0, ce_label_smoothing=0.0,
-                 use_class_weights=False,
+                 loss_mode='ce', val_loss_mode='ev_mse', huber_delta=1.0, smoothing_sigma=0.0, ce_label_smoothing=0.0,
+                 use_class_weights=False, weight_exp=1,
                  # inference
                  default_predict_mode='expected'  # 'expected' or 'argmax'
                  ):
@@ -182,10 +183,12 @@ class DiscretizedNNClassifier2:
 
         # Loss controls
         self.loss_mode = loss_mode
+        self.val_loss_mode = val_loss_mode
         self.huber_delta = float(huber_delta)
         self.smoothing_sigma = float(smoothing_sigma)
         self.ce_label_smoothing = float(ce_label_smoothing)
         self.use_class_weights = bool(use_class_weights)
+        self.weight_exp = weight_exp
 
         # Inference behavior
         self.default_predict_mode = default_predict_mode
@@ -216,10 +219,16 @@ class DiscretizedNNClassifier2:
 
     # -------------------- Binning helpers --------------------
     @staticmethod
-    def _compute_class_weights(y_labels, num_classes):
+    def _compute_class_weights(y_labels, num_classes, weight_exp=1, eps=1e-4):
         counts = np.bincount(y_labels, minlength=num_classes).astype(np.float32)
+        print(counts)
         counts[counts == 0] = 1.0
-        weights = counts.sum() / (counts * num_classes)
+        print(counts)
+        if weight_exp > 1: # stability epsilon
+            weights = ( counts.sum() / (counts * num_classes) + eps) ** weight_exp
+        else:
+            weights = ( counts.sum() / (counts * num_classes)) ** weight_exp
+        print(weights)
         return torch.tensor(weights, dtype=torch.float32)
 
     @staticmethod
@@ -405,7 +414,7 @@ class DiscretizedNNClassifier2:
 
         # Class weights (optional)
         if self.use_class_weights:
-            class_weights = self._compute_class_weights(y_train_labels, num_classes).to(device)
+            class_weights = self._compute_class_weights(y_train_labels, num_classes, self.weight_exp).to(device)
         else:
             class_weights = None
 
@@ -448,6 +457,11 @@ class DiscretizedNNClassifier2:
                 onehot = torch.zeros(indices.size(0), num_classes, device=indices.device)
                 onehot.scatter_(1, indices.view(-1, 1), 1.0)
                 return onehot
+
+        # Initialize lists to store losses
+        train_losses = []
+        val_losses = []
+
 
         # Training loop
         best_val = float('inf')
@@ -506,35 +520,38 @@ class DiscretizedNNClassifier2:
                     b_y_lbl = b_y_lbl.to(device)
                     b_y_cont = b_y_cont.to(device)
                     logits = self.model(b_cat, b_num, b_coord)
-                    if self.loss_mode == 'ce':
+                    if self.val_loss_mode == 'ce':
                         vloss = ce_criterion(logits, b_y_lbl)
                     else:
                         p = torch.softmax(logits, dim=1)
-                        if self.loss_mode == 'ev_mse':
+                        if self.val_loss_mode == 'ev_mse':
                             y_hat = (p * bin_values).sum(dim=1)
                             vloss = torch.mean((y_hat - b_y_cont) ** 2)
-                        elif self.loss_mode == 'ev_mae':
+                        elif self.val_loss_mode == 'ev_mae':
                             y_hat = (p * bin_values).sum(dim=1)
                             vloss = torch.mean(torch.abs(y_hat - b_y_cont))
-                        elif self.loss_mode == 'ev_huber':
+                        elif self.val_loss_mode == 'ev_huber':
                             y_hat = (p * bin_values).sum(dim=1)
                             vloss = torch.mean(_huber(y_hat, b_y_cont, self.huber_delta))
-                        elif self.loss_mode == 'emd':
+                        elif self.val_loss_mode == 'emd':
                             vloss = _emd_loss(p, b_y_lbl)
-                        elif self.loss_mode == 'prob_mse':
+                        elif self.val_loss_mode == 'prob_mse':
                             t = _soft_target(b_y_lbl)
                             vloss = torch.mean((p - t) ** 2)
-                        elif self.loss_mode == 'smooth_ce':
+                        elif self.val_loss_mode == 'smooth_ce':
                             t = _soft_target(b_y_lbl)
                             logp = torch.log_softmax(logits, dim=1)
                             vloss = -torch.mean(torch.sum(t * logp, dim=1))
                         else:
-                            raise ValueError(f"Unknown loss_mode: {self.loss_mode}")
+                            raise ValueError(f"Unknown loss_mode: {self.val_loss_mode}")
                     val_loss_sum += float(vloss.item())
 
             avg_tr = train_loss_sum / max(1, len(train_loader))
             avg_va = val_loss_sum / max(1, len(val_loader))
-            if (epoch + 1) % 10 == 0:
+            train_losses.append(avg_tr)
+            val_losses.append(avg_va)
+
+            if (epoch + 1) % 5 == 0:
                 print(f"Epoch [{epoch+1}/{self.num_epochs}] Train: {avg_tr:.4f} | Val: {avg_va:.4f}")
 
             if avg_va < best_val - 1e-9:
@@ -549,6 +566,34 @@ class DiscretizedNNClassifier2:
 
         if best_state is not None:
             self.model.load_state_dict(best_state)
+
+        # ===== Plot Training vs Validation Loss with Two Scales =====
+        fig, ax1 = plt.subplots(figsize=(10, 6))
+
+        # Left y-axis for Training Loss
+        ax1.plot(train_losses, label='Training Loss', color='blue')
+        ax1.set_xlabel('Epochs')
+        ax1.set_ylabel('Training Loss', color='blue')
+        ax1.tick_params(axis='y', labelcolor='blue')
+
+        # Right y-axis for Validation Loss
+        ax2 = ax1.twinx()
+        ax2.plot(val_losses, label='Validation Loss', color='orange')
+        ax2.set_ylabel('Validation Loss', color='orange')
+        ax2.tick_params(axis='y', labelcolor='orange')
+
+        # Title & grid
+        fig.suptitle('Training vs Validation Loss')
+        ax1.grid(True)
+
+        # Combined legend
+        lines_1, labels_1 = ax1.get_legend_handles_labels()
+        lines_2, labels_2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper right')
+
+        plt.tight_layout()
+        plt.savefig("img/temp/temp_learning_curve.jpg")
+        plt.close()
 
         # ===== Final validation report (classification + regression) =====
         y_val_pred_bins = self._predict_classes_df(X_val_eng)
