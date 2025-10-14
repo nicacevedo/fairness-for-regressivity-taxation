@@ -219,7 +219,7 @@ class DiscretizedNNClassifier2:
 
     # -------------------- Binning helpers --------------------
     @staticmethod
-    def _compute_class_weights(y_labels, num_classes, weight_exp=1, eps=1e-4):
+    def _compute_class_weights(y_labels, num_classes, weight_exp=1, eps=1e-4, class_weights=None):
         counts = np.bincount(y_labels, minlength=num_classes).astype(np.float32)
         print(counts)
         counts[counts == 0] = 1.0
@@ -592,7 +592,7 @@ class DiscretizedNNClassifier2:
         ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper right')
 
         plt.tight_layout()
-        plt.savefig("img/temp/temp_learning_curve.jpg")
+        plt.savefig(f"img/temp/temp_learning_curve_{self.loss_mode}_{self.val_loss_mode}.jpg")
         plt.close()
 
         # ===== Final validation report (classification + regression) =====

@@ -259,7 +259,7 @@ def create_diagnostic_plots(
             y_pred = y_pred[sample_idx]
         residuals = y_true - y_pred
         plt.figure(figsize=(8, 5))
-        plt.scatter(y_pred, -residuals/y_pred, facecolor='none', label=label, color=color, alpha=0.5)
+        plt.scatter(y_pred, -residuals/y_real, facecolor='none', label=label, color=color, alpha=0.5)
         plt.hlines(0, y_pred.min(), y_pred.max(), colors="red", label="Perfect Fit")
         plt.legend()
         plt.title(f"RMSE={metrics['rmse']:.2f} | R2={metrics['r2']:.2f} | F_dev={metrics['f_dev']:.3f}, F_grp={metrics['f_grp']:.3f}\n"

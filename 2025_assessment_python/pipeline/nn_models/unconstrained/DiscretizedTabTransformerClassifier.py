@@ -4,6 +4,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from collections import OrderedDict
 import random
 from sklearn.model_selection import train_test_split
@@ -243,8 +244,8 @@ class DiscretizedTabTransformerClassifier:
                  # regularization
                  l1_lambda=0.0, use_scaler=False,
                  # loss controls
-                 loss_mode='ce', huber_delta=1.0, smoothing_sigma=0.0, ce_label_smoothing=0.0,
-                 use_class_weights=False, temperature=1.0, entropy_reg=0.0,
+                 loss_mode='ce', val_loss_mode='ce',huber_delta=1.0, smoothing_sigma=0.0, ce_label_smoothing=0.0,
+                 use_class_weights=False, weight_exp=1, class_weights=None, temperature=1.0, entropy_reg=0.0,
                  lambda_geom=0.1,  # for hybrids (e.g., CE + lambda*EMD)
                  # calibration
                  fit_isotonic=False,
@@ -300,10 +301,13 @@ class DiscretizedTabTransformerClassifier:
 
         # Loss controls
         self.loss_mode = loss_mode
+        self.val_loss_mode = val_loss_mode
         self.huber_delta = float(huber_delta)
         self.smoothing_sigma = float(smoothing_sigma)
         self.ce_label_smoothing = float(ce_label_smoothing)
         self.use_class_weights = bool(use_class_weights)
+        self.weight_exp = float(weight_exp)
+        self.class_weights = class_weights
         self.temperature = float(temperature)
         self.entropy_reg = float(entropy_reg)
         self.lambda_geom = float(lambda_geom)
@@ -350,11 +354,17 @@ class DiscretizedTabTransformerClassifier:
 
     # ---------------- Binning helpers ----------------
     @staticmethod
-    def _compute_class_weights(y_labels, num_classes):
-        counts = np.bincount(y_labels, minlength=num_classes).astype(np.float32)
-        counts[counts == 0] = 1.0
-        weights = counts.sum() / (counts * num_classes)
-        return torch.tensor(weights, dtype=torch.float32)
+    def _compute_class_weights(y_labels, num_classes, weight_exp=1, eps=1e-4, class_weights=None):
+        if class_weights is None:
+            print("I am computing w...")
+            counts = np.bincount(y_labels, minlength=num_classes).astype(np.float32)
+            counts[counts == 0] = 1.0
+            weights = ( counts.sum() / (counts * num_classes) + eps ) 
+        else:
+            print("len of w...", len(class_weights))
+            weights = np.array(class_weights)
+        print("weights: ", weights)
+        return torch.tensor(weights ** weight_exp , dtype=torch.float32)
 
     @staticmethod
     def _gaussian_targets(indices, num_classes, sigma):
@@ -525,7 +535,7 @@ class DiscretizedTabTransformerClassifier:
 
         # Loss setup
         if self.use_class_weights:
-            class_weights = self._compute_class_weights(y_train_labels, num_classes).to(device)
+            class_weights = self._compute_class_weights(y_train_labels, num_classes, self.weight_exp, class_weights=self.class_weights).to(device)
         else:
             class_weights = None
 
@@ -539,7 +549,11 @@ class DiscretizedTabTransformerClassifier:
 
         # Optimizer & schedule
         params = list(self.backbone.parameters()) + list(self.head_softmax.parameters()) + list(self.head_ordinal.parameters())
-        optimizer = optim.AdamW(params, lr=self.learning_rate, weight_decay=self.weight_decay)
+        if self.weight_decay > 1e-8:
+            optimizer = optim.AdamW(params, lr=self.learning_rate, weight_decay=self.weight_decay)
+        else:
+            optim.Adam(params, lr=self.learning_rate)
+
         total_steps = max(1, int(np.ceil(self.num_epochs * len(train_loader))))
         warmup_steps = int(self.warmup_frac * total_steps)
 
@@ -580,6 +594,11 @@ class DiscretizedTabTransformerClassifier:
 
         def _entropy(p):
             return -(p.clamp_min(1e-12) * (p.clamp_min(1e-12)).log()).sum(dim=1).mean()
+
+
+        # Initialize lists to store losses
+        train_losses = []
+        val_losses = []
 
         # Train
         best_val = float('inf')
@@ -733,7 +752,10 @@ class DiscretizedTabTransformerClassifier:
 
             avg_tr = tr_sum / max(1, len(train_loader))
             avg_va = va_sum / max(1, len(val_loader))
-            if (epoch + 1) % 10 == 0:
+            train_losses.append(avg_tr)
+            val_losses.append(avg_va)
+
+            if (epoch + 1) % 5 == 0:
                 print(f"Epoch [{epoch+1}/{self.num_epochs}] Train: {avg_tr:.4f} | Val: {avg_va:.4f}")
 
             if avg_va < best_val - 1e-9:
@@ -771,6 +793,34 @@ class DiscretizedTabTransformerClassifier:
                 y_true_val = y.iloc[X_val_eng.index].values
                 self.iso_reg = IsotonicRegression(out_of_bounds='clip')
                 self.iso_reg.fit(y_hat_val, y_true_val)
+
+        # ===== Plot Training vs Validation Loss with Two Scales =====
+        fig, ax1 = plt.subplots(figsize=(10, 6))
+
+        # Left y-axis for Training Loss
+        ax1.plot(train_losses, label='Training Loss', color='blue')
+        ax1.set_xlabel('Epochs')
+        ax1.set_ylabel('Training Loss', color='blue')
+        ax1.tick_params(axis='y', labelcolor='blue')
+
+        # Right y-axis for Validation Loss
+        ax2 = ax1.twinx()
+        ax2.plot(val_losses, label='Validation Loss', color='orange')
+        ax2.set_ylabel('Validation Loss', color='orange')
+        ax2.tick_params(axis='y', labelcolor='orange')
+
+        # Title & grid
+        fig.suptitle('Training vs Validation Loss')
+        ax1.grid(True)
+
+        # Combined legend
+        lines_1, labels_1 = ax1.get_legend_handles_labels()
+        lines_2, labels_2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper right')
+
+        plt.tight_layout()
+        plt.savefig(f"img/temp/temp_learning_curve_{self.loss_mode}_{self.val_loss_mode}.jpg")
+        plt.close()
 
         # ===== Final validation report (classification + regression) =====
         y_val_pred_bins = self._predict_classes_df(X_val_eng)

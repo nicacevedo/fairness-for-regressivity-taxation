@@ -190,9 +190,9 @@ def get_model_configurations(params: dict, seed: int) -> dict:
                 'fourier_type': 'positional',
                 'fourier_mapping_size': 32, # WARNING: default=16
                 'fourier_sigma': 1.25, # WARNING: default=1.25
-                'patience': 3,
+                'patience': 10,
                 # Mine
-                'dropout': 0.25, #1e-6, #0.0007693680499241461,
+                'dropout': 1e-6, #0.0007693680499241461,
                 'l1_lambda': 1e-4,#2.714100311651801e-06,
                 'l2_lambda': 1e-3,#0.0031372889601764937,
                 'use_scaler': True,
@@ -208,7 +208,7 @@ def get_model_configurations(params: dict, seed: int) -> dict:
                 "smoothing_sigma":1,#0.0, # standard deviation of Gaussian used to generate soft targets for prob_mse and smooth_ce. Controls how much probability mass spreads to neighboring bins.
                 "ce_label_smoothing":0.0, # passes label smoothing to PyTorch’s CrossEntropyLoss (only used if loss_mode='ce').
                 "use_class_weights": True, # if True, computes inverse-frequency weights per class and applies them in CE loss. Helps counteract class imbalance.
-                "weight_exp": 0.75, # Between 0.5 and 1 for uniform w/o resamp  # Weight exponent to add to the class weight (MINE)
+                "weight_exp": 1, # Between 0.5 and 1 for uniform w/o resamp  # Weight exponent to add to the class weight (MINE)
                 "default_predict_mode":'expected', # determines what predict() returns: 'expected': regression-style output using weighted sum of bin centers. 'argmax': class → center (your original behavior).
             },
             "preprocessor": "embedding_linear"
@@ -268,20 +268,34 @@ def get_model_configurations(params: dict, seed: int) -> dict:
                 'fourier_sigma': 5,
                 # Regularization
                 'dropout': 0.11,
-                # 'dropout': 0.0007693680499241461,
-                # 'l1_lambda': 2.714100311651801e-06,
-                # 'l2_lambda': 0.0031372889601764937,
+                # 'dropout': 1e-6, #0.0007693680499241461,
+                # 'l1_lambda': 1e-6,#2.714100311651801e-06,
+                # 'weight_decay': 1e-4,#0.0031372889601764937, # l2_lambda here
                 'use_scaler': True,
                 # Classification
                 "n_bins":50,
-                "binning_method":'quantile',
+                "binning_method":'uniform',#'quantile',
                 'min_samples_per_bin':4,
                 # v2:  loss controls
                 "loss_mode":'ce', 
+                "val_loss_mode":'ce',
                 "huber_delta":1.0, 
                 "smoothing_sigma":1,#0.0, # standard deviation of Gaussian used to generate soft targets for prob_mse and smooth_ce. Controls how much probability mass spreads to neighboring bins.
                 "ce_label_smoothing":0.0, # passes label smoothing to PyTorch’s CrossEntropyLoss (only used if loss_mode='ce').
-                "use_class_weights":False, # if True, computes inverse-frequency weights per class and applies them in CE loss. Helps counteract class imbalance.
+                "use_class_weights":True, # if True, computes inverse-frequency weights per class and applies them in CE loss. Helps counteract class imbalance.
+                "weight_exp": 0.75,
+#                 "class_weights": [
+#    193.86713 ,    43.08166  ,   28.72114  ,   17.624374 ,   12.309117,
+#    9.231863  ,   8.429101   ,  4.1469884  ,  4.0180693  ,  3.3864233,
+#    2.7210405 ,   2.4855745  ,  2.178381   ,  1.6895729  ,  1.8035141,
+#    1.3166842 ,   1.1388197  ,  1.4126102  ,  1.0085111  ,  0.71613705,
+#    0.53197116,   0.42408472 ,  0.3302269  ,  0.2966461  ,  0.23566139,
+#    0.22898668,   0.27190793 ,  0.30313557 ,  0.35861504 ,  0.4838605,
+#    0.585359  ,   0.7063551  ,  0.9265852  ,  1.1158814  ,  1.4715765,
+#    2.215723  ,   2.4158883  ,  3.1782477  ,  4.6436214  ,  6.5718637,
+#   10.479399  ,  17.624374   , 23.499132   , 29.825794   , 59.65149,
+#   96.93361   , 193.86713   
+#   ],
                 "default_predict_mode":'expected', # determines what predict() returns: 'expected': regression-style output using weighted sum of bin centers. 'argmax': class → center (your original behavior).
             },
             "preprocessor": "embedding"
@@ -315,12 +329,6 @@ def load_and_prepare_data(config: dict, test_on_val=False) -> tuple:
         (~df['sv_is_outlier'].astype('bool').fillna(True))
     ]
 
-    if params['use_sample']:
-        print(f"Using a sample of size: {params['sample_size']}")
-        df = df.sample(params['sample_size'], random_state=params['seed'])
-    else:
-        print("Using full data.")
-
     df = df.sort_values('meta_sale_date')
     df['meta_sale_price'] = np.log(df['meta_sale_price'])
 
@@ -340,6 +348,16 @@ def load_and_prepare_data(config: dict, test_on_val=False) -> tuple:
         val = train.iloc[train_split_idx:]
         train = train.iloc[:train_split_idx]
 
+    # Use a sample of the training data
+    if params['use_sample']:
+        print(f"Using a sample of size: {params['sample_size']}")
+        train = train.sample(int(params['sample_size']*config['cv']['split_prop']**(2+test_on_val)), random_state=params['seed'])
+        val = val.sample(int(params['sample_size']*config['cv']['split_prop']**(1+test_on_val)*(1-config['cv']['split_prop'])), random_state=params['seed'])
+        print("Size of train: ", train.shape)
+        print("Size of val: ", val.shape)
+        print("Size of test: ", test.shape)
+    else:
+        print("Using full data.")
     
     return train, val, test
 
