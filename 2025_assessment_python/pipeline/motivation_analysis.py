@@ -5,10 +5,10 @@ from typing import Union, List
 import matplotlib.pyplot as plt
 from scipy.stats import kurtosis, skew
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.linear_model import LinearRegression
 # from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-from sklearn.metrics import root_mean_squared_error, r2_score
+from sklearn.metrics import root_mean_squared_error, r2_score, mean_absolute_error
 
 # from src.preliminary_models import ConstraintBothRegression, ConstraintDeviationRegression, ConstraintGroupsMeanRegression, UpperBoundLossRegression
 
@@ -39,7 +39,7 @@ from recipes.recipes_pipelined import build_model_pipeline, build_model_pipeline
 # My models
 from src_.motivation_utils import analyze_fairness_by_value, calculate_detailed_statistics, plot_tradeoff_analysis
 from fairness_models.linear_fairness_models import LeastAbsoluteDeviationRegression, MaxDeviationConstrainedLinearRegression, LeastMaxDeviationRegression, GroupDeviationConstrainedLinearRegression, StableRegression, LeastProportionalDeviationRegression#LeastMSEConstrainedRegression, LeastProportionalDeviationRegression
-
+from fairness_models.linear_fairness_models import MyLogisticRegression, GroupDeviationConstrainedLogisticRegression
 
 
 #%% Data
@@ -153,6 +153,7 @@ y_pred_val = model.predict(X_val)
 y_pred_test = model.predict(X_test)
 
 print("train RMSE: ", root_mean_squared_error(y_train_log, y_pred_train) )
+ols_mse = root_mean_squared_error(y_train_log, y_pred_train)**2
 
 print(r"$R^2$ in Train: ",r2_score(y_pred_train, y_train_log))
 print(r"$R^2$ in Val: ",r2_score(y_pred_val, y_val_log))
@@ -171,6 +172,27 @@ print("Median residual Val: ", np.median(y_val_log - y_pred_val))
 
 
 
+# Logistic Regression
+print("-"*100)
+print("LOGISTIC REGRESSION ")
+model = MyLogisticRegression(fit_intercept=True, solver="MOSEK", objective="logistic", l2_lambda=0)
+print(model)
+
+# Convert the train to binary
+y_avg = np.mean(y_train_log) # same avg for all splits
+y_train_binary = (y_train_log >= y_avg) + 0.0 
+y_val_binary = (y_val_log >= y_avg) + 0.0 
+y_test_binary = (y_test_log >= y_avg) + 0.0 
+
+# model.fit(X_train, y_train_binary)
+# y_pred_train_binary = model.predict(X_train)
+# y_pred_val_binary = model.predict(X_val)
+# y_pred_test_binary = model.predict(X_test)
+# print("Train Accuracy (1-MAE): ", 1-mean_absolute_error(y_train_binary, np.round(y_pred_train_binary)))
+# print("Val Accuracy (1-MAE): ", 1-mean_absolute_error(y_val_binary, np.round(y_pred_val_binary)))
+# print("Test Accuracy (1-MAE): ", 1-mean_absolute_error(y_test_binary, np.round(y_pred_test_binary)))
+
+
 
 import numpy as np
 import pandas as pd
@@ -185,15 +207,19 @@ from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_sco
 if __name__ == '__main__':
     # --- Configuration ---
     NUM_GROUPS = 3
-    percentages = np.linspace(0, .06, 11)
+    percentages = np.linspace(0, .1, 11)
+    # percentages = np.linspace(0, .02, 21)
 
     # --- Data Storage ---
     train_results_list = []
     val_results_list = []
     pof_list = []
     pof_lb_list = []
+    pof_ub_list = []
+    pof_taylor_list = []
     fei_list = []
-    
+    fairness_list = []
+
     # --- Main Loop ---
     for rmse_percentage_increase in percentages:
         print("-" * 100)
@@ -204,12 +230,17 @@ if __name__ == '__main__':
         # model = LeastProportionalDeviationRegression(
         # model = LeastGroupDeviationRegression(
         # model = MaxDeviationConstrainedLinearRegression(
-        model = GroupDeviationConstrainedLinearRegression(
+
+
+        # model = GroupDeviationConstrainedLinearRegression(
+        model = GroupDeviationConstrainedLogisticRegression(
             fit_intercept=True,# add_rmse_constraint=False, 
-            percentage_increase=0.1,#rmse_percentage_increase,
-            max_row_norm_scaling=(1+rmse_percentage_increase),
+            percentage_increase=rmse_percentage_increase,
+            # max_row_norm_scaling=(1+rmse_percentage_increase),
             solver="MOSEK", # Your solver of choice
-            l2_lambda=1e0,
+            l2_lambda=0,
+            objective="mse",
+            constraint="max_mse",
         )
         # Robust version
         # l1_, l2_ = 1e-1, 5e3#1e2*10**(10*rmse_percentage_increase) # 1e-1/10**(10*rmse_percentage_increase), 1e-1*10**(10*rmse_percentage_increase))
@@ -225,11 +256,24 @@ if __name__ == '__main__':
 
         # Train R2: 0.7954 | Val R2: 0.7876 -- l1:  1.778279410038923e-06  | l2:  5623.413251903491
         
+        # WARNING: Normalization
+        scaler = MinMaxScaler()
+        X_train = scaler.fit_transform(X_train)
+        X_val = scaler.transform(X_val)
+        X_test = scaler.transform(X_test)
+
+        y_train_scaled = ( y_train_log - y_train_log.min() ) / ( y_train_log.max() - y_train_log.min() )
+
         # Fit model and make predictions
-        result, solve_time, pof, pof_lb, fei = model.fit(X_train, y_train_log)
+        # result, solve_time, pof, fei, pof_lb, pof_ub, fairness = model.fit(X_train, y_train_log)
+        result, solve_time, pof, fei, pof_lb, pof_ub, pof_taylor, fairness = model.fit(X_train, y_train_scaled, y_real_values=y_train_log)
+        
         pof_list.append(pof)
         pof_lb_list.append(pof_lb)
+        pof_ub_list.append(pof_ub)
+        pof_taylor_list.append(pof_taylor)
         fei_list.append(fei)
+        fairness_list.append(fairness)
         y_pred_train = model.predict(X_train)
         y_pred_val = model.predict(X_val)
 
@@ -256,12 +300,29 @@ if __name__ == '__main__':
     # --- Temporal Plot ---
     print(os.getcwd())
     plt.figure(figsize=(6,5))
-    plt.plot(percentages, pof_list, "--o")
+    plt.plot(percentages*100, 100*np.array(pof_list), "--o", label="POF", color="blue")
+    plt.plot(percentages*100, 100*np.array(pof_lb_list), "--x", label="POF LB", color="red", alpha=0.5)
+    plt.plot(percentages*100, 100*np.array(pof_ub_list), "--x", label="POF UB", color="red", alpha=0.5)
+    plt.plot(percentages*100, 100*np.array(pof_taylor_list), "--x", label="POF Taylor Approx.", color="lightgreen", alpha=0.5)
     # plt.xlabel("Fairness Threshold Improvement (%)")
-    plt.xlabel("Max_i norm(x_i) Increase (%)")
+    plt.xlabel("(Un)Fairness decrease %")
     plt.ylabel("Price of Fairness (% MSE increase)")
+    plt.legend()
     # plt.savefig("/img/motivation/tradoff_analysis/pof/pof_vs_percentages.jpg", dpi=300)
     plt.savefig("./img/motivation/pof_vs_percentages.jpg", dpi=300, bbox_inches='tight')
+
+
+    plt.figure(figsize=(6,5))
+    plt.plot(fairness_list, np.array(pof_list) * ols_mse + ols_mse, "--o", label="MSE", color="blue")
+    plt.plot(fairness_list, np.array(pof_lb_list) * ols_mse + ols_mse, "--x", label="MSE LB", color="red", alpha=0.5)
+    plt.plot(fairness_list, np.array(pof_ub_list) * ols_mse + ols_mse, "--x", label="MSE UB", color="red", alpha=0.5)
+    plt.plot(fairness_list, np.array(pof_taylor_list) * ols_mse + ols_mse, "--x", label="POF Taylor Approx.", color="lightgreen", alpha=0.5)
+    # plt.xlabel("Fairness Threshold Improvement (%)")
+    plt.xlabel("(Un)Fairness Measure")
+    plt.ylabel("Mean Squared Error")
+    plt.legend()
+    # plt.savefig("/img/motivation/tradoff_analysis/pof/pof_vs_percentages.jpg", dpi=300)
+    plt.savefig("./img/motivation/mse_vs_percentages.jpg", dpi=300, bbox_inches='tight')
 
     # plt.plot(percentages, fei_list)
 

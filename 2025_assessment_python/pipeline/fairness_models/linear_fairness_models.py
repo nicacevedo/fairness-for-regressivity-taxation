@@ -5,7 +5,7 @@ import numpy as np
 
 from time import time
 
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LinearRegression, Ridge, LogisticRegression
 from sklearn.metrics import root_mean_squared_error
 
 class LeastAbsoluteDeviationRegression:
@@ -381,15 +381,16 @@ class MaxDeviationConstrainedLinearRegression:
 
 
 
-
+# The current version of the Constrained Linear Regression
 class GroupDeviationConstrainedLinearRegression:
     #  add_rmse_constraint=False,
-    def __init__(self, fit_intercept=True, percentage_increase=0.00, n_groups=3, solver="GUROBI", max_row_norm_scaling=1, objective="mse", l2_lambda=1e-3):
+    def __init__(self, fit_intercept=True, percentage_increase=0.00, n_groups=3, solver="GUROBI", max_row_norm_scaling=1, objective="mse", constraint="max_mse", l2_lambda=1e-3):
         self.beta = None
         self.fit_intercept = fit_intercept
         self.percentage_increase = percentage_increase
         # Ooptimization
-        self.objective = objective
+        self.objective = objective # mae / mse
+        self.constraint = constraint # max_mae / max_mse / max_mae_diff / max_mse_diff
         self.solver = solver
         # self.add_rmse_constraint = add_rmse_constraint
         self.l2_lambda = l2_lambda
@@ -401,7 +402,14 @@ class GroupDeviationConstrainedLinearRegression:
 
 
     def fit(self, X, y):
-        X, y = X.to_numpy(), y.to_numpy()
+        try:
+            X = X.to_numpy()
+        except Exception as e:
+            pass
+        try:
+            y = y.to_numpy()
+        except Exception as e:
+            pass
         if self.fit_intercept:
             X = np.hstack((np.ones((X.shape[0], 1)), X))
         n, m = X.shape
@@ -420,13 +428,18 @@ class GroupDeviationConstrainedLinearRegression:
         u_g, l_g = cp.Variable(1), cp.Variable(1)
 
         # Constraints
-        if self.objective == "mse":
+        if self.objective == "mse" and self.l2_lambda == 0:
             model = LinearRegression(fit_intercept=False)
+        elif self.objective == "mse":
+            model = Ridge(fit_intercept=False, alpha=self.l2_lambda/n)
         elif self.objective == "mae":
             model = LeastAbsoluteDeviationRegression(fit_intercept=False)
         model.fit(X, y)
+        if self.objective == "mse":
+            beta_ols = model.coef_
         real_z = np.abs(y - model.predict(X))
         ols_mse = root_mean_squared_error(y, model.predict(X))**2
+        ols_mse_plus_reg = root_mean_squared_error(y, model.predict(X))**2 + self.l2_lambda * (beta_ols @ beta_ols)
         lad_mae = np.mean(real_z)
         constraints = [
             # cp.SOC(r, y - X @ beta)
@@ -448,39 +461,69 @@ class GroupDeviationConstrainedLinearRegression:
         n_groups = 3
         interval_size = y.max() - y.min() + 1e-6 # a little bit more
         bins = y.min() + np.array([i*interval_size /n_groups for i in range(n_groups+1)])
-        X_bins, y_bins = [], []
+        # X_bins, y_bins = [], []
         bin_indices_list = []
         for j,lb in enumerate(bins[:-1]):
             ub = bins[j+1]
             bin_indices = np.where((y>=lb) & (y<ub))[0]
             # print(bin_indices)
             bin_indices_list.append(bin_indices)
-            # Data
-            X_bins.append(X[bin_indices,:])
-            y_bins.append(y[bin_indices])
+            # # Data
+            # X_bins.append(X[bin_indices,:])
+            # y_bins.append(y[bin_indices])
 
         # Compute the actual max difference
         tau = 0 
         for i in range(n_groups):
             print(i, len(bin_indices_list[i]))
-            constraints+=[
-                cp.mean(z[bin_indices_list[i]])  <= u_g,
-                cp.mean(z[bin_indices_list[i]])  >= l_g,
-            ]
-            for j in range(i+1, n_groups):
-                diff_ij = np.abs(np.mean(real_z[bin_indices_list[i]]) - np.mean(real_z[bin_indices_list[j]]))
-                if diff_ij >  tau:
-                    tau = diff_ij
+            if "mae" in self.constraint: 
+                constraints+=[
+                    cp.mean(z[bin_indices_list[i]])  <= u_g,
+                    cp.mean(z[bin_indices_list[i]])  >= l_g,
+                ]
+            elif "mse" in self.constraint:
+                n_i = len(bin_indices_list[i])
+                constraints+=[
+                    cp.SOC(u_g, z[bin_indices_list[i]]/np.sqrt(n_i)),
+                    # cp.SOC(u_g, z[bin_indices_list[i]]),
+                    # cp.mean(**2)  <= u_g,
+                    # cp.mean(z[bin_indices_list[i]]**2)  >= l_g,
+                ]
+            if not "diff" in self.constraint:
+                if "mae" in self.constraint:
+                    error_i = np.mean(real_z[bin_indices_list[i]])
+                elif "mse" in self.constraint:
+                    error_i = np.mean(real_z[bin_indices_list[i]]**2)
+                    print("error_i: ", error_i)
+                if error_i > tau:
+                    tau = error_i
+            elif "diff" in self.constraint:
+                for j in range(i+1, n_groups):
+                    if "mae" in self.constraint: 
+                        error_i,error_j = np.mean(real_z[bin_indices_list[i]]), np.mean(real_z[bin_indices_list[j]])
+                    elif "mse" in self.constraint:
+                        error_i,error_j = np.mean(real_z[bin_indices_list[i]]**2), np.mean(real_z[bin_indices_list[j]]**2)
+                    diff_ij = np.abs(error_i - error_j)
+                    if diff_ij >  tau:
+                        tau = diff_ij
         print("tau", tau)
         tau_bound = tau * (1-self.percentage_increase)
         print("bound: ", tau_bound)
-        constraints+=[
-            u_g - l_g <= tau * (1-self.percentage_increase)
-        ]
-
+        if "diff" in self.constraint:
+            constraints+=[  
+                u_g - l_g <= tau_bound
+            ]
+        else: # not "diff" in self.constraint
+            if "mse" in self.constraint:
+                print("Constraining u_g to: ", np.sqrt(tau_bound))
+                constraints+=[u_g <= np.sqrt(tau_bound)]
+            elif "mae" in self.constraint:
+                print("Constraining u_g to:", tau_bound)
+                constraints+=[u_g <= tau_bound]
         # Objective
         if self.objective == "mse":
             if self.l2_lambda != 0:
+                print("Solving with Ridge objective...")
                 obj = cp.Minimize(cp.mean(z**2) + self.l2_lambda * cp.quad_form(beta, np.eye(m)))
             else: 
                 obj = cp.Minimize(cp.mean(z**2))
@@ -498,12 +541,29 @@ class GroupDeviationConstrainedLinearRegression:
             result = primal_prob.solve(verbose=False)
         solve_time = time() - t0
         print(f"Problem status: {primal_prob.status}")
-        if self.objective == "mse":
-            print(f"Optimal objective (RMSE): {np.sqrt(result)}")
+        if self.objective == "mse" and self.l2_lambda == 0:
+            print(f"OLS objective (MSE): {ols_mse}")
+            print(f"Optimal objective (MSE): {result}")
             price_of_fairness = (result-ols_mse)/ols_mse
             print(f"POF (MSE % decrease): ", price_of_fairness)
-            # price_of_fairness = (np.sqrt(result)-np.sqrt(ols_mse))/np.sqrt(ols_mse)
-            # print(f"POF (RMSE % decrease): ", price_of_fairness)
+            J_0_value = ols_mse
+        elif self.objective == "mse":
+            beta_ols = np.linalg.inv(X.T @ X + n*self.l2_lambda*np.eye(m)) @ X.T @ y
+            ridge_mse = root_mean_squared_error(y, X @ beta_ols)**2 
+            ridge_plus_reg = ridge_mse + self.l2_lambda * beta_ols @ beta_ols
+            print(f"My Ridge objective (MSE + reg): {ridge_plus_reg}")
+            print(f"My Ridge objective (MSE-only): {ridge_mse}")
+            # print(f"Ridge objective (MSE + reg): {ols_mse_plus_reg}")
+            # ridge_mse = root_mean_squared_error(y, X @ beta_ols)**2
+            # print(f"Ridge objective (MSE-only): {ridge_mse}")
+            print(f"Optimal objective (MSE + reg): {result}")
+            opt_mse = root_mean_squared_error(y, X @ beta.value)**2
+            print(f"Optimal objective (MSE-only): {opt_mse}")
+            price_of_fairness = (result-ridge_plus_reg)/ridge_plus_reg
+            print(f"POF (MSE + reg % decrease): ", price_of_fairness)
+            price_of_fairness = (opt_mse - ridge_mse) / ridge_mse
+            J_0_value = ridge_plus_reg
+            # exit()
         elif self.objective == "mae":
             print(f"Optimal objective (MAE): {result}")
             price_of_fairness = (result-lad_mae)/lad_mae
@@ -511,26 +571,151 @@ class GroupDeviationConstrainedLinearRegression:
 
 
         # Real fairness measure
-        real_tau = 0
+        real_tau, real_tau_i, real_tau_j = 0, None, None
         for i in range(n_groups):
-            print(i, len(bin_indices_list[i]))
-            i_error = np.mean(z.value[bin_indices_list[i]])
-            # print("mean: ", i_error) 
-            for j in range(i+1, n_groups):
-                diff_ij = np.abs(np.mean(z.value[bin_indices_list[j]] - i_error))
-                if diff_ij > real_tau:
-                    real_tau = diff_ij 
+            # print(i, len(bin_indices_list[i]))
+            if not "diff" in self.constraint:
+                if "mae" in self.constraint:
+                    error_i = np.mean(z.value[bin_indices_list[i]])
+                elif "mse" in self.constraint:
+                    error_i = np.mean(z.value[bin_indices_list[i]]**2)
+                if error_i > real_tau:
+                    real_tau, real_tau_i = error_i, i
+            elif "diff" in self.constraint:
+                for j in range(i+1, n_groups):
+                    if "mae" in self.constraint:
+                        error_i, error_j = np.mean(z.value[bin_indices_list[i]]), np.mean(z.value[bin_indices_list[j]] )
+                    elif "mse" in self.constraint:
+                        error_i, error_j = np.mean(z.value[bin_indices_list[i]]**2), np.mean(z.value[bin_indices_list[j]]**2)
+                    diff_ij = np.abs(error_i - error_j)
+                    if diff_ij > real_tau:
+                        real_tau, real_tau_i, real_tau_j = diff_ij, i, j 
+
+        # Fairness improvement and bounds
         fairness_improvement = np.abs(real_tau - tau)
+        delta_fairness = self.percentage_increase*tau # tau - real_tau
+        # virtual_fairness_improvement = np.abs(tau * (1 - self.percentage_increase) - tau)
+        # Bounds on POF from MSE and MSE
+        if self.objective == "mse" and self.constraint == "max_mse":
+            g, indices_g = real_tau_i, bin_indices_list[real_tau_i]
+            n_g, X_g, y_g = len(indices_g), X[indices_g,:], y[indices_g]
+
+            # Lower bound # (n/(self.n_groups * n_g))
+            a_0 = (2/n_g)*(-X_g.T @ y_g + X_g.T @ X_g @ beta_ols) + 2 * self.l2_lambda * beta_ols # gradient of the single J_g
+            H = (2/n) * (X.T @ X) + 2 * self.l2_lambda
+            eigen_vals, eigen_vecs = np.linalg.eigh(X.T @ X)
+            # H_inv =  eigen_vecs.T @ ((n/2) * np.diag(1/eigen_vals) + 1/(2*self.l2_lambda ) ) @ eigen_vecs
+            H_inv = np.linalg.pinv(H)
+            A = a_0.T @ H_inv @ a_0 
+            delta_J_lb = (fairness_improvement)**2 / (2 * A) # Lower bound
+
+            # print(fr"Delta J lb (mse-max_mse): ", delta_J_lb )
+            print(fr"POF J % lb 1 (mse-max_mse): ", delta_J_lb / J_0_value)
+            d = H_inv @ a_0
+
+
+            # # Looser LB (strong convexity)
+            # m = (2/n) * np.linalg.eigvalsh(X.T @ X)[0] + 2 * self.l2_lambda
+            # delta_J_lb_2 = m*(fairness_improvement)**2 / (2 * a_0 @ a_0) # Lower bound
+            # # print(fr"Delta J lb 2 (mse-max_mse): ", delta_J_lb_2 )
+            # print(fr"POF J % lb 2 (mse-max_mse): ", delta_J_lb_2 / J_0_value)
+
+            # # Looser LB slightly tighter (strong convexity)
+            # m_g = (2/n_g) * np.linalg.eigvalsh(X_g.T @ X_g)[0] + 2 * self.l2_lambda
+            # if delta_fairness > 0:
+            #     extra_term = ( (1-np.sqrt(1-2*m_g*delta_fairness/(a_0 @ a_0))) / (m_g*delta_fairness/(a_0 @ a_0)) )**2
+            #     if extra_term > 1:
+            #         # print("Extra term: ", extra_term)
+            #         delta_J_lb_3 = delta_J_lb_2 * extra_term
+            #         print(fr"POF J % lb 3 (mse-max_mse): ", delta_J_lb_3 / J_0_value)
+
+            # Exponential LB
+            # Checking exponential bounds
+            M_phi = np.max(X @ beta_ols)
+            C_phi = (np.exp(-M_phi) + M_phi - 1)/M_phi**2
+            # print("M_phi: ", M_phi)
+            # print("exp + M - 1 (LB): ", np.exp(-M_phi) + M_phi - 1)
+            # print("Curvature constant (LB): ", C_phi)
+            delta_J_lb_3 = C_phi*(fairness_improvement)**2 / ( a_0 @ H_inv @ a_0) # Lower bound
+            # print(f"Delta MSE lb 4 (MSE-only): ", delta_J_lb_3)
+            print(f"POF J % lb 4 (MSE % decrease): ", delta_J_lb_3 / J_0_value)
+            # print("exp + M - 1 (UB): ", np.exp(M_phi) - M_phi - 1)
+            # print("Curvature constant (UB): ", (np.exp(M_phi) - M_phi - 1)/M_phi**2)
+            # exit()
+
+
+            if self.l2_lambda > 0:
+                print(f"POF (MSE % decrease): ", price_of_fairness)
+
+                # First lower bound on delta MSE
+                H_loss_inv_a_0 = H_inv @ a_0
+                delta_loss = delta_fairness**2 / ( 2 * (a_0 @ H_loss_inv_a_0) )
+                beta_lb = - delta_fairness * H_loss_inv_a_0 / (a_0 @ H_loss_inv_a_0)
+                delta_mse_lb = delta_loss - self.l2_lambda * ( root_mean_squared_error(beta_ols, beta_lb)**2 + beta_ols @ beta_ols )
+                print(f"Delta MSE lb (MSE-only): ", delta_mse_lb)
+                print(f"POF lb (MSE % decrease): ", delta_mse_lb / ridge_mse)
+
+            H_g = (2/n_g)*(X_g.T @ X_g) + 2 * self.l2_lambda 
+
+            # # LB version 3 (strongly convex LB)
+            # eig_min_g = np.min(np.linalg.eigvalsh(H_g))
+            # print("Min eigen: ", eig_min_g)
+            # if eig_min_g > 0:
+            #     a_0 = a_0
+            #     delta_beta = -delta_fairness*H_inv*a_0/(a_0.T @ H_inv @ a_0)
+            #     a_0_delta_beta = a_0 @ delta_beta 
+            #     m_norm_delta_beta = (eig_min_g/2)*(delta_beta @ delta_beta)
+            #     print("m_norm_beta", m_norm_delta_beta)
+            #     t_LB = (-a_0_delta_beta - np.sqrt( a_0_delta_beta**2 - 4*(m_norm_delta_beta)*delta_fairness ))/(2 * m_norm_delta_beta)
+            #     delta_J_lb_3 = (t_LB**2/2)*(a_0.T @ H_inv @ a_0)
+            #     print(fr"POF J % lb 3 (strongly convex): ", delta_J_lb_3 / ols_mse)
+
+            # Upper bound
+            C_ray = 0
+            # A_max = 0
+            for i in range(n_groups):
+                indices_g = bin_indices_list[i]
+                n_g, X_g, y_g = len(indices_g), X[indices_g,:], y[indices_g]
+                H_g = (2/n_g) * (X_g.T @ X_g)
+                d_H_g_d = d.T @ H_g @ d
+                C_ray = d_H_g_d if d_H_g_d > C_ray else C_ray
+
+                # UB bound 2
+                # a_0 = (2/n_g)*(-X_g.T @ y_g + X_g.T @ X_g @ beta_ols)
+                # A_max = a_0 @ d if a_0 @ d > A_max else A_max
+
+                
+            t_UB = (A - np.sqrt(A**2 - 2 * C_ray * delta_fairness)) / C_ray
+            # t_UB_2 = (A_max - np.sqrt(A_max **2 - 2 * C_ray * delta_fairness)) / C_ray
+            delta_J_ub = (1/2)*A*t_UB**2 # Upper bound
+            # delta_J_ub_2 = (1/2) * A * t_UB_2**2
+            print(fr"Delta J ub (mse-max_mse): ", delta_J_ub )
+            print(fr"POF J % ub (mse-max_mse): ", delta_J_ub / ols_mse)
+            # print(fr"POF J % ub 2 (mse-max_mse): ", delta_J_ub_2 / ols_mse)
+
+            
+            # UB bound 3 (tighter?)
+            indices_g = bin_indices_list[real_tau_i]
+            n_g, X_g, y_g = len(indices_g), X[indices_g,:], y[indices_g]
+            H_g = (2/n_g) * (X_g.T @ X_g)
+            C_g = d.T @ H_g @ d
+            t_UB_3 = (A - np.sqrt(A**2 - 2 * C_g * delta_fairness)) / C_g
+            delta_J_ub_3 = (1/2)*A*t_UB_3**2 # Upper bound
+            print(fr"POF J % ub 3 (mse-max_mse): ", delta_J_ub_3 / ols_mse)            
+
+
+            # print(fr"V - POF J % lb (mse-max_mse): ", ((virtual_fairness_improvement)**2 / 2 * A) / ols_mse)
+
         # print("l2_lambda: ", self.l2_lambda)
         # print("lambda_min original: ", np.min(np.linalg.eigh(X.T @ X)[0]))
-        lambdas_XX = np.linalg.eigh(X.T @ X)[0]  # min eigenvalue
-        min_lambda_XX = np.min(lambdas_XX) + self.l2_lambda
-        print("Min eigenvalue: ", min_lambda_XX)
+        # lambdas_XX = np.linalg.eigh(X.T @ X)[0]  # min eigenvalue
+        # min_lambda_XX = np.min(lambdas_XX) + self.l2_lambda
+        # print("Min eigenvalue: ", min_lambda_XX)
         # print("Max eigenvalue: ", np.max(lambdas_XX))
-        max_row_norm = np.max(np.linalg.norm(X, axis=1))
+        # max_row_norm = np.max(np.linalg.norm(X, axis=1))
         # print("Max row norm:", max_row_norm)
-        pof_lower_bound = (1/(4*n)) * min_lambda_XX / max_row_norm**2 * fairness_improvement**2 
-        print("POF lower bound (%)", pof_lower_bound)
+        # pof_lower_bound = (1/(4*n)) * min_lambda_XX / max_row_norm**2 * fairness_improvement**2 
+        # print("POF lower bound (%)", pof_lower_bound)
         fairness_effective_improvement = fairness_improvement/tau
         print(f"FEI (% improvement)", fairness_effective_improvement)
 
@@ -544,7 +729,7 @@ class GroupDeviationConstrainedLinearRegression:
             print("Solver did not find an optimal solution. Beta coefficients not set.")
             self.beta = np.zeros(m) # Fallback beta
 
-        return result, solve_time, price_of_fairness, pof_lower_bound, fairness_effective_improvement
+        return result, solve_time, price_of_fairness, fairness_effective_improvement, delta_J_lb/ ols_mse, delta_J_ub_3/ ols_mse, real_tau
 
     def predict(self, X):
         if self.fit_intercept:
@@ -553,6 +738,401 @@ class GroupDeviationConstrainedLinearRegression:
     
     def __str__(self): #add_rmse_constraint={self.add_rmse_constraint},
         return f"GroupDeviationConstrainedLinearRegression(fit_intercept={self.fit_intercept},  percentage_increase={self.percentage_increase}, n_groups={self.n_groups})"
+
+
+class MyLogisticRegression:
+
+    def __init__(self, fit_intercept=True, objective="logistic", l2_lambda=1e-3, solver="GUROBI", solver_verbose=False, eps=1e-4):
+        self.beta = None
+        self.fit_intercept = fit_intercept
+        # Ooptimization
+        self.objective = objective
+        self.solver = solver
+        self.solver_verbose = solver_verbose
+        self.l2_lambda = l2_lambda
+        self.eps = eps
+        # Loss
+        self.train_loss = None
+
+
+    def fit(self, X, y):
+        try:
+            X = X.to_numpy()
+        except Exception as e:
+            pass
+        try:
+            y = y.to_numpy()
+        except Exception as e:
+            pass
+        if self.fit_intercept:
+            X = np.hstack((np.ones((X.shape[0], 1)), X))
+        n, m = X.shape      
+
+        # Logistic regression optimization
+    
+        # Variables
+        beta = cp.Variable(m)
+        z = cp.Variable(n)
+
+        # Constraints
+        y[y<self.eps] = self.eps
+        y[y>1-self.eps] = 1-self.eps
+        eta = np.log(y / (1-y))
+        constraints = [cp.logistic(X @ beta) - cp.multiply(y, X @ beta) - cp.logistic(np.log(y / (1-y))) +  cp.multiply(y, eta) <= z]  # proves that we can write constraints       
+
+        # Objective
+        if self.objective == "logistic":
+            if self.l2_lambda != 0:
+                print("Solving with Ridge objective...")
+                obj = cp.Minimize(cp.mean( z ) + self.l2_lambda * cp.quad_form(beta, np.eye(m)))
+            else: 
+                obj = cp.Minimize( cp.mean( z ) )
+        # elif self.objectiv == "mae":
+        #     obj = cp.Minimize(cp.mean(z))
+
+        primal_prob = cp.Problem(obj, constraints)
+
+        # Solve the optimization problem
+        t0 = time()
+        try:
+            result = primal_prob.solve(solver=self.solver, verbose=self.solver_verbose)
+        except cp.error.SolverError:
+            print(f"{self.solver} not available, trying default solver.")
+            result = primal_prob.solve(verbose=self.solver_verbose)
+        solve_time = time() - t0
+        print(f"Problem status: {primal_prob.status}")
+        print(f"Objective value: ", result)
+        print(f"Solving time: {solve_time}")
+        
+        # Store results
+        self.coef_ = beta.value
+        self.train_loss = result
+
+    def predict(self, X):
+        if self.fit_intercept:
+            X = np.hstack((np.ones((X.shape[0], 1)), X))
+        exp_term = np.exp(X @ self.coef_)
+        return exp_term / ( 1 + exp_term )
+    
+    def __str__(self): 
+        return f"MyLogisticRegression(fit_intercept={self.fit_intercept}, l2_lambda={self.l2_lambda})"
+
+
+
+    
+def get_group_bins_indices(y, n_groups=3):
+    interval_size = y.max() - y.min() + 1e-6 # a little bit more
+    bins = y.min() + np.array([i*interval_size /n_groups for i in range(n_groups+1)])
+    bin_indices_list = []
+    for j,lb in enumerate(bins[:-1]):
+        ub = bins[j+1]
+        bin_indices = np.where((y>=lb) & (y<ub))[0]
+        bin_indices_list.append(bin_indices)
+    return bin_indices_list
+
+def bregman_divergence(X, y, beta, model="logistic", eps=1e-4):
+    theta = X @ beta
+    y_ = y.copy()
+    if model=="logistic":
+        # y+= eps*((y < eps) - (y > 1-eps))
+        y_[y > 1-eps] = 1-eps
+        y_[y < eps] = eps 
+        eta = np.log(y_ / (1-y_))
+        b_d = np.mean( np.log( 1 + np.exp(theta) ) - y_ * theta - np.log(1+ np.exp(eta)) + y_ * eta )
+    elif model=="linear":
+        pass
+    elif model =="poisson":
+        pass 
+    return b_d
+
+# def cvxpy_bregman_divergence(X, y, beta, model="logistic", eps=1e-4):
+#     theta = X @ beta
+#     y_ = y.copy()
+#     if model=="logistic":
+#         y_[y > 1-eps] = 1-eps
+#         y_[y < eps] = eps 
+#         eta = np.log(y_ / (1-y_))
+#         b_d = cp.mean( cp.logistic(theta) - cp.multiply(y_, theta) - cp.logistic(eta) +  cp.multiply(y_, eta) )
+#     elif model=="linear":
+#         pass
+#     elif model =="poisson":
+#         pass 
+#     return b_d.value     
+
+
+
+
+class GroupDeviationConstrainedLogisticRegression:
+    #  add_rmse_constraint=False,
+    def __init__(self, fit_intercept=True, percentage_increase=0.00, n_groups=3, solver="GUROBI", max_row_norm_scaling=1, objective="mse", constraint="max_mse", l2_lambda=1e-3, eps=1e-4, model="logistic"):
+        self.beta = None
+        self.fit_intercept = fit_intercept
+        self.percentage_increase = percentage_increase
+        self.model=model
+        # Ooptimization
+        self.objective = objective # mae / mse
+        self.constraint = constraint # max_mae / max_mse / max_mae_diff / max_mse_diff
+        self.solver = solver
+        self.eps = eps
+        # self.add_rmse_constraint = add_rmse_constraint
+        self.l2_lambda = l2_lambda
+
+        # Group constraints
+        self.n_groups = n_groups
+        self.max_row_norm_scaling = max_row_norm_scaling
+
+
+
+    def fit(self, X, y, y_real_values=None):
+        try:
+            X = X.to_numpy()
+        except Exception as e:
+            pass
+        try:
+            y = y.to_numpy()
+        except Exception as e:
+            pass
+        if self.fit_intercept:
+            X = np.hstack((np.ones((X.shape[0], 1)), X))
+        n, m = X.shape
+
+        # Compute original solution (J_0)
+        # if self.objective == "mse" and self.l2_lambda == 0:
+        if self.model == "logistic":
+            model = MyLogisticRegression(fit_intercept=False, l2_lambda=self.l2_lambda, solver=self.solver)#LogisticRegression(fit_intercept=False, penalty=None, max_iter=500)
+        elif self.objective == "mse":
+            # model = Ridge(fit_intercept=False, alpha=self.l2_lambda/n)
+            raise("NO REGULARIZED VERSION")
+        elif self.objective == "mae":
+            raise("NO MAE VERSION")
+            # model = LeastAbsoluteDeviationRegression(fit_intercept=False)
+        model.fit(X, y)
+        # if self.objective == "mse":
+
+        # Unconstrained problem utils
+        beta_0 = model.coef_
+        J_0 =  model.train_loss # J_0: logit loss
+        w_0 = np.exp(X @ beta_0) / ( 1 + np.exp(X @ beta_0) )
+        a_0 = (1/n) * X.T @ (w_0 - y)
+        H_0 = (1/n) * X.T @ np.diag(w_0 / (1 + np.exp(X @ beta_0))) @ X
+        # H_0 = np.mean( [ np.exp(X[i,:] @ beta_0) / ( 1 + np.exp(X[i,:] @ beta_0) )**2 * np.outer(X[i,:],  X[i,:]) for i in range(n) ], axis=0 ) 
+        H_0_inv = np.linalg.pinv(H_0)
+        M_psi = 1 # for logistic
+
+        # Fairness constraints utils
+        bin_indices_list = get_group_bins_indices(y_real_values, n_groups=self.n_groups)
+        tau = 0 # Compute the max diference of 0
+        loss_0 = np.mean( np.log( 1 + np.exp(X @ beta_0) ) - y * (X @ beta_0) )
+        print("loss_0: ", loss_0)
+        b_d = bregman_divergence(X, y, beta_0, model="logistic", eps=self.eps)
+        print("Bregman divergence 0: ", b_d)
+        for g in range(self.n_groups):
+            print("Group: ", g, len(bin_indices_list[g]))
+            X_g , y_g = X[bin_indices_list[g], :], y[bin_indices_list[g]]
+            theta_0 = X_g @ beta_0
+            loss_g = np.mean( np.log( 1 + np.exp(theta_0) ) - y_g * theta_0 )
+            print("loss_g: ", loss_g)
+
+            # bregman
+            b_d = bregman_divergence(X_g, y_g, beta_0, model="logistic", eps=self.eps)
+            print("Bregman divergence g: ", b_d)
+                # if loss_g > tau:
+                #     tau = loss_g
+            if b_d > tau:
+                tau = b_d
+        tau_bound = tau * (1-self.percentage_increase)
+        print("tau", tau)
+        print("bound: ", tau_bound)
+
+
+        # Variable
+        beta = cp.Variable(m)
+        z = cp.Variable(n)
+        # u = cp.Variable(1)
+
+        # Constraints
+        constraints = [
+            cp.logistic(X @ beta) - cp.multiply(y, X @ beta) - cp.logistic(np.log(y / (1-y))) +  cp.multiply(y, np.log(y / (1-y))) <= z
+        ]
+
+        y[y<self.eps] = self.eps
+        y[y>1-self.eps] = 1-self.eps
+        constraints+=[  # Fairness constraint
+            cp.mean( cp.logistic(X[ind_g, :] @ beta) - cp.multiply(y[ind_g], X[ind_g, :] @ beta) - cp.logistic(np.log(y[ind_g] / (1-y[ind_g]))) +  cp.multiply(y[ind_g], np.log(y[ind_g] / (1-y[ind_g]))) ) <= tau_bound for ind_g in bin_indices_list
+            # cp.mean( cp.logistic(X[ind_g, :] @ beta) - cp.multiply(y[ind_g], X[ind_g, :] @ beta) ) <= u for ind_g in bin_indices_list
+        ]
+  
+        # Objective
+        if self.objective == "mse":
+            if self.l2_lambda != 0:
+                print("Solving with Ridge objective...")
+                obj = cp.Minimize(cp.mean(z) + self.l2_lambda * cp.quad_form(beta, np.eye(m)))
+            else: 
+                obj = cp.Minimize(cp.mean(z))
+                # obj = cp.Minimize(u)
+        # elif self.objectiv == "mae":
+        #     obj = cp.Minimize(cp.mean(z))
+
+        primal_prob = cp.Problem(obj, constraints)
+
+        # Solve the optimization problem
+        t0 = time()
+        try:
+            result = primal_prob.solve(solver=self.solver, verbose=False)
+        except cp.error.SolverError:
+            print(f"{self.solver} not available, trying default solver.")
+            result = primal_prob.solve(verbose=False)
+        solve_time = time() - t0
+        print(f"Problem status: {primal_prob.status}")
+        print(f"Optimal objective: {result}")
+
+        if self.objective == "mse" and self.l2_lambda == 0:
+            print(f"J_0 objective (original loss): {J_0}")
+            print(f"J_F objective (current loss): {result}")
+            price_of_fairness = (result-J_0)/J_0
+            print(f"POF (MSE % decrease): ", price_of_fairness)
+        # elif self.objective == "mse":
+            # pass 
+
+        # Approximating the F function
+        real_tau, real_tau_g = 0, -1
+        b_d = bregman_divergence(X, y, beta.value, model="logistic", eps=self.eps)
+        print("Bregman divergence 0: ", b_d)
+        for g, ind_g in enumerate(bin_indices_list):
+            X_g, y_g = X[ind_g, :], y[ind_g]
+            theta_g = X_g @ beta
+            error_g = cp.mean( cp.logistic(theta_g) - cp.multiply(y[ind_g], theta_g) ).value
+            print("Group loss: ", g, error_g)
+            approx_error_g = np.mean( np.abs( np.exp(theta_g.value)/(1 + np.exp(theta_g.value)) - y_g ) ) 
+            print("Approx error: ", g, approx_error_g)
+            b_divergence_g = bregman_divergence(X_g, y_g, beta.value, model="logistic", eps=self.eps)#np.mean( np.log( 1 + np.exp(theta_g) ) - y_g * theta_g - (np.log(1+ np.exp(eta_y_g)) - y_g * eta_y_g) )
+            print("Bregman divergence g: ", g, b_divergence_g)
+            # if error_g > real_tau:
+            #     real_tau = error_g
+            #     real_tau_g = g
+            if b_divergence_g > real_tau:
+                real_tau = b_divergence_g
+                real_tau_g = g            
+
+        # Fairness improvement approximation and bounds
+        fairness_improvement = np.abs(real_tau - tau)
+        delta_fairness = self.percentage_increase*tau # tau - real_tau
+        # virtual_fairness_improvement = np.abs(tau * (1 - self.percentage_increase) - tau)
+        # Bounds on POF from MSE and MSE
+        if self.objective == "mse" and self.constraint == "max_mse":
+            g, indices_g = real_tau_g, bin_indices_list[real_tau_g]
+            n_g, X_g, y_g = len(indices_g), X[indices_g,:], y[indices_g]
+
+            # Taylor approximation "bounds" (not secured to be bounds, is just the approximation)
+            w_0_g = np.exp(X_g @ beta_0) / ( 1 + np.exp(X_g @ beta_0) )
+            a_0_g = (1/n_g) * X_g.T @ (w_0_g - y_g )
+            # a_0_g_ = np.mean(X_g.T * (w_0_g - y_g ), axis=1)# gradient of the single J_g in b_0
+            H_0_g = (1/n_g) * X_g.T @ np.diag(w_0_g / ( 1 + np.exp(X_g @ beta_0) )) @ X_g
+            # H_0_g_ = np.mean( [ np.exp(X[i,:] @ beta_0) / ( 1 + np.exp(X[i,:] @ beta_0) )**2 * np.outer(X[i,:],  X[i,:]) for i in indices_g ], axis=0 )
+            H_0_g_inv = np.linalg.pinv(H_0_g)
+
+            # Direction d:=Delta beta* from the Taylor approximation
+            A_0 = a_0_g .T @ H_0_inv @ a_0_g 
+            d = -(fairness_improvement) * H_0_inv @ a_0_g / A_0 # Delta beta*
+            d_H_0_inv_norm = (fairness_improvement)**2 / A_0 # norm H_0_inv of Delta beta* (final form of the term)
+
+            # Taloy Approximation Bounds setting t=1, and d:=Delta beta*
+            M_phi = M_psi * np.max(np.abs( X @ d )) # Option 2 w./ Cauchy Schwarz (looser): M_psi * np.max(np.linalg.norm(X, axis=1))*np.linalg.norm(d)
+            C_phi_LB = (np.exp(-M_phi) + M_phi - 1) / M_phi**2  # t = 1
+            C_phi_UB = (np.exp( M_phi) - M_phi - 1) / M_phi**2  # t = 1
+            delta_J_taylor = (1/2) * d_H_0_inv_norm
+            delta_J_taylor_lb = C_phi_LB * d_H_0_inv_norm  # Lower bound
+            delta_J_taylor_ub = C_phi_UB * d_H_0_inv_norm  # Lower bound
+
+            print(fr"POF J % Taylor    (mse-max_mse): ", delta_J_taylor    / J_0)
+            print(fr"POF J % Taylor LB (mse-max_mse): ", delta_J_taylor_lb / J_0)
+            print(fr"POF J % Taylor UB (mse-max_mse): ", delta_J_taylor_ub / J_0)
+            
+            # 2) The proper Lower Bound bound with Newton Raphson/Bijection/Opt (1 dimension)
+            # d := Delta beta*
+            M_phi_g = M_psi * np.max(np.abs( X_g @ d ))
+            C_phi_LB_g = (np.exp(-M_phi_g) + M_phi_g - 1) / M_phi_g**2  # t = 1
+            C_phi_UB_g = (np.exp( M_phi_g) - M_phi_g - 1) / M_phi_g**2  # t = 1
+            print("-"*100)
+            print("M_phi: ", M_phi_g)
+            print("M_phi_g: ", M_phi)
+            print("C_phi_LB_g: ", C_phi_LB_g)
+            print("C_phi_UB_g: ", C_phi_UB_g)
+            print("-"*100)
+
+            # Hessian of J_g
+            # norm of beta* with H_0_g (second-order subdifferential of F(beta_0))
+            # A_0_g = a_0_g .T @ H_0_inv_g @ a_0_g 
+            d_H_0_norm_g = d.T @ H_0_g @ d  # norm H_0_inv of Delta beta* (Computed directly with beta* instead of the previous one)
+
+            # Roots finder for the LB: Newton Raphson/Bijection/Opt (1 dimension)
+            # Min_{t>=0} C_phi_LB(t) * d_H_inv_norm (Delta J)
+            # s.t. t*(a_0_g * Delta beta*) + d_H_0_norm_g * C_phi_LB_g(t) <= -delta (Delta F)
+            # Variable
+            t_LB = cp.Variable(1, nonneg=True)
+            # Constraint
+            print("-"*100)
+            print("tau_bound - tau: ", tau_bound - tau)
+            print("-"*100)
+            constraints=[t_LB * (a_0_g @ d) + d_H_0_norm_g * (cp.exp(-M_phi_g*t_LB) + t_LB * M_phi_g - 1 ) / M_phi_g**2  <= tau_bound - tau] #-self.percentage_increase]
+            # Objective 
+            obj = cp.Minimize( d_H_0_inv_norm * (cp.exp(-M_phi*t_LB) + t_LB * M_phi - 1 ) / M_phi**2 )
+            primal_prob = cp.Problem(obj, constraints)
+            # Solve the roots
+            t0 = time()
+            try:
+                delta_J_lb = primal_prob.solve(solver=self.solver, verbose=False)
+            except cp.error.SolverError:
+                print(f"{self.solver} not available, trying default solver.")
+                delta_J_lb = primal_prob.solve(verbose=True)
+            print(fr"POF J % LB (exp): ", delta_J_lb / J_0)
+            print(f"Root find for t_LB={t_LB.value} in: ", time() - t0)
+                
+
+            # Roots finder for the UB: Newton Raphson/Bijection/Opt (1 dimension)
+            # Min_{t>=0} C_phi_UB(t) * d_H_inv_norm (Delta J)
+            # s.t. t*(a_0_g * Delta beta*) + d_H_0_norm_g * C_phi_UB_g(t) <= -delta (Delta F)
+            # Variable
+            t_UB = cp.Variable(1, nonneg=True)
+            # Constraint
+            constraints=[t_UB * (a_0_g @ d) + d_H_0_norm_g * (cp.exp(M_phi_g*t_UB) - t_UB * M_phi_g - 1 ) / M_phi_g**2  <= tau_bound - tau] #-self.percentage_increase]
+            # Objective 
+            obj = cp.Minimize( d_H_0_inv_norm * (cp.exp(M_phi*t_UB) - t_UB * M_phi - 1 ) / M_phi**2 )
+            primal_prob = cp.Problem(obj, constraints)
+            # Solve the roots
+            t0 = time()
+            try:
+                delta_J_ub = primal_prob.solve(solver=self.solver, verbose=False)
+            except cp.error.SolverError:
+                print(f"{self.solver} not available, trying default solver.")
+                delta_J_ub = primal_prob.solve(verbose=True)
+            print(fr"POF J % UB (exp): ", delta_J_ub / J_0)
+            print(f"Root find for t_LB={t_LB.value} in: ", time() - t0)
+
+
+        # Fairness improvement
+        fairness_effective_improvement = fairness_improvement/tau
+        print(f"FEI (% improvement)", fairness_effective_improvement)
+
+        print(f"Time to solve: {solve_time}")
+
+        # Print the difference in MAE between groups post-optimization
+        if primal_prob.status in ["optimal", "optimal_inaccurate"]:
+            self.beta = beta.value
+        else:
+            print("Solver did not find an optimal solution. Beta coefficients not set.")
+            self.beta = np.zeros(m) # Fallback beta
+
+        return result, solve_time, price_of_fairness, fairness_effective_improvement, delta_J_lb/ J_0, delta_J_ub/ J_0, delta_J_taylor/ J_0, real_tau
+
+    def predict(self, X):
+        if self.fit_intercept:
+            X = np.hstack((np.ones((X.shape[0], 1)), X))
+        return X @ self.beta
+    
+    def __str__(self): #add_rmse_constraint={self.add_rmse_constraint},
+        return f"GroupDeviationConstrainedLinearRegression(fit_intercept={self.fit_intercept},  percentage_increase={self.percentage_increase}, n_groups={self.n_groups})"
+
 
 
 
