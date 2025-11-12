@@ -207,7 +207,8 @@ from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_sco
 if __name__ == '__main__':
     # --- Configuration ---
     NUM_GROUPS = 3
-    percentages = np.linspace(0, .1, 11)
+    percentages = np.linspace(0, .3, 7)
+    model_name = "logistic"
     # percentages = np.linspace(0, .02, 21)
 
     # --- Data Storage ---
@@ -241,6 +242,7 @@ if __name__ == '__main__':
             l2_lambda=0,
             objective="mse",
             constraint="max_mse",
+            model_name=model_name,
         )
         # Robust version
         # l1_, l2_ = 1e-1, 5e3#1e2*10**(10*rmse_percentage_increase) # 1e-1/10**(10*rmse_percentage_increase), 1e-1*10**(10*rmse_percentage_increase))
@@ -262,8 +264,15 @@ if __name__ == '__main__':
         X_val = scaler.transform(X_val)
         X_test = scaler.transform(X_test)
 
-        y_train_scaled = ( y_train_log - y_train_log.min() ) / ( y_train_log.max() - y_train_log.min() )
-
+        # Target transformation for a given model
+        if model_name == "linear":
+            y_train_scaled = y_train_log
+        elif model_name == "logistic":
+            y_train_scaled = ( y_train_log - y_train_log.min() ) / ( y_train_log.max() - y_train_log.min() )
+        elif model_name == "poisson":
+            print("y max: ", y_train.max())
+            print("y min: ", y_train.min())
+            y_train_scaled = y_train // 10000
         # Fit model and make predictions
         # result, solve_time, pof, fei, pof_lb, pof_ub, fairness = model.fit(X_train, y_train_log)
         result, solve_time, pof, fei, pof_lb, pof_ub, pof_taylor, fairness = model.fit(X_train, y_train_scaled, y_real_values=y_train_log)

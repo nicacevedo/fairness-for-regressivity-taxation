@@ -742,9 +742,10 @@ class GroupDeviationConstrainedLinearRegression:
 
 class MyLogisticRegression:
 
-    def __init__(self, fit_intercept=True, objective="logistic", l2_lambda=1e-3, solver="GUROBI", solver_verbose=False, eps=1e-4):
+    def __init__(self, fit_intercept=True, objective="logistic", l2_lambda=1e-3, solver="GUROBI", solver_verbose=False, eps=1e-4, model_name="logistic"):
         self.beta = None
         self.fit_intercept = fit_intercept
+        self.model_name = model_name
         # Ooptimization
         self.objective = objective
         self.solver = solver
@@ -769,33 +770,56 @@ class MyLogisticRegression:
         n, m = X.shape      
 
         # Logistic regression optimization
-    
+        # To be used in constraints of CVXPY
+        def get_bregman_divergence_cxpy(X, y, beta, model="logistic", eps=1e-4):
+            theta = X @ beta
+            y_ = y.copy()
+            if model == "linear":
+                eta = y_ 
+                psi = lambda z: z**2/2
+            if model=="logistic": 
+                y_[y > 1-eps] = 1-eps
+                y_[y < eps] = eps 
+                eta = cp.log(y_ / (1-y_)) # explodes in 0 and 1
+                psi = lambda z: cp.logistic(z) #cp.log( 1 + cp.exp(z) )
+            elif model =="poisson":
+                y_[y < eps] = eps
+                eta = cp.log(y_) # explodes in 0
+                psi = lambda z: cp.exp(z)
+            return psi(theta) - psi(eta) - cp.multiply(y_, (theta - eta)) 
+
         # Variables
         beta = cp.Variable(m)
         z = cp.Variable(n)
 
         # Constraints
-        y[y<self.eps] = self.eps
-        y[y>1-self.eps] = 1-self.eps
-        eta = np.log(y / (1-y))
-        constraints = [cp.logistic(X @ beta) - cp.multiply(y, X @ beta) - cp.logistic(np.log(y / (1-y))) +  cp.multiply(y, eta) <= z]  # proves that we can write constraints       
+        # y[y<self.eps] = self.eps
+        # y[y>1-self.eps] = 1-self.eps
+        # eta = np.log(y / (1-y))
+        # constraints = [cp.logistic(X @ beta) - cp.multiply(y, X @ beta) - cp.logistic(np.log(y / (1-y))) +  cp.multiply(y, eta) <= z]  # proves that we can write constraints       
+        constraints = [get_bregman_divergence_cxpy(X, y, beta, model=self.model_name, eps=self.eps) <= z]
 
         # Objective
-        if self.objective == "logistic":
-            if self.l2_lambda != 0:
-                print("Solving with Ridge objective...")
-                obj = cp.Minimize(cp.mean( z ) + self.l2_lambda * cp.quad_form(beta, np.eye(m)))
-            else: 
-                obj = cp.Minimize( cp.mean( z ) )
-        # elif self.objectiv == "mae":
-        #     obj = cp.Minimize(cp.mean(z))
+        # if self.objective == "logistic":
+        if self.l2_lambda != 0:
+            print("Solving with Ridge objective...")
+            obj = cp.Minimize(cp.mean( z ) + self.l2_lambda * cp.quad_form(beta, np.eye(m)))
+        else: 
+            obj = cp.Minimize( cp.mean( z ) )
 
         primal_prob = cp.Problem(obj, constraints)
 
         # Solve the optimization problem
         t0 = time()
         try:
-            result = primal_prob.solve(solver=self.solver, verbose=self.solver_verbose)
+            # solver_params={
+            #     "mosek_params": {
+            #     # 'MSK_DPAR_INTPNT_CO_TOL_REL_FEAS': 1e-4,  # Primal feasibility tolerance
+            #     # 'MSK_DPAR_INTPNT_CO_TOL_REL_FEAS': 1e-4,  # Dual feasibility tolerance
+            #     'MSK_DPAR_INTPNT_CO_TOL_REL_GAP': 1e-6, # Relative duality gap tolerance
+            #     }
+            # }
+            result = primal_prob.solve(solver=self.solver, verbose=self.solver_verbose)#, **solver_params)
         except cp.error.SolverError:
             print(f"{self.solver} not available, trying default solver.")
             result = primal_prob.solve(verbose=self.solver_verbose)
@@ -830,45 +854,13 @@ def get_group_bins_indices(y, n_groups=3):
         bin_indices_list.append(bin_indices)
     return bin_indices_list
 
-def bregman_divergence(X, y, beta, model="logistic", eps=1e-4):
-    theta = X @ beta
-    y_ = y.copy()
-    if model=="logistic":
-        # y+= eps*((y < eps) - (y > 1-eps))
-        y_[y > 1-eps] = 1-eps
-        y_[y < eps] = eps 
-        eta = np.log(y_ / (1-y_))
-        b_d = np.mean( np.log( 1 + np.exp(theta) ) - y_ * theta - np.log(1+ np.exp(eta)) + y_ * eta )
-    elif model=="linear":
-        pass
-    elif model =="poisson":
-        pass 
-    return b_d
-
-# def cvxpy_bregman_divergence(X, y, beta, model="logistic", eps=1e-4):
-#     theta = X @ beta
-#     y_ = y.copy()
-#     if model=="logistic":
-#         y_[y > 1-eps] = 1-eps
-#         y_[y < eps] = eps 
-#         eta = np.log(y_ / (1-y_))
-#         b_d = cp.mean( cp.logistic(theta) - cp.multiply(y_, theta) - cp.logistic(eta) +  cp.multiply(y_, eta) )
-#     elif model=="linear":
-#         pass
-#     elif model =="poisson":
-#         pass 
-#     return b_d.value     
-
-
-
-
 class GroupDeviationConstrainedLogisticRegression:
     #  add_rmse_constraint=False,
-    def __init__(self, fit_intercept=True, percentage_increase=0.00, n_groups=3, solver="GUROBI", max_row_norm_scaling=1, objective="mse", constraint="max_mse", l2_lambda=1e-3, eps=1e-4, model="logistic"):
+    def __init__(self, fit_intercept=True, percentage_increase=0.00, n_groups=3, solver="GUROBI", max_row_norm_scaling=1, objective="mse", constraint="max_mse", l2_lambda=1e-3, eps=1e-4, model_name="logistic"):
         self.beta = None
         self.fit_intercept = fit_intercept
         self.percentage_increase = percentage_increase
-        self.model=model
+        self.model_name=model_name
         # Ooptimization
         self.objective = objective # mae / mse
         self.constraint = constraint # max_mae / max_mse / max_mae_diff / max_mse_diff
@@ -897,53 +889,123 @@ class GroupDeviationConstrainedLogisticRegression:
         n, m = X.shape
 
         # Compute original solution (J_0)
-        # if self.objective == "mse" and self.l2_lambda == 0:
-        if self.model == "logistic":
-            model = MyLogisticRegression(fit_intercept=False, l2_lambda=self.l2_lambda, solver=self.solver)#LogisticRegression(fit_intercept=False, penalty=None, max_iter=500)
-        elif self.objective == "mse":
-            # model = Ridge(fit_intercept=False, alpha=self.l2_lambda/n)
-            raise("NO REGULARIZED VERSION")
-        elif self.objective == "mae":
-            raise("NO MAE VERSION")
-            # model = LeastAbsoluteDeviationRegression(fit_intercept=False)
-        model.fit(X, y)
+        # if self.model_name != "linar":
+        glm = MyLogisticRegression(fit_intercept=False, model_name=self.model_name, l2_lambda=self.l2_lambda, solver=self.solver)#LogisticRegression(fit_intercept=False, penalty=None, max_iter=500)
+        glm.fit(X, y)
+        # else:
+        #     beta_0 = np.linalg.pinv(X.T @ X) @ (X.T @ y)
+
+        # glm = LinearRegression(fit_intercept=False)
+        #     # glm = Ridge(fit_intercept=False, alpha=self.l2_lambda/n)
+        #     # raise("NO REGULARIZED VERSION")
+        # elif self.model_name == "poisson":
+        #     pass
+        # elif self.objective == "mae":
+        #     raise("NO MAE VERSION")
+            # glm = LeastAbsoluteDeviationRegression(fit_intercept=False)
+        
         # if self.objective == "mse":
 
+        def get_psi_derivatives(X, beta, model="linear"):
+            "Returns the approximation of y: phi'(X beta)"
+            theta = X @ beta
+            if model == "linear":
+                return theta, np.ones(X.shape[0], dtype=int)
+            elif model == "logistic":
+                psi_tilda = np.exp(theta) / ( 1 + np.exp(theta) )
+                return psi_tilda, psi_tilda / ( 1 + np.exp(theta) )
+            elif model == "poisson":
+                psi_tilda = np.exp(theta)
+                return psi_tilda, psi_tilda
+            else:
+                raise Exception(f"No model model named: {model}!!")
+        
+        def get_bregman_divergence_value(X, y, beta, model="logistic", eps=1e-4):
+            theta = X @ beta
+            y_ = y.copy()
+            if model == "linear":
+                eta = y_ 
+                psi = lambda z: z**2/2
+            if model=="logistic": 
+                y_[y > 1-eps] = 1-eps
+                y_[y < eps] = eps 
+                eta = np.log(y_ / (1-y_)) # explodes in 0 and 1
+                psi = lambda z: np.log(1+np.exp(z)) 
+            elif model =="poisson":
+                y_[y < eps] = eps
+                eta = np.log(y_) # explodes in 0
+                psi = lambda z: np.exp(z)
+            return np.mean( psi(theta) - psi(eta) - np.multiply(y_, (theta - eta)) )
+        
+        def get_loss_value(X, y, beta, model="linear"):
+            theta = X @ beta
+            if model == "linear":
+                psi = theta ** 2 / 2 
+            elif model == "logistic":
+                psi = np.log( 1 + np.exp(theta) )
+            elif model == "poisson":
+                psi = np.exp(theta)
+            else:
+                raise Exception(f"No model named {model}!!")
+            return np.mean(psi - y * theta)
+
         # Unconstrained problem utils
-        beta_0 = model.coef_
-        J_0 =  model.train_loss # J_0: logit loss
-        w_0 = np.exp(X @ beta_0) / ( 1 + np.exp(X @ beta_0) )
-        a_0 = (1/n) * X.T @ (w_0 - y)
-        H_0 = (1/n) * X.T @ np.diag(w_0 / (1 + np.exp(X @ beta_0))) @ X
+        beta_0 = glm.coef_
+        # J_0 =  glm.train_loss # J_0: logit loss
+        J_0 = get_bregman_divergence_value(X, y, beta_0, model=self.model_name, eps=self.eps) 
+        w_0, w_0_2 = get_psi_derivatives(X, beta_0, model=self.model_name)
+        # w_0 = np.exp(X @ beta_0) / ( 1 + np.exp(X @ beta_0) )
+        a_0 = (1/n) * X.T @ (w_0 - y) # gradient of J_0
+        H_0 = (1/n) * X.T @ np.diag(w_0_2) @ X # Hessian of J_0
         # H_0 = np.mean( [ np.exp(X[i,:] @ beta_0) / ( 1 + np.exp(X[i,:] @ beta_0) )**2 * np.outer(X[i,:],  X[i,:]) for i in range(n) ], axis=0 ) 
         H_0_inv = np.linalg.pinv(H_0)
-        M_psi = 1 # for logistic
+        M_psi = 1 if self.model_name != "linear" else 0# for logistic
+
+        print("Predicted y's: ", np.exp(X @ beta_0)[:10]/(1+np.exp(X @ beta_0)[:10]))
+        print("The real  y's: ", y[:10])
 
         # Fairness constraints utils
         bin_indices_list = get_group_bins_indices(y_real_values, n_groups=self.n_groups)
-        tau = 0 # Compute the max diference of 0
-        loss_0 = np.mean( np.log( 1 + np.exp(X @ beta_0) ) - y * (X @ beta_0) )
+        tau = 0 # Compute the max diference of the unconstrained problem
+        loss_0 = get_loss_value(X, y, beta_0, model=self.model_name)#j_0#np.mean( np.log( 1 + np.exp(X @ beta_0) ) - y * (X @ beta_0) )
         print("loss_0: ", loss_0)
-        b_d = bregman_divergence(X, y, beta_0, model="logistic", eps=self.eps)
+        b_d = get_bregman_divergence_value(X, y, beta_0, model=self.model_name, eps=self.eps)
         print("Bregman divergence 0: ", b_d)
         for g in range(self.n_groups):
             print("Group: ", g, len(bin_indices_list[g]))
             X_g , y_g = X[bin_indices_list[g], :], y[bin_indices_list[g]]
-            theta_0 = X_g @ beta_0
-            loss_g = np.mean( np.log( 1 + np.exp(theta_0) ) - y_g * theta_0 )
-            print("loss_g: ", loss_g)
+            # theta_0_g = X_g @ beta_0
+            loss_0_g = get_loss_value(X_g, y_g, beta_0, model=self.model_name) #np.mean( np.log( 1 + np.exp(theta_0_g) ) - y_g * theta_0_g )
+            print("loss_0_g: ", loss_0_g)
 
             # bregman
-            b_d = bregman_divergence(X_g, y_g, beta_0, model="logistic", eps=self.eps)
-            print("Bregman divergence g: ", b_d)
-                # if loss_g > tau:
-                #     tau = loss_g
+            b_d = get_bregman_divergence_value(X_g, y_g, beta_0, model=self.model_name, eps=self.eps)
+            print("Bregman divergence_0_g: ", b_d)
+            # print("Bregman 0_g OLS: ", get_bregman_divergence_value(X_g, y_g, beta_ols, model=self.model_name, eps=self.eps))
+            # print("MSE/2 0_g: ", root_mean_squared_error(y_g, X_g @ beta_ols)**2/2)
             if b_d > tau:
                 tau = b_d
         tau_bound = tau * (1-self.percentage_increase)
-        print("tau", tau)
-        print("bound: ", tau_bound)
+        print("tau 0: ", tau)
+        print("fair tau bound: ", tau_bound)
 
+        # To be used in constraints of CVXPY
+        def get_bregman_divergence_cxpy(X, y, beta, model="logistic", eps=1e-4):
+            theta = X @ beta
+            y_ = y.copy()
+            if model == "linear":
+                eta = y_ 
+                psi = lambda z: z**2/2
+            if model=="logistic": 
+                y_[y > 1-eps] = 1-eps
+                y_[y < eps] = eps 
+                eta = cp.log(y_ / (1-y_)) # explodes in 0 and 1
+                psi = lambda z: cp.logistic(z) #cp.log( 1 + cp.exp(z) )
+            elif model =="poisson":
+                y_[y < eps] = eps
+                eta = cp.log(y_) # explodes in 0
+                psi = lambda z: cp.exp(z)
+            return psi(theta) - psi(eta) - cp.multiply(y_, (theta - eta)) 
 
         # Variable
         beta = cp.Variable(m)
@@ -952,14 +1014,17 @@ class GroupDeviationConstrainedLogisticRegression:
 
         # Constraints
         constraints = [
-            cp.logistic(X @ beta) - cp.multiply(y, X @ beta) - cp.logistic(np.log(y / (1-y))) +  cp.multiply(y, np.log(y / (1-y))) <= z
+            # cp.logistic(X @ beta) - cp.multiply(y, X @ beta) - cp.logistic(np.log(y / (1-y))) +  cp.multiply(y, np.log(y / (1-y))) <= z
+            get_bregman_divergence_cxpy(X, y, beta, model=self.model_name, eps=self.eps) <= z
         ]
 
-        y[y<self.eps] = self.eps
-        y[y>1-self.eps] = 1-self.eps
+        # y[y<self.eps] = self.eps
+        # y[y>1-self.eps] = 1-self.eps
         constraints+=[  # Fairness constraint
-            cp.mean( cp.logistic(X[ind_g, :] @ beta) - cp.multiply(y[ind_g], X[ind_g, :] @ beta) - cp.logistic(np.log(y[ind_g] / (1-y[ind_g]))) +  cp.multiply(y[ind_g], np.log(y[ind_g] / (1-y[ind_g]))) ) <= tau_bound for ind_g in bin_indices_list
-            # cp.mean( cp.logistic(X[ind_g, :] @ beta) - cp.multiply(y[ind_g], X[ind_g, :] @ beta) ) <= u for ind_g in bin_indices_list
+            # cp.mean( cp.logistic(X[idx_g, :] @ beta) - cp.multiply(y[idx_g], X[idx_g, :] @ beta) - cp.logistic(np.log(y[idx_g] / (1-y[idx_g]))) +  cp.multiply(y[idx_g], np.log(y[idx_g] / (1-y[idx_g]))) ) <= tau_bound for idx_g in bin_indices_list
+            cp.mean( get_bregman_divergence_cxpy(X[idx_g, :], y[idx_g], beta, model=self.model_name, eps=self.eps) ) <= tau_bound for idx_g in bin_indices_list
+
+            # cp.mean( cp.logistic(X[idx_g, :] @ beta) - cp.multiply(y[idx_g], X[idx_g, :] @ beta) ) <= u for idx_g in bin_indices_list
         ]
   
         # Objective
@@ -996,22 +1061,21 @@ class GroupDeviationConstrainedLogisticRegression:
 
         # Approximating the F function
         real_tau, real_tau_g = 0, -1
-        b_d = bregman_divergence(X, y, beta.value, model="logistic", eps=self.eps)
-        print("Bregman divergence 0: ", b_d)
+
+        b_d = get_bregman_divergence_value(X, y, beta.value, model=self.model_name, eps=self.eps)
+        print("New (F) Bregman divergence 0: ", b_d)
+        # print("Direct Taylor of MSE / 2: ", (beta.value - beta_0).T @ H_0 @ (beta.value - beta_0) / 2)
         for g, ind_g in enumerate(bin_indices_list):
             X_g, y_g = X[ind_g, :], y[ind_g]
-            theta_g = X_g @ beta
-            error_g = cp.mean( cp.logistic(theta_g) - cp.multiply(y[ind_g], theta_g) ).value
-            print("Group loss: ", g, error_g)
-            approx_error_g = np.mean( np.abs( np.exp(theta_g.value)/(1 + np.exp(theta_g.value)) - y_g ) ) 
-            print("Approx error: ", g, approx_error_g)
-            b_divergence_g = bregman_divergence(X_g, y_g, beta.value, model="logistic", eps=self.eps)#np.mean( np.log( 1 + np.exp(theta_g) ) - y_g * theta_g - (np.log(1+ np.exp(eta_y_g)) - y_g * eta_y_g) )
-            print("Bregman divergence g: ", g, b_divergence_g)
-            # if error_g > real_tau:
-            #     real_tau = error_g
-            #     real_tau_g = g
-            if b_divergence_g > real_tau:
-                real_tau = b_divergence_g
+            print("Group: ", g, len(ind_g))
+            loss_g = get_loss_value(X_g, y_g, beta.value, model=self.model_name)#cp.mean( cp.logistic(theta_g) - cp.multiply(y[ind_g], theta_g) ).value
+            print("New (F) group loss g: ", g, loss_g)
+            # approx_error_g = np.mean( np.abs( np.exp(theta_g.value)/(1 + np.exp(theta_g.value)) - y_g ) ) 
+            # print("Approx error: ", g, approx_error_g)
+            b_d = get_bregman_divergence_value(X_g, y_g, beta.value, model=self.model_name, eps=self.eps)#np.mean( np.log( 1 + np.exp(theta_g) ) - y_g * theta_g - (np.log(1+ np.exp(eta_y_g)) - y_g * eta_y_g) )
+            print("New (F) Bregman divergence g: ", g, b_d)
+            if b_d >= real_tau:
+                real_tau = b_d
                 real_tau_g = g            
 
         # Fairness improvement approximation and bounds
@@ -1024,10 +1088,11 @@ class GroupDeviationConstrainedLogisticRegression:
             n_g, X_g, y_g = len(indices_g), X[indices_g,:], y[indices_g]
 
             # Taylor approximation "bounds" (not secured to be bounds, is just the approximation)
-            w_0_g = np.exp(X_g @ beta_0) / ( 1 + np.exp(X_g @ beta_0) )
+            w_0_g, w_0_2_g = get_psi_derivatives(X_g, beta_0, model=self.model_name)
+            # w_0_g = np.exp(X_g @ beta_0) / ( 1 + np.exp(X_g @ beta_0) )
             a_0_g = (1/n_g) * X_g.T @ (w_0_g - y_g )
             # a_0_g_ = np.mean(X_g.T * (w_0_g - y_g ), axis=1)# gradient of the single J_g in b_0
-            H_0_g = (1/n_g) * X_g.T @ np.diag(w_0_g / ( 1 + np.exp(X_g @ beta_0) )) @ X_g
+            H_0_g = (1/n_g) * X_g.T @ np.diag(w_0_2_g) @ X_g
             # H_0_g_ = np.mean( [ np.exp(X[i,:] @ beta_0) / ( 1 + np.exp(X[i,:] @ beta_0) )**2 * np.outer(X[i,:],  X[i,:]) for i in indices_g ], axis=0 )
             H_0_g_inv = np.linalg.pinv(H_0_g)
 
@@ -1037,22 +1102,28 @@ class GroupDeviationConstrainedLogisticRegression:
             d_H_0_inv_norm = (fairness_improvement)**2 / A_0 # norm H_0_inv of Delta beta* (final form of the term)
 
             # Taloy Approximation Bounds setting t=1, and d:=Delta beta*
-            M_phi = M_psi * np.max(np.abs( X @ d )) # Option 2 w./ Cauchy Schwarz (looser): M_psi * np.max(np.linalg.norm(X, axis=1))*np.linalg.norm(d)
-            C_phi_LB = (np.exp(-M_phi) + M_phi - 1) / M_phi**2  # t = 1
-            C_phi_UB = (np.exp( M_phi) - M_phi - 1) / M_phi**2  # t = 1
+            if M_psi > 0:
+                M_phi = M_psi * np.max(np.abs( X @ d )) # Option 2 w./ Cauchy Schwarz (looser): M_psi * np.max(np.linalg.norm(X, axis=1))*np.linalg.norm(d)
+                C_phi_LB = (np.exp(-M_phi) + M_phi - 1) / M_phi**2  # t = 1
+                C_phi_UB = (np.exp( M_phi) - M_phi - 1) / M_phi**2  # t = 1
+            else:
+                M_phi, C_phi_LB, C_phi_UB = 0, .5, .5 # limit values
             delta_J_taylor = (1/2) * d_H_0_inv_norm
             delta_J_taylor_lb = C_phi_LB * d_H_0_inv_norm  # Lower bound
             delta_J_taylor_ub = C_phi_UB * d_H_0_inv_norm  # Lower bound
 
-            print(fr"POF J % Taylor    (mse-max_mse): ", delta_J_taylor    / J_0)
-            print(fr"POF J % Taylor LB (mse-max_mse): ", delta_J_taylor_lb / J_0)
-            print(fr"POF J % Taylor UB (mse-max_mse): ", delta_J_taylor_ub / J_0)
+            # print(fr"POF J % Taylor    (mse-max_mse): ", delta_J_taylor    / J_0)
+            print(fr"POF J % linear-contrained LB (mse-max_mse): ", delta_J_taylor_lb / J_0)
+            # print(fr"POF J % Taylor UB (mse-max_mse): ", delta_J_taylor_ub / J_0)
             
             # 2) The proper Lower Bound bound with Newton Raphson/Bijection/Opt (1 dimension)
             # d := Delta beta*
-            M_phi_g = M_psi * np.max(np.abs( X_g @ d ))
-            C_phi_LB_g = (np.exp(-M_phi_g) + M_phi_g - 1) / M_phi_g**2  # t = 1
-            C_phi_UB_g = (np.exp( M_phi_g) - M_phi_g - 1) / M_phi_g**2  # t = 1
+            if M_psi > 0:
+                M_phi_g = M_psi * np.max(np.abs( X_g @ d ))
+                C_phi_LB_g = (np.exp(-M_phi_g) + M_phi_g - 1) / M_phi_g**2  # t = 1
+                C_phi_UB_g = (np.exp( M_phi_g) - M_phi_g - 1) / M_phi_g**2  # t = 1
+            else:
+                M_phi_g, C_phi_LB_g, C_phi_UB_g = 0, .5, .5 # limit values
             print("-"*100)
             print("M_phi: ", M_phi_g)
             print("M_phi_g: ", M_phi)
@@ -1074,9 +1145,13 @@ class GroupDeviationConstrainedLogisticRegression:
             print("-"*100)
             print("tau_bound - tau: ", tau_bound - tau)
             print("-"*100)
-            constraints=[t_LB * (a_0_g @ d) + d_H_0_norm_g * (cp.exp(-M_phi_g*t_LB) + t_LB * M_phi_g - 1 ) / M_phi_g**2  <= tau_bound - tau] #-self.percentage_increase]
+            if M_psi > 0:
+                constraints=[t_LB * (a_0_g @ d) + d_H_0_norm_g * ( cp.exp(-M_phi_g*t_LB) + t_LB * M_phi_g - 1 ) / M_phi_g**2  <= tau_bound - tau] #-self.percentage_increase]
+                obj = cp.Minimize( d_H_0_inv_norm * (cp.exp(-M_phi*t_LB) + t_LB * M_phi - 1 ) / M_phi**2 )
+            else: 
+                constraints=[t_LB * (a_0_g @ d) + t_LB ** 2 * d_H_0_norm_g / 2  <= tau_bound - tau]
+                obj = cp.Minimize(t_LB **2 * d_H_0_inv_norm / 2 )
             # Objective 
-            obj = cp.Minimize( d_H_0_inv_norm * (cp.exp(-M_phi*t_LB) + t_LB * M_phi - 1 ) / M_phi**2 )
             primal_prob = cp.Problem(obj, constraints)
             # Solve the roots
             t0 = time()
@@ -1094,10 +1169,17 @@ class GroupDeviationConstrainedLogisticRegression:
             # s.t. t*(a_0_g * Delta beta*) + d_H_0_norm_g * C_phi_UB_g(t) <= -delta (Delta F)
             # Variable
             t_UB = cp.Variable(1, nonneg=True)
-            # Constraint
-            constraints=[t_UB * (a_0_g @ d) + d_H_0_norm_g * (cp.exp(M_phi_g*t_UB) - t_UB * M_phi_g - 1 ) / M_phi_g**2  <= tau_bound - tau] #-self.percentage_increase]
-            # Objective 
-            obj = cp.Minimize( d_H_0_inv_norm * (cp.exp(M_phi*t_UB) - t_UB * M_phi - 1 ) / M_phi**2 )
+            if M_psi > 0:
+                # Constraint
+                constraints=[t_UB * (a_0_g @ d) + d_H_0_norm_g * ( cp.exp(M_phi_g*t_UB) - t_UB * M_phi_g - 1 ) / M_phi_g**2  <= tau_bound - tau] #-self.percentage_increase]
+                # Objective 
+                obj = cp.Minimize( d_H_0_inv_norm * (cp.exp(M_phi*t_UB) - t_UB * M_phi - 1 ) / M_phi**2 )
+            else:
+                # Constraint
+                constraints=[t_UB * (a_0_g @ d) +  t_UB **2 * d_H_0_norm_g / 2  <= tau_bound - tau] #-self.percentage_increase]
+                # Objective 
+                obj = cp.Minimize( t_UB **2 * d_H_0_inv_norm / 2 )
+
             primal_prob = cp.Problem(obj, constraints)
             # Solve the roots
             t0 = time()
