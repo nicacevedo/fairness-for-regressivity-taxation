@@ -740,14 +740,14 @@ class GroupDeviationConstrainedLinearRegression:
         return f"GroupDeviationConstrainedLinearRegression(fit_intercept={self.fit_intercept},  percentage_increase={self.percentage_increase}, n_groups={self.n_groups})"
 
 
-class MyLogisticRegression:
+class MyGLMRegression:
 
-    def __init__(self, fit_intercept=True, objective="logistic", l2_lambda=1e-3, solver="GUROBI", solver_verbose=False, eps=1e-4, model_name="logistic"):
+    def __init__(self, fit_intercept=True, l2_lambda=1e-3, solver="GUROBI", solver_verbose=False, eps=1e-4, model_name="logistic"):
         self.beta = None
         self.fit_intercept = fit_intercept
         self.model_name = model_name
         # Ooptimization
-        self.objective = objective
+        # self.objective = objective ||  objective="logistic",
         self.solver = solver
         self.solver_verbose = solver_verbose
         self.l2_lambda = l2_lambda
@@ -777,7 +777,7 @@ class MyLogisticRegression:
             if model == "linear":
                 eta = y_ 
                 psi = lambda z: z**2/2
-            if model=="logistic": 
+            elif model=="logistic": 
                 y_[y > 1-eps] = 1-eps
                 y_[y < eps] = eps 
                 eta = cp.log(y_ / (1-y_)) # explodes in 0 and 1
@@ -786,24 +786,27 @@ class MyLogisticRegression:
                 y_[y < eps] = eps
                 eta = cp.log(y_) # explodes in 0
                 psi = lambda z: cp.exp(z)
-            return psi(theta) - psi(eta) - cp.multiply(y_, (theta - eta)) 
+            elif model == "svm": # Smoothing of hinge: max(0, 1-x)
+                eta = y_ # psi(1)=0 (the proper label)
+                psi = lambda z: cp.pos(1 - cp.multiply(y_, z))
+            psi_tilda_inv_y = y_ if model != "svm" else 0 # g = 0 (subgradient=0 always valid for svm)
+            return psi(theta) - psi(eta) - cp.multiply(psi_tilda_inv_y, (theta - eta)) 
 
         # Variables
         beta = cp.Variable(m)
         z = cp.Variable(n)
 
         # Constraints
-        # y[y<self.eps] = self.eps
-        # y[y>1-self.eps] = 1-self.eps
-        # eta = np.log(y / (1-y))
         # constraints = [cp.logistic(X @ beta) - cp.multiply(y, X @ beta) - cp.logistic(np.log(y / (1-y))) +  cp.multiply(y, eta) <= z]  # proves that we can write constraints       
         constraints = [get_bregman_divergence_cxpy(X, y, beta, model=self.model_name, eps=self.eps) <= z]
 
         # Objective
-        # if self.objective == "logistic":
         if self.l2_lambda != 0:
             print("Solving with Ridge objective...")
-            obj = cp.Minimize(cp.mean( z ) + self.l2_lambda * cp.quad_form(beta, np.eye(m)))
+            if self.model_name != "svm":
+                obj = cp.Minimize(cp.mean( z ) + self.l2_lambda * cp.quad_form(beta, np.eye(m)))
+            else: # svm: beta = [w, b]
+                obj = cp.Minimize(cp.mean( z ) + self.l2_lambda * cp.quad_form(beta[1:], np.eye(m-1))) 
         else: 
             obj = cp.Minimize( cp.mean( z ) )
 
@@ -835,11 +838,19 @@ class MyLogisticRegression:
     def predict(self, X):
         if self.fit_intercept:
             X = np.hstack((np.ones((X.shape[0], 1)), X))
-        exp_term = np.exp(X @ self.coef_)
-        return exp_term / ( 1 + exp_term )
+        theta = X @ self.coef_
+        if self.model_name == "linear":
+            y_hat = theta
+        elif self.model_name == "logistic":
+            y_hat = np.exp(theta) / (1 + np.exp(theta))
+        elif self.model_name == "poisson":
+            y_hat = np.exp(theta)
+        elif self.model_name == "svm":
+            y_hat = np.sign(theta)
+        return y_hat
     
     def __str__(self): 
-        return f"MyLogisticRegression(fit_intercept={self.fit_intercept}, l2_lambda={self.l2_lambda})"
+        return f"MyGLMRegression(fit_intercept={self.fit_intercept}, l2_lambda={self.l2_lambda})"
 
 
 
@@ -890,7 +901,7 @@ class GroupDeviationConstrainedLogisticRegression:
 
         # Compute original solution (J_0)
         # if self.model_name != "linar":
-        glm = MyLogisticRegression(fit_intercept=False, model_name=self.model_name, l2_lambda=self.l2_lambda, solver=self.solver)#LogisticRegression(fit_intercept=False, penalty=None, max_iter=500)
+        glm = MyGLMRegression(fit_intercept=False, model_name=self.model_name, l2_lambda=self.l2_lambda, solver=self.solver)#LogisticRegression(fit_intercept=False, penalty=None, max_iter=500)
         glm.fit(X, y)
         # else:
         #     beta_0 = np.linalg.pinv(X.T @ X) @ (X.T @ y)
@@ -906,7 +917,7 @@ class GroupDeviationConstrainedLogisticRegression:
         
         # if self.objective == "mse":
 
-        def get_psi_derivatives(X, beta, model="linear"):
+        def get_psi_derivatives(X, y, beta, model="linear", gamma=1e-4):
             "Returns the approximation of y: phi'(X beta)"
             theta = X @ beta
             if model == "linear":
@@ -917,10 +928,14 @@ class GroupDeviationConstrainedLogisticRegression:
             elif model == "poisson":
                 psi_tilda = np.exp(theta)
                 return psi_tilda, psi_tilda
+            elif model == "svm":
+                # This if for the bounds, so it is not the real hing, but the smooth approximation.
+                psi_tilda = np.exp((1-y*theta) / gamma) / ( 1 + np.exp((1-y*theta) / gamma) )
+                return -y * psi_tilda, (1/gamma) * psi_tilda / ( 1 + np.exp((1-y*theta) / gamma) )
             else:
                 raise Exception(f"No model model named: {model}!!")
         
-        def get_bregman_divergence_value(X, y, beta, model="logistic", eps=1e-4):
+        def get_bregman_divergence_value(X, y, beta, model="linear", eps=1e-4):
             theta = X @ beta
             y_ = y.copy()
             if model == "linear":
@@ -935,7 +950,11 @@ class GroupDeviationConstrainedLogisticRegression:
                 y_[y < eps] = eps
                 eta = np.log(y_) # explodes in 0
                 psi = lambda z: np.exp(z)
-            return np.mean( psi(theta) - psi(eta) - np.multiply(y_, (theta - eta)) )
+            elif model == "svm":
+                eta = y_ # psi(1)=0 (the proper label)
+                psi = lambda z: cp.pos(1 - np.multiply(y_, z)).value
+            psi_tilda_inv_y = y_ if model != "svm" else 0 # g = 0 (subgradient=0 always valid for svm)
+            return np.mean( psi(theta) - psi(eta) - np.multiply(psi_tilda_inv_y, (theta - eta)) )
         
         def get_loss_value(X, y, beta, model="linear"):
             theta = X @ beta
@@ -945,23 +964,26 @@ class GroupDeviationConstrainedLogisticRegression:
                 psi = np.log( 1 + np.exp(theta) )
             elif model == "poisson":
                 psi = np.exp(theta)
+            elif model == "svm":
+                psi = cp.pos(1 - np.multiply(y, theta)).value
             else:
                 raise Exception(f"No model named {model}!!")
-            return np.mean(psi - y * theta)
+            second_term = y * theta if model != "svm" else 0
+            return np.mean(psi - second_term)
 
         # Unconstrained problem utils
         beta_0 = glm.coef_
         # J_0 =  glm.train_loss # J_0: logit loss
         J_0 = get_bregman_divergence_value(X, y, beta_0, model=self.model_name, eps=self.eps) 
-        w_0, w_0_2 = get_psi_derivatives(X, beta_0, model=self.model_name)
+        w_0, w_0_2 = get_psi_derivatives(X, y, beta_0, model=self.model_name, gamma=self.eps)
         # w_0 = np.exp(X @ beta_0) / ( 1 + np.exp(X @ beta_0) )
-        a_0 = (1/n) * X.T @ (w_0 - y) # gradient of J_0
+        a_0 = (1/n) * X.T @ (w_0 - y) if self.model_name != "svm" else (1/n) * X.T @ w_0 # gradient of J_0
         H_0 = (1/n) * X.T @ np.diag(w_0_2) @ X # Hessian of J_0
         # H_0 = np.mean( [ np.exp(X[i,:] @ beta_0) / ( 1 + np.exp(X[i,:] @ beta_0) )**2 * np.outer(X[i,:],  X[i,:]) for i in range(n) ], axis=0 ) 
         H_0_inv = np.linalg.pinv(H_0)
-        M_psi = 1 if self.model_name != "linear" else 0# for logistic
+        M_psi = 1 if self.model_name != "linear" else 0# for logistic (I think for SVM we maintain the 1)
 
-        print("Predicted y's: ", np.exp(X @ beta_0)[:10]/(1+np.exp(X @ beta_0)[:10]))
+        print("Predicted y's: ", glm.predict(X[:10,:]))
         print("The real  y's: ", y[:10])
 
         # Fairness constraints utils
@@ -1078,7 +1100,7 @@ class GroupDeviationConstrainedLogisticRegression:
                 real_tau = b_d
                 real_tau_g = g            
 
-        # Fairness improvement approximation and bounds
+        # 1) Fairness improvement approximation and bounds
         fairness_improvement = np.abs(real_tau - tau)
         delta_fairness = self.percentage_increase*tau # tau - real_tau
         # virtual_fairness_improvement = np.abs(tau * (1 - self.percentage_increase) - tau)
@@ -1088,7 +1110,7 @@ class GroupDeviationConstrainedLogisticRegression:
             n_g, X_g, y_g = len(indices_g), X[indices_g,:], y[indices_g]
 
             # Taylor approximation "bounds" (not secured to be bounds, is just the approximation)
-            w_0_g, w_0_2_g = get_psi_derivatives(X_g, beta_0, model=self.model_name)
+            w_0_g, w_0_2_g = get_psi_derivatives(X_g, y_g, beta_0, model=self.model_name)
             # w_0_g = np.exp(X_g @ beta_0) / ( 1 + np.exp(X_g @ beta_0) )
             a_0_g = (1/n_g) * X_g.T @ (w_0_g - y_g )
             # a_0_g_ = np.mean(X_g.T * (w_0_g - y_g ), axis=1)# gradient of the single J_g in b_0
@@ -1101,6 +1123,11 @@ class GroupDeviationConstrainedLogisticRegression:
             d = -(fairness_improvement) * H_0_inv @ a_0_g / A_0 # Delta beta*
             d_H_0_inv_norm = (fairness_improvement)**2 / A_0 # norm H_0_inv of Delta beta* (final form of the term)
 
+            # Hessian of J_g
+            # norm of beta* with H_0_g (second-order subdifferential of F(beta_0))
+            # A_0_g = a_0_g .T @ H_0_inv_g @ a_0_g 
+            d_H_0_norm_g = d.T @ H_0_g @ d  # norm H_0_inv of Delta beta* (Computed directly with beta* instead of the previous one)
+
             # Taloy Approximation Bounds setting t=1, and d:=Delta beta*
             if M_psi > 0:
                 M_phi = M_psi * np.max(np.abs( X @ d )) # Option 2 w./ Cauchy Schwarz (looser): M_psi * np.max(np.linalg.norm(X, axis=1))*np.linalg.norm(d)
@@ -1112,9 +1139,65 @@ class GroupDeviationConstrainedLogisticRegression:
             delta_J_taylor_lb = C_phi_LB * d_H_0_inv_norm  # Lower bound
             delta_J_taylor_ub = C_phi_UB * d_H_0_inv_norm  # Lower bound
 
-            # print(fr"POF J % Taylor    (mse-max_mse): ", delta_J_taylor    / J_0)
-            print(fr"POF J % linear-contrained LB (mse-max_mse): ", delta_J_taylor_lb / J_0)
+            print(fr"POF J % Taylor (lin-const + taylor obj.): ", delta_J_taylor / J_0)
+            print(fr"POF J % LB (lin-const + exp term.): ", delta_J_taylor_lb / J_0)
             # print(fr"POF J % Taylor UB (mse-max_mse): ", delta_J_taylor_ub / J_0)
+
+            # Lin. + quad UB construction (model-dependent). 
+            if self.model_name == "linear":
+                # Taylor constraint: t(a_0_g ' d) + t^2/2 ||d||_{H_0_g}^2 <= -delta
+                a, b, c = d_H_0_norm_g / 2, -fairness_improvement, fairness_improvement
+                t_UB_1, t_UB_2 = (-b  - np.sqrt(b**2 - 4*a*c )) / (2*a), (-b  + np.sqrt(b**2 - 4*a*c )) / (2*a)
+                print("Roots for t UB: ", (t_UB_1, t_UB_2))
+                t_UB = min(max(t_UB_1,0), max(t_UB_2,0))
+                delta_J_taylor_ub = (t_UB**2/2) * d_H_0_inv_norm
+                print(fr"POF J % UB (taylor (const. + obj.): ", delta_J_taylor_ub / J_0)
+            elif self.model_name == "logistic":
+                # Quadratic is UB with 1/4 of psi''
+                H_0_ub = (1/n)/4 * X.T @ X
+                H_0_g_ub = (1/n_g)/4 * X_g.T @ X_g
+                d_H_0_norm_ub = d.T @ H_0_ub @ d
+                d_H_0_norm_g_ub = d.T @ H_0_g_ub @ d
+
+                a, b, c = d_H_0_norm_g_ub / 2, -fairness_improvement, fairness_improvement
+                t_UB_1, t_UB_2 = (-b  - np.sqrt(b**2 - 4*a*c )) / (2*a), (-b  + np.sqrt(b**2 - 4*a*c )) / (2*a)
+                print("Roots for t UB: ", (t_UB_1, t_UB_2))
+                t_UB = min(max(t_UB_1,0), max(t_UB_2,0))
+                # Future Note: constant can be either from exponential or from upper 
+                delta_J_taylor_ub = (t_UB**2/2) * d_H_0_norm_ub
+                print(fr"POF J % UB (taylor (const. + obj.): ", delta_J_taylor_ub / J_0)
+            elif self.model_name == "poisson":
+                delta_J_taylor_ub = np.zeros(delta_J_taylor_ub.size)
+                # # Given the experiments, we are setting t\in[0,2] for now
+                # t_ub = 2 # UB
+                # psi_UB = np.exp(X @ (beta_0 + t_ub * d) )
+                # psi_UB_g = np.exp(X_g @ (beta_0 + t_ub * d) ) 
+                # a_0_ub = (1/n) * X.T @ (psi_UB - y )
+                # H_0_ub = (1/n) * X.T @ np.diag(psi_UB) @ X
+                # a_0_ub_g = (1/n_g) * X_g.T @ (psi_UB_g - y_g )
+                # H_0_ub_g = (1/n_g) * X_g.T @ np.diag(psi_UB_g) @ X_g
+                # h = lambda x: cp.quad_form(x, 1)/2 * d.T @ (H_0_ub) @ d
+                # nabla_h = lambda x: x * (H_0_ub) @ d
+                # h_g = lambda x: cp.quad_form(x, 1) / 2 * d.T @ (H_0_ub_g) @ d
+                # nabla_h_g = lambda x: x * (H_0_ub_g) @ d
+
+                # # Variable
+                # t_UB = cp.Variable(1, nonneg=True)
+                # # Constraint
+                # print("-"*100)
+                # print("tau_bound - tau: ", tau_bound - tau)
+                # print("-"*100)
+                # constraints=[t_UB * (a_0_g @ d) + h_g(t_UB) - h_g(0)  <= tau_bound - tau] #-self.percentage_increase]
+                # obj = cp.Minimize( t_UB * (a_0 @ d) + h(t_UB) - h(0) - t_UB * nabla_h(0) @ d )
+                # # Objective 
+                # primal_prob = cp.Problem(obj, constraints)
+                # # delta_J_taylor_ub = t_UB.value * (a_0_g @ d) + h(t_UB) - h(0) 
+                # delta_J_taylor_ub = primal_prob.solve(solver=self.solver, verbose=False)
+
+                # print("-"*50)
+                # print(fr"POF J % UB (taylor (const. + obj.): ", delta_J_taylor_ub / J_0)
+                # print("-"*50)
+                pass # no upper bound for this one(?)
             
             # 2) The proper Lower Bound bound with Newton Raphson/Bijection/Opt (1 dimension)
             # d := Delta beta*
@@ -1131,10 +1214,6 @@ class GroupDeviationConstrainedLogisticRegression:
             print("C_phi_UB_g: ", C_phi_UB_g)
             print("-"*100)
 
-            # Hessian of J_g
-            # norm of beta* with H_0_g (second-order subdifferential of F(beta_0))
-            # A_0_g = a_0_g .T @ H_0_inv_g @ a_0_g 
-            d_H_0_norm_g = d.T @ H_0_g @ d  # norm H_0_inv of Delta beta* (Computed directly with beta* instead of the previous one)
 
             # Roots finder for the LB: Newton Raphson/Bijection/Opt (1 dimension)
             # Min_{t>=0} C_phi_LB(t) * d_H_inv_norm (Delta J)
@@ -1205,7 +1284,7 @@ class GroupDeviationConstrainedLogisticRegression:
             print("Solver did not find an optimal solution. Beta coefficients not set.")
             self.beta = np.zeros(m) # Fallback beta
 
-        return result, solve_time, price_of_fairness, fairness_effective_improvement, delta_J_lb/ J_0, delta_J_ub/ J_0, delta_J_taylor/ J_0, real_tau
+        return result, solve_time, price_of_fairness, fairness_effective_improvement, delta_J_lb/ J_0, delta_J_ub/ J_0, delta_J_taylor/ J_0, delta_J_taylor_lb / J_0, delta_J_taylor_ub / J_0, real_tau
 
     def predict(self, X):
         if self.fit_intercept:

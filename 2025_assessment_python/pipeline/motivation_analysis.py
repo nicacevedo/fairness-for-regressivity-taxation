@@ -39,7 +39,7 @@ from recipes.recipes_pipelined import build_model_pipeline, build_model_pipeline
 # My models
 from src_.motivation_utils import analyze_fairness_by_value, calculate_detailed_statistics, plot_tradeoff_analysis
 from fairness_models.linear_fairness_models import LeastAbsoluteDeviationRegression, MaxDeviationConstrainedLinearRegression, LeastMaxDeviationRegression, GroupDeviationConstrainedLinearRegression, StableRegression, LeastProportionalDeviationRegression#LeastMSEConstrainedRegression, LeastProportionalDeviationRegression
-from fairness_models.linear_fairness_models import MyLogisticRegression, GroupDeviationConstrainedLogisticRegression
+from fairness_models.linear_fairness_models import MyGLMRegression, GroupDeviationConstrainedLogisticRegression
 
 
 #%% Data
@@ -175,7 +175,9 @@ print("Median residual Val: ", np.median(y_val_log - y_pred_val))
 # Logistic Regression
 print("-"*100)
 print("LOGISTIC REGRESSION ")
-model = MyLogisticRegression(fit_intercept=True, solver="MOSEK", objective="logistic", l2_lambda=0)
+
+model_name = "svm"
+model = MyGLMRegression(fit_intercept=True, solver="MOSEK", model_name=model_name, l2_lambda=0, eps=1e-4)
 print(model)
 
 # Convert the train to binary
@@ -183,15 +185,20 @@ y_avg = np.mean(y_train_log) # same avg for all splits
 y_train_binary = (y_train_log >= y_avg) + 0.0 
 y_val_binary = (y_val_log >= y_avg) + 0.0 
 y_test_binary = (y_test_log >= y_avg) + 0.0 
+if model_name == "svm": # T: [0,1] -> [-1,1]
+    y_train_binary = 2 * y_train_binary - 1
+    y_val_binary = 2 * y_val_binary - 1
+    y_test_binary = 2 * y_test_binary - 1 
 
-# model.fit(X_train, y_train_binary)
-# y_pred_train_binary = model.predict(X_train)
-# y_pred_val_binary = model.predict(X_val)
+model.fit(X_train, y_train_binary)
+y_pred_train_binary = model.predict(X_train)
+print(y_train_binary[:10].to_numpy())
+print(np.round(y_pred_train_binary[:10]))
+y_pred_val_binary = model.predict(X_val)
 # y_pred_test_binary = model.predict(X_test)
-# print("Train Accuracy (1-MAE): ", 1-mean_absolute_error(y_train_binary, np.round(y_pred_train_binary)))
-# print("Val Accuracy (1-MAE): ", 1-mean_absolute_error(y_val_binary, np.round(y_pred_val_binary)))
+print("Train Accuracy (1-MAE): ", np.mean(y_train_binary == np.round(y_pred_train_binary)))#1-mean_absolute_error(y_train_binary, y_pred_train_binary))
+print("Val Accuracy (1-MAE): ",  np.mean(y_val_binary == np.round(y_pred_val_binary)))
 # print("Test Accuracy (1-MAE): ", 1-mean_absolute_error(y_test_binary, np.round(y_pred_test_binary)))
-
 
 
 import numpy as np
@@ -207,8 +214,8 @@ from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_sco
 if __name__ == '__main__':
     # --- Configuration ---
     NUM_GROUPS = 3
-    percentages = np.linspace(0, .3, 7)
-    model_name = "logistic"
+    percentages = np.linspace(0, .1, 3)
+    model_name = "svm"
     # percentages = np.linspace(0, .02, 21)
 
     # --- Data Storage ---
@@ -217,6 +224,8 @@ if __name__ == '__main__':
     pof_list = []
     pof_lb_list = []
     pof_ub_list = []
+    pof_exp_lb_list = []
+    pof_exp_ub_list = []
     pof_taylor_list = []
     fei_list = []
     fairness_list = []
@@ -267,19 +276,25 @@ if __name__ == '__main__':
         # Target transformation for a given model
         if model_name == "linear":
             y_train_scaled = y_train_log
-        elif model_name == "logistic":
+        elif model_name in ["logistic", "svm"]:
             y_train_scaled = ( y_train_log - y_train_log.min() ) / ( y_train_log.max() - y_train_log.min() )
+            if model_name == "svm":
+                y_train_scaled = 2 * y_train_scaled - 1
         elif model_name == "poisson":
             print("y max: ", y_train.max())
             print("y min: ", y_train.min())
-            y_train_scaled = y_train // 10000
+            y_train_scaled = y_train // 100000 + 1
+            print("y max: ", y_train_scaled.max())
+            print("y min: ", y_train_scaled.min())
         # Fit model and make predictions
         # result, solve_time, pof, fei, pof_lb, pof_ub, fairness = model.fit(X_train, y_train_log)
-        result, solve_time, pof, fei, pof_lb, pof_ub, pof_taylor, fairness = model.fit(X_train, y_train_scaled, y_real_values=y_train_log)
+        result, solve_time, pof, fei, pof_exp_lb, pof_exp_ub, pof_taylor, pof_lb, pof_ub, fairness = model.fit(X_train, y_train_scaled, y_real_values=y_train_log)
         
         pof_list.append(pof)
         pof_lb_list.append(pof_lb)
         pof_ub_list.append(pof_ub)
+        pof_exp_lb_list.append(pof_exp_lb)
+        pof_exp_ub_list.append(pof_exp_ub)
         pof_taylor_list.append(pof_taylor)
         fei_list.append(fei)
         fairness_list.append(fairness)
@@ -309,10 +324,12 @@ if __name__ == '__main__':
     # --- Temporal Plot ---
     print(os.getcwd())
     plt.figure(figsize=(6,5))
+    plt.plot(percentages*100, 100*np.array(pof_taylor_list), "--x", label="POF Taylor (lin. + quad.)", color="lightgreen", alpha=1)
     plt.plot(percentages*100, 100*np.array(pof_list), "--o", label="POF", color="blue")
-    plt.plot(percentages*100, 100*np.array(pof_lb_list), "--x", label="POF LB", color="red", alpha=0.5)
-    plt.plot(percentages*100, 100*np.array(pof_ub_list), "--x", label="POF UB", color="red", alpha=0.5)
-    plt.plot(percentages*100, 100*np.array(pof_taylor_list), "--x", label="POF Taylor Approx.", color="lightgreen", alpha=0.5)
+    plt.plot(percentages*100, 100*np.array(pof_lb_list), "--x", label="POF LB (lin. + quad.)", color="red", alpha=0.5)
+    plt.plot(percentages*100, 100*np.array(pof_ub_list), "--x", label="POF UB (quad. + quad.)", color="black", alpha=0.5)
+    plt.plot(percentages*100, 100*np.array(pof_exp_lb_list), "--x", label="POF LB (exp.) [1-D opt.]", color="red", alpha=0.9)
+    plt.plot(percentages*100, 100*np.array(pof_exp_ub_list), "--x", label="POF UB (exp.) [1-D opt.]", color="red", alpha=0.9)
     # plt.xlabel("Fairness Threshold Improvement (%)")
     plt.xlabel("(Un)Fairness decrease %")
     plt.ylabel("Price of Fairness (% MSE increase)")
@@ -321,17 +338,17 @@ if __name__ == '__main__':
     plt.savefig("./img/motivation/pof_vs_percentages.jpg", dpi=300, bbox_inches='tight')
 
 
-    plt.figure(figsize=(6,5))
-    plt.plot(fairness_list, np.array(pof_list) * ols_mse + ols_mse, "--o", label="MSE", color="blue")
-    plt.plot(fairness_list, np.array(pof_lb_list) * ols_mse + ols_mse, "--x", label="MSE LB", color="red", alpha=0.5)
-    plt.plot(fairness_list, np.array(pof_ub_list) * ols_mse + ols_mse, "--x", label="MSE UB", color="red", alpha=0.5)
-    plt.plot(fairness_list, np.array(pof_taylor_list) * ols_mse + ols_mse, "--x", label="POF Taylor Approx.", color="lightgreen", alpha=0.5)
-    # plt.xlabel("Fairness Threshold Improvement (%)")
-    plt.xlabel("(Un)Fairness Measure")
-    plt.ylabel("Mean Squared Error")
-    plt.legend()
-    # plt.savefig("/img/motivation/tradoff_analysis/pof/pof_vs_percentages.jpg", dpi=300)
-    plt.savefig("./img/motivation/mse_vs_percentages.jpg", dpi=300, bbox_inches='tight')
+    # plt.figure(figsize=(6,5))
+    # plt.plot(fairness_list, np.array(pof_list) * ols_mse + ols_mse, "--o", label="MSE", color="blue")
+    # plt.plot(fairness_list, np.array(pof_lb_list) * ols_mse + ols_mse, "--x", label="MSE LB", color="red", alpha=0.5)
+    # plt.plot(fairness_list, np.array(pof_ub_list) * ols_mse + ols_mse, "--x", label="MSE UB", color="red", alpha=0.5)
+    # plt.plot(fairness_list, np.array(pof_taylor_list) * ols_mse + ols_mse, "--x", label="POF Taylor Approx.", color="lightgreen", alpha=0.5)
+    # # plt.xlabel("Fairness Threshold Improvement (%)")
+    # plt.xlabel("(Un)Fairness Measure")
+    # plt.ylabel("Mean Squared Error")
+    # plt.legend()
+    # # plt.savefig("/img/motivation/tradoff_analysis/pof/pof_vs_percentages.jpg", dpi=300)
+    # plt.savefig("./img/motivation/mse_vs_percentages.jpg", dpi=300, bbox_inches='tight')
 
     # plt.plot(percentages, fei_list)
 
