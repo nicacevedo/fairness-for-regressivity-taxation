@@ -998,6 +998,7 @@ class GroupDeviationConstrainedLogisticRegression:
         w_0, w_0_2 = get_psi_derivatives(X, y, beta_0, model=self.model_name)#, gamma=self.eps)
         # w_0 = np.exp(X @ beta_0) / ( 1 + np.exp(X @ beta_0) )
         a_0 = (1/n) * X.T @ (w_0 - y) if self.model_name != "svm" else (1/n) * X.T @ w_0 # gradient of J_0
+        b_0 = beta_0 # Gradient of the l2-norm term
         H_0 = (1/n) * X.T @ np.diag(w_0_2) @ X # Hessian of J_0
         # H_0 = np.mean( [ np.exp(X[i,:] @ beta_0) / ( 1 + np.exp(X[i,:] @ beta_0) )**2 * np.outer(X[i,:],  X[i,:]) for i in range(n) ], axis=0 ) 
         H_0_inv = np.linalg.pinv(H_0)
@@ -1082,7 +1083,11 @@ class GroupDeviationConstrainedLogisticRegression:
         if self.objective == "mse":
             if self.l2_lambda != 0:
                 print("Solving with Ridge objective...")
-                obj = cp.Minimize(cp.mean(z) + self.l2_lambda * cp.quad_form(beta, np.eye(m)))
+                # obj = cp.Minimize(cp.mean(z) + self.l2_lambda * cp.quad_form(beta, np.eye(m)))
+                # Correction: On the same hypothesis space
+                # constraints+=[ cp.quad_form(beta, np.eye(m)) <= np.linalg.norm(beta_0)**2 ] # bound the regularization by the same level
+                constraints+=[ cp.SOC(np.linalg.norm(beta_0), beta) ]
+                obj = cp.Minimize(cp.mean(z))
             else: 
                 obj = cp.Minimize(cp.mean(z))
                 # obj = cp.Minimize(u)
@@ -1156,8 +1161,16 @@ class GroupDeviationConstrainedLogisticRegression:
             H_0_g_inv = np.linalg.pinv(H_0_g)
 
             # Direction d:=Delta beta* from the Taylor approximation
-            A_0 = a_0_g .T @ H_0_inv @ a_0_g 
+            A_0 = a_0_g.T @ H_0_inv @ a_0_g 
+            # if self.l2_lambda == 0:
             d = -(fairness_improvement) * H_0_inv @ a_0_g / A_0 # Delta beta*
+            # else: # Regularized solution
+            s_ = a_0_g.T @ H_0_inv @ a_0_g
+            u_ = b_0.T @ H_0_inv @ b_0
+            t_ = a_0_g.T @ H_0_inv @ b_0
+            Δ = s_*u_ - t_**2
+            d_ = -(fairness_improvement) * H_0_inv @ (u_ * a_0_g - t_ * b_0) / Δ
+
             d_H_0_inv_norm = (fairness_improvement)**2 / A_0 # norm H_0_inv of Delta beta* (final form of the term)
 
             # Hessian of J_g
@@ -1278,6 +1291,13 @@ class GroupDeviationConstrainedLogisticRegression:
                 delta_J_lb = primal_prob.solve(verbose=True)
             print(fr"POF J % LB (exp): ", delta_J_lb / J_0)
             print(f"Root find for t_LB={t_LB.value} in: ", time() - t0)
+
+            
+            print("delta beta (normal): ", np.linalg.norm(beta_0 + t_LB.value*d))
+            print("delta beta (regula): ", np.linalg.norm(beta_0 + t_LB.value*d_))
+            print("norm of beta_0: ", np.linalg.norm(beta_0))
+            print("norm of beta_F: ", np.linalg.norm(beta.value))
+
                 
 
             # Roots finder for the UB: Newton Raphson/Bijection/Opt (1 dimension)

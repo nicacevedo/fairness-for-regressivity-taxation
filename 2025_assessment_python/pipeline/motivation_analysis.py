@@ -214,9 +214,9 @@ from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_sco
 if __name__ == '__main__':
     # --- Configuration ---
     NUM_GROUPS = 3
-    percentages = np.linspace(0, .05, 3)
-    model_name = "svm"
-    l2_lambda = 1e-3
+    percentages = np.linspace(0, .1, 3)
+    model_name = "logistic"
+    l2_lambda = 1e-2
     # percentages = np.linspace(0, .02, 21)
 
     # --- Data Storage ---
