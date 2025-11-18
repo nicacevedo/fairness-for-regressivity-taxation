@@ -214,8 +214,9 @@ from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_sco
 if __name__ == '__main__':
     # --- Configuration ---
     NUM_GROUPS = 3
-    percentages = np.linspace(0, .1, 3)
+    percentages = np.linspace(0, .05, 3)
     model_name = "svm"
+    l2_lambda = 1e-3
     # percentages = np.linspace(0, .02, 21)
 
     # --- Data Storage ---
@@ -248,7 +249,7 @@ if __name__ == '__main__':
             percentage_increase=rmse_percentage_increase,
             # max_row_norm_scaling=(1+rmse_percentage_increase),
             solver="MOSEK", # Your solver of choice
-            l2_lambda=0,
+            l2_lambda=l2_lambda,
             objective="mse",
             constraint="max_mse",
             model_name=model_name,
@@ -279,7 +280,7 @@ if __name__ == '__main__':
         elif model_name in ["logistic", "svm"]:
             y_train_scaled = ( y_train_log - y_train_log.min() ) / ( y_train_log.max() - y_train_log.min() )
             if model_name == "svm":
-                y_train_scaled = 2 * y_train_scaled - 1
+                y_train_scaled = 2 * np.round(y_train_scaled) - 1
         elif model_name == "poisson":
             print("y max: ", y_train.max())
             print("y min: ", y_train.min())
@@ -327,7 +328,7 @@ if __name__ == '__main__':
     plt.plot(percentages*100, 100*np.array(pof_taylor_list), "--x", label="POF Taylor (lin. + quad.)", color="lightgreen", alpha=1)
     plt.plot(percentages*100, 100*np.array(pof_list), "--o", label="POF", color="blue")
     plt.plot(percentages*100, 100*np.array(pof_lb_list), "--x", label="POF LB (lin. + quad.)", color="red", alpha=0.5)
-    plt.plot(percentages*100, 100*np.array(pof_ub_list), "--x", label="POF UB (quad. + quad.)", color="black", alpha=0.5)
+    # plt.plot(percentages*100, 100*np.array(pof_ub_list), "--x", label="POF UB (quad. + quad.)", color="black", alpha=0.5)
     plt.plot(percentages*100, 100*np.array(pof_exp_lb_list), "--x", label="POF LB (exp.) [1-D opt.]", color="red", alpha=0.9)
     plt.plot(percentages*100, 100*np.array(pof_exp_ub_list), "--x", label="POF UB (exp.) [1-D opt.]", color="red", alpha=0.9)
     # plt.xlabel("Fairness Threshold Improvement (%)")

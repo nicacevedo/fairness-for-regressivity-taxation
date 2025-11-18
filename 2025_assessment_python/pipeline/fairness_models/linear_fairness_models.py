@@ -917,7 +917,7 @@ class GroupDeviationConstrainedLogisticRegression:
         
         # if self.objective == "mse":
 
-        def get_psi_derivatives(X, y, beta, model="linear", gamma=1e-4):
+        def get_psi_derivatives(X, y, beta, model="linear", gamma=1e-3):
             "Returns the approximation of y: phi'(X beta)"
             theta = X @ beta
             if model == "linear":
@@ -930,8 +930,27 @@ class GroupDeviationConstrainedLogisticRegression:
                 return psi_tilda, psi_tilda
             elif model == "svm":
                 # This if for the bounds, so it is not the real hing, but the smooth approximation.
-                psi_tilda = np.exp((1-y*theta) / gamma) / ( 1 + np.exp((1-y*theta) / gamma) )
-                return -y * psi_tilda, (1/gamma) * psi_tilda / ( 1 + np.exp((1-y*theta) / gamma) )
+                # theta_gamma = (1-y*theta) / gamma
+                # exp_thresholding =  np.max(np.abs(theta_gamma)) * np.sign(theta_gamma) * (-1)  # to avoid exponential overflow
+                # exp_thresholding = exp_thresholding if np.max(np.abs(theta_gamma)) <= 1e1 else 1e1 * np.sign(theta_gamma) * (-1)
+                # print("exp_thresholding", exp_thresholding)
+                # # psi_tilda = np.exp((1-y*theta) / gamma ) / ( 1 + np.exp((1-y*theta) / gamma ) )
+                # psi_tilda = np.exp((1-y*theta) / gamma + exp_thresholding ) / ( np.exp(exp_thresholding) + np.exp((1-y*theta) / gamma + exp_thresholding ) )
+                # # print("(1-y*theta)", (1-y*theta))
+                # # print("(1-y*theta) / gamma", (1-y*theta) / gamma)
+                # print("psi_tilda", np.max(psi_tilda), np.min(psi_tilda))
+                # # print("1/gamma", (1/gamma))
+                # return -y * psi_tilda, (1/gamma) * psi_tilda / ( 1 + np.exp((1-y*theta) / gamma) )
+
+                # 2nd approximation: Huber smoothing
+                z = np.multiply(y, theta)
+                psi_tilda = np.zeros(theta.size)
+                psi_tilda_2 = psi_tilda.copy()
+                idx = (z < 1) & (z >= (1 - gamma))
+                psi_tilda[idx] = (1 - z[idx])**2 / (2 * gamma)
+                psi_tilda_2[idx] = 1 / gamma 
+                psi_tilda[z < (1 - gamma)] =  -1
+                return np.multiply(y, psi_tilda), psi_tilda_2 # y ** 2 = 1 for the second derivative
             else:
                 raise Exception(f"No model model named: {model}!!")
         
@@ -941,7 +960,7 @@ class GroupDeviationConstrainedLogisticRegression:
             if model == "linear":
                 eta = y_ 
                 psi = lambda z: z**2/2
-            if model=="logistic": 
+            elif model=="logistic": 
                 y_[y > 1-eps] = 1-eps
                 y_[y < eps] = eps 
                 eta = np.log(y_ / (1-y_)) # explodes in 0 and 1
@@ -952,9 +971,10 @@ class GroupDeviationConstrainedLogisticRegression:
                 psi = lambda z: np.exp(z)
             elif model == "svm":
                 eta = y_ # psi(1)=0 (the proper label)
-                psi = lambda z: cp.pos(1 - np.multiply(y_, z)).value
-            psi_tilda_inv_y = y_ if model != "svm" else 0 # g = 0 (subgradient=0 always valid for svm)
-            return np.mean( psi(theta) - psi(eta) - np.multiply(psi_tilda_inv_y, (theta - eta)) )
+                psi = lambda z: cp.pos(1 - np.multiply(y_, z)).value # psi(z) = max(0, 1 - yz)
+            # psi_tilda_inv_y = y_ if model != "svm" else 0 # g = 0 (subgradient=0 always valid for svm)
+            # print("psi(theta)", np.min(psi(theta)), np.max(psi(theta)))
+            return np.mean( psi(theta) - psi(eta) - np.multiply(y_, (theta - eta)) ) if model != "svm" else np.mean( psi(theta) ) #- psi(eta) + np.multiply(y_, (theta - eta)) )
         
         def get_loss_value(X, y, beta, model="linear"):
             theta = X @ beta
@@ -975,7 +995,7 @@ class GroupDeviationConstrainedLogisticRegression:
         beta_0 = glm.coef_
         # J_0 =  glm.train_loss # J_0: logit loss
         J_0 = get_bregman_divergence_value(X, y, beta_0, model=self.model_name, eps=self.eps) 
-        w_0, w_0_2 = get_psi_derivatives(X, y, beta_0, model=self.model_name, gamma=self.eps)
+        w_0, w_0_2 = get_psi_derivatives(X, y, beta_0, model=self.model_name)#, gamma=self.eps)
         # w_0 = np.exp(X @ beta_0) / ( 1 + np.exp(X @ beta_0) )
         a_0 = (1/n) * X.T @ (w_0 - y) if self.model_name != "svm" else (1/n) * X.T @ w_0 # gradient of J_0
         H_0 = (1/n) * X.T @ np.diag(w_0_2) @ X # Hessian of J_0
@@ -984,21 +1004,24 @@ class GroupDeviationConstrainedLogisticRegression:
         M_psi = 1 if self.model_name != "linear" else 0# for logistic (I think for SVM we maintain the 1)
 
         print("Predicted y's: ", glm.predict(X[:10,:]))
-        print("The real  y's: ", y[:10])
+        print("The real  y's: ", np.sign(y[:10]))
 
         # Fairness constraints utils
         bin_indices_list = get_group_bins_indices(y_real_values, n_groups=self.n_groups)
         tau = 0 # Compute the max diference of the unconstrained problem
         loss_0 = get_loss_value(X, y, beta_0, model=self.model_name)#j_0#np.mean( np.log( 1 + np.exp(X @ beta_0) ) - y * (X @ beta_0) )
         print("loss_0: ", loss_0)
-        b_d = get_bregman_divergence_value(X, y, beta_0, model=self.model_name, eps=self.eps)
-        print("Bregman divergence 0: ", b_d)
+        b_d_0 = get_bregman_divergence_value(X, y, beta_0, model=self.model_name, eps=self.eps)
+        acc_0 = np.average(y == np.sign(X @ beta_0)) 
+        print("Accuracy 0: ", acc_0)
+        print("Bregman divergence 0: ", b_d_0)
         for g in range(self.n_groups):
             print("Group: ", g, len(bin_indices_list[g]))
             X_g , y_g = X[bin_indices_list[g], :], y[bin_indices_list[g]]
             # theta_0_g = X_g @ beta_0
             loss_0_g = get_loss_value(X_g, y_g, beta_0, model=self.model_name) #np.mean( np.log( 1 + np.exp(theta_0_g) ) - y_g * theta_0_g )
             print("loss_0_g: ", loss_0_g)
+            print("Accuracy 0_g: ", np.average(y_g == np.sign(X_g @ beta_0)) )
 
             # bregman
             b_d = get_bregman_divergence_value(X_g, y_g, beta_0, model=self.model_name, eps=self.eps)
@@ -1018,7 +1041,7 @@ class GroupDeviationConstrainedLogisticRegression:
             if model == "linear":
                 eta = y_ 
                 psi = lambda z: z**2/2
-            if model=="logistic": 
+            elif model=="logistic": 
                 y_[y > 1-eps] = 1-eps
                 y_[y < eps] = eps 
                 eta = cp.log(y_ / (1-y_)) # explodes in 0 and 1
@@ -1027,7 +1050,13 @@ class GroupDeviationConstrainedLogisticRegression:
                 y_[y < eps] = eps
                 eta = cp.log(y_) # explodes in 0
                 psi = lambda z: cp.exp(z)
-            return psi(theta) - psi(eta) - cp.multiply(y_, (theta - eta)) 
+            elif model == "svm": # Smoothing of hinge: max(0, 1-x)
+                eta = y_ # psi(1)=0 (the proper label)
+                psi = lambda z: cp.pos(1 - cp.multiply(y_, z))
+
+            return psi(theta) - psi(eta) - cp.multiply(y_, (theta - eta)) if model != "svm" else psi(theta) #- psi(eta) + cp.multiply(y_, (theta - eta))
+            # psi_tilda_inv_y = y_ if model != "svm" else 0 # g = 0 (subgradient=0 always valid for svm)
+            # return psi(theta) - psi(eta) - cp.multiply(psi_tilda_inv_y, (theta - eta)) 
 
         # Variable
         beta = cp.Variable(m)
@@ -1078,14 +1107,22 @@ class GroupDeviationConstrainedLogisticRegression:
             print(f"J_F objective (current loss): {result}")
             price_of_fairness = (result-J_0)/J_0
             print(f"POF (MSE % decrease): ", price_of_fairness)
-        # elif self.objective == "mse":
+        elif self.objective == "mse": # [PENDING] Update the l2 version
+            J_0, result = get_bregman_divergence_value(X, y, beta_0, model=self.model_name, eps=self.eps), get_bregman_divergence_value(X, y, beta.value, model=self.model_name, eps=self.eps)
+            print(f"J_0 objective (original loss): {J_0}")
+            print(f"J_F objective (current loss): {result}")
+            price_of_fairness = (result-J_0)/J_0
+            print(f"POF (MSE % decrease): ", price_of_fairness)
+            acc_F = np.average(y == np.sign(X @ beta.value)) 
+            print(f"POF Accuracy: ", (acc_0 - acc_F) / acc_0)
             # pass 
 
         # Approximating the F function
         real_tau, real_tau_g = 0, -1
 
-        b_d = get_bregman_divergence_value(X, y, beta.value, model=self.model_name, eps=self.eps)
-        print("New (F) Bregman divergence 0: ", b_d)
+        b_d_F = get_bregman_divergence_value(X, y, beta.value, model=self.model_name, eps=self.eps)
+        print("New (F) Bregman divergence 0: ", b_d_F)
+        print("New F Accuracy: ", acc_F)
         # print("Direct Taylor of MSE / 2: ", (beta.value - beta_0).T @ H_0 @ (beta.value - beta_0) / 2)
         for g, ind_g in enumerate(bin_indices_list):
             X_g, y_g = X[ind_g, :], y[ind_g]
@@ -1093,7 +1130,7 @@ class GroupDeviationConstrainedLogisticRegression:
             loss_g = get_loss_value(X_g, y_g, beta.value, model=self.model_name)#cp.mean( cp.logistic(theta_g) - cp.multiply(y[ind_g], theta_g) ).value
             print("New (F) group loss g: ", g, loss_g)
             # approx_error_g = np.mean( np.abs( np.exp(theta_g.value)/(1 + np.exp(theta_g.value)) - y_g ) ) 
-            # print("Approx error: ", g, approx_error_g)
+            print("New (F) Accuracy: ", np.mean(y_g == np.sign(X_g @ beta.value)))
             b_d = get_bregman_divergence_value(X_g, y_g, beta.value, model=self.model_name, eps=self.eps)#np.mean( np.log( 1 + np.exp(theta_g) ) - y_g * theta_g - (np.log(1+ np.exp(eta_y_g)) - y_g * eta_y_g) )
             print("New (F) Bregman divergence g: ", g, b_d)
             if b_d >= real_tau:
