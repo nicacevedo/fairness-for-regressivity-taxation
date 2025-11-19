@@ -998,7 +998,6 @@ class GroupDeviationConstrainedLogisticRegression:
         w_0, w_0_2 = get_psi_derivatives(X, y, beta_0, model=self.model_name)#, gamma=self.eps)
         # w_0 = np.exp(X @ beta_0) / ( 1 + np.exp(X @ beta_0) )
         a_0 = (1/n) * X.T @ (w_0 - y) if self.model_name != "svm" else (1/n) * X.T @ w_0 # gradient of J_0
-        b_0 = beta_0 # Gradient of the l2-norm term
         H_0 = (1/n) * X.T @ np.diag(w_0_2) @ X # Hessian of J_0
         # H_0 = np.mean( [ np.exp(X[i,:] @ beta_0) / ( 1 + np.exp(X[i,:] @ beta_0) )**2 * np.outer(X[i,:],  X[i,:]) for i in range(n) ], axis=0 ) 
         H_0_inv = np.linalg.pinv(H_0)
@@ -1113,7 +1112,7 @@ class GroupDeviationConstrainedLogisticRegression:
             price_of_fairness = (result-J_0)/J_0
             print(f"POF (MSE % decrease): ", price_of_fairness)
         elif self.objective == "mse": # [PENDING] Update the l2 version
-            J_0, result = get_bregman_divergence_value(X, y, beta_0, model=self.model_name, eps=self.eps), get_bregman_divergence_value(X, y, beta.value, model=self.model_name, eps=self.eps)
+            # J_0, result = get_bregman_divergence_value(X, y, beta_0, model=self.model_name, eps=self.eps), get_bregman_divergence_value(X, y, beta.value, model=self.model_name, eps=self.eps)
             print(f"J_0 objective (original loss): {J_0}")
             print(f"J_F objective (current loss): {result}")
             price_of_fairness = (result-J_0)/J_0
@@ -1126,18 +1125,19 @@ class GroupDeviationConstrainedLogisticRegression:
         real_tau, real_tau_g = 0, -1
 
         b_d_F = get_bregman_divergence_value(X, y, beta.value, model=self.model_name, eps=self.eps)
-        print("New (F) Bregman divergence 0: ", b_d_F)
-        print("New F Accuracy: ", acc_F)
+        print("POF (bregman divergence?): ", (b_d_F - b_d_0) / b_d_0)
+        # print("New (F) Bregman divergence 0: ", b_d_F)
+        # print("New F Accuracy: ", acc_F)
         # print("Direct Taylor of MSE / 2: ", (beta.value - beta_0).T @ H_0 @ (beta.value - beta_0) / 2)
         for g, ind_g in enumerate(bin_indices_list):
             X_g, y_g = X[ind_g, :], y[ind_g]
-            print("Group: ", g, len(ind_g))
+            # print("Group: ", g, len(ind_g))
             loss_g = get_loss_value(X_g, y_g, beta.value, model=self.model_name)#cp.mean( cp.logistic(theta_g) - cp.multiply(y[ind_g], theta_g) ).value
-            print("New (F) group loss g: ", g, loss_g)
+            # print("New (F) group loss g: ", g, loss_g)
             # approx_error_g = np.mean( np.abs( np.exp(theta_g.value)/(1 + np.exp(theta_g.value)) - y_g ) ) 
-            print("New (F) Accuracy: ", np.mean(y_g == np.sign(X_g @ beta.value)))
+            # print("New (F) Accuracy: ", np.mean(y_g == np.sign(X_g @ beta.value)))
             b_d = get_bregman_divergence_value(X_g, y_g, beta.value, model=self.model_name, eps=self.eps)#np.mean( np.log( 1 + np.exp(theta_g) ) - y_g * theta_g - (np.log(1+ np.exp(eta_y_g)) - y_g * eta_y_g) )
-            print("New (F) Bregman divergence g: ", g, b_d)
+            # print("New (F) Bregman divergence g: ", g, b_d)
             if b_d >= real_tau:
                 real_tau = b_d
                 real_tau_g = g            
@@ -1160,18 +1160,71 @@ class GroupDeviationConstrainedLogisticRegression:
             # H_0_g_ = np.mean( [ np.exp(X[i,:] @ beta_0) / ( 1 + np.exp(X[i,:] @ beta_0) )**2 * np.outer(X[i,:],  X[i,:]) for i in indices_g ], axis=0 )
             H_0_g_inv = np.linalg.pinv(H_0_g)
 
+            # print("Checking feasibility...")
+            delta_beta_ = beta.value - beta_0
+            # print("1st order of F, using beta_F: ", a_0_g @ beta.value)
+            # print("1st order of R, using beta_F: ", 2*beta_0 @ delta_beta_) # np.linalg.norm(beta_0)**2 + 
+            # print("2nd order of R, using beta_F: ", 2*beta_0 @ delta_beta_ + delta_beta_ @ delta_beta_ ) # np.linalg.norm(beta_0)**2 + 
+            # print("Exact diff of norms: ", np.linalg.norm(beta.value)**2 - np.linalg.norm(beta_0)**2)
+            # print("norm of beta_F: ", np.linalg.norm(beta.value)**2)
+            # print("norm of beta_0: ", np.linalg.norm(beta_0)**2)
+            # print("Fairness improv: ", -fairness_improvement)
+
             # Direction d:=Delta beta* from the Taylor approximation
             A_0 = a_0_g.T @ H_0_inv @ a_0_g 
-            # if self.l2_lambda == 0:
             d = -(fairness_improvement) * H_0_inv @ a_0_g / A_0 # Delta beta*
-            # else: # Regularized solution
-            s_ = a_0_g.T @ H_0_inv @ a_0_g
-            u_ = b_0.T @ H_0_inv @ b_0
-            t_ = a_0_g.T @ H_0_inv @ b_0
-            Δ = s_*u_ - t_**2
-            d_ = -(fairness_improvement) * H_0_inv @ (u_ * a_0_g - t_ * b_0) / Δ
+            t_d = 1 # We move 1 towards d
 
-            d_H_0_inv_norm = (fairness_improvement)**2 / A_0 # norm H_0_inv of Delta beta* (final form of the term)
+            # Projection onto the l2-regularized case:
+            if self.l2_lambda > 0:
+                rho_safe_tol = self.eps#**2
+                a_0_g_norm = a_0_g @ a_0_g
+                rho_hat = (beta_0 @ beta_0 - rho_safe_tol) * a_0_g_norm
+                A_ = (fairness_improvement - beta_0 @ a_0_g) ** 2 - rho_hat
+                B_ = 2*A_
+                C_ = np.linalg.norm(beta_0 + d)**2 * a_0_g_norm - rho_hat
+                theta_2 = (-B_ - np.sqrt(B_**2 - 4 * A_ * C_  )) / (2 * A_) # dual of the norm
+                theta_1 = theta_2 * (fairness_improvement - beta_0 @ a_0_g) / a_0_g_norm # dual of the fairness
+                d_ = (d - theta_1 * a_0_g - theta_2 * beta_0) / (1 + theta_2) # Feasible on the fairness + regularized feasible set 
+                # # Aproximate the regularization penalty
+                # w_0_fair, _ = get_psi_derivatives(X, y, beta_0 + d_, model=self.model_name)
+                # a_0_fair = (1/n) * X.T @ (w_0_fair - y )
+                # l2_lambda_fair = - a_0_fair / (2 * (beta_0 + d_) )
+                print("Updated direction (l2-regularization case)")
+                print("1st order of R (d): ", 2*beta_0 @ d_) # np.linalg.norm(beta_0)**2 + 
+                print("2nd order of R (d): ", 2*beta_0 @ d_ + d_ @ d_ ) # np.linalg.norm(beta_0)**2 +
+                print("1st order of F (d): ", a_0_g @ d_ )
+                # print("LAMBDA FAIR: ", l2_lambda_fair)
+
+                # # Approximating the lambda: lambda \(\approx \) theta_2. Closed for delta beta
+                s_ = a_0_g.T @ H_0_inv @ a_0_g
+                t_ = beta_0.T @ H_0_inv @ a_0_g
+                u_ = beta_0.T @ H_0_inv @ beta_0
+                r_a = a_0_g.T @ H_0_inv @ a_0 # original gradient (nonzero if regularized!)
+                r_b = beta_0.T @ H_0_inv @ a_0 # original gradient (nonzero if regularized!)
+                D_ = s_ * u_ - t_**2
+                theta_1 = (u_ * (fairness_improvement - r_a) + t_* ( r_b - rho_safe_tol )) / D_
+                theta_2 = (-t_ * (fairness_improvement - r_a) - s_*( r_b - rho_safe_tol  )) / D_
+                d__ = - H_0_inv @ (a_0 + theta_1 * a_0_g + theta_2 * beta_0 )
+                print("Updated direction (l2-regularization case)")
+                print("1st order of R (d): ", 2*beta_0 @ d__) # np.linalg.norm(beta_0)**2 + 
+                print("2nd order of R (d): ", 2*beta_0 @ d__ + d__ @ d__ ) # np.linalg.norm(beta_0)**2 +
+                print("1st order of F (d): ", a_0_g @ d__ )
+                d = d__
+                
+            
+                # # Most efficient t to move towards the new d (if it exists)
+                # t_d = -2* beta_0 @ d / (d @ d)#(beta_0 @ beta_0)
+                # print("Move towards d: t=", t_d, "?")
+                # if t_d >= 1: # ensures fairness constraint
+                #     print("Moving towards d: t=", t_d, "...")
+                #     d *= t_d # update efficient d
+                #     print("1st order of R (d): ", 2*beta_0 @ d) # np.linalg.norm(beta_0)**2 + 
+                #     print("2nd order of R (d): ", 2*beta_0 @ d + d @ d ) # np.linalg.norm(beta_0)**2 +
+                #     print("1st order of F (d): ", a_0_g @ d )
+
+
+            d_H_0_inv_norm = d.T @ H_0 @ d #(fairness_improvement)**2 / A_0 # norm H_0_inv of Delta beta* (final form of the term)
 
             # Hessian of J_g
             # norm of beta* with H_0_g (second-order subdifferential of F(beta_0))
@@ -1181,13 +1234,16 @@ class GroupDeviationConstrainedLogisticRegression:
             # Taloy Approximation Bounds setting t=1, and d:=Delta beta*
             if M_psi > 0:
                 M_phi = M_psi * np.max(np.abs( X @ d )) # Option 2 w./ Cauchy Schwarz (looser): M_psi * np.max(np.linalg.norm(X, axis=1))*np.linalg.norm(d)
-                C_phi_LB = (np.exp(-M_phi) + M_phi - 1) / M_phi**2  # t = 1
-                C_phi_UB = (np.exp( M_phi) - M_phi - 1) / M_phi**2  # t = 1
+                C_phi_LB = (np.exp(-M_phi) + M_phi - 1) / M_phi**2  # t = 1 (unless regularizer changes it)
+                C_phi_UB = (np.exp( M_phi) - M_phi - 1) / M_phi**2  # t = 1 (unless regularizer changes it)
             else:
                 M_phi, C_phi_LB, C_phi_UB = 0, .5, .5 # limit values
-            delta_J_taylor = (1/2) * d_H_0_inv_norm
-            delta_J_taylor_lb = C_phi_LB * d_H_0_inv_norm  # Lower bound
-            delta_J_taylor_ub = C_phi_UB * d_H_0_inv_norm  # Lower bound
+            # lambda_diff_norms = self.l2_lambda * ((beta_0 + d) @ (beta_0 + d) - beta_0 @ beta_0) # zero if l2_lambda = 0
+            delta_J_taylor = (1/2) * d_H_0_inv_norm #+ lambda_diff_norms
+            delta_J_taylor_lb = C_phi_LB * d_H_0_inv_norm #+ lambda_diff_norms # Lower bound
+            delta_J_taylor_ub = C_phi_UB * d_H_0_inv_norm #+ lambda_diff_norms # Lower bound
+
+
 
             print(fr"POF J % Taylor (lin-const + taylor obj.): ", delta_J_taylor / J_0)
             print(fr"POF J % LB (lin-const + exp term.): ", delta_J_taylor_lb / J_0)
@@ -1268,18 +1324,26 @@ class GroupDeviationConstrainedLogisticRegression:
             # Roots finder for the LB: Newton Raphson/Bijection/Opt (1 dimension)
             # Min_{t>=0} C_phi_LB(t) * d_H_inv_norm (Delta J)
             # s.t. t*(a_0_g * Delta beta*) + d_H_0_norm_g * C_phi_LB_g(t) <= -delta (Delta F)
-            # Variable
-            t_LB = cp.Variable(1, nonneg=True)
-            # Constraint
             print("-"*100)
             print("tau_bound - tau: ", tau_bound - tau)
+            print("fairness delta: ", fairness_improvement)
             print("-"*100)
+            # Variable
+            t_LB = cp.Variable(1, nonneg=True)
+            # d = d_ # this one could be feasible??
+            # Constraint
             if M_psi > 0:
-                constraints=[t_LB * (a_0_g @ d) + d_H_0_norm_g * ( cp.exp(-M_phi_g*t_LB) + t_LB * M_phi_g - 1 ) / M_phi_g**2  <= tau_bound - tau] #-self.percentage_increase]
-                obj = cp.Minimize( d_H_0_inv_norm * (cp.exp(-M_phi*t_LB) + t_LB * M_phi - 1 ) / M_phi**2 )
+                print("a0 @ d: ", a_0_g @ d)
+                constraints=[t_LB * (a_0_g @ d)  + d_H_0_norm_g * ( cp.exp(-M_phi_g*t_LB) + t_LB*M_phi_g - 1 ) / M_phi_g**2  <= tau_bound - tau] #-self.percentage_increase] #
+                obj = cp.Minimize( d_H_0_inv_norm * (cp.exp(-M_phi*t_LB) + t_LB*M_phi - 1 ) / M_phi**2 + (self.l2_lambda > 0) * (t_LB * a_0 @ d ))
             else: 
-                constraints=[t_LB * (a_0_g @ d) + t_LB ** 2 * d_H_0_norm_g / 2  <= tau_bound - tau]
-                obj = cp.Minimize(t_LB **2 * d_H_0_inv_norm / 2 )
+                constraints=[t_LB * (a_0_g @ d)  <= tau_bound - tau] # + t_LB ** 2 * d_H_0_norm_g / 2 
+                obj = cp.Minimize(t_LB **2 * d_H_0_inv_norm / 2  + (self.l2_lambda > 0) * (t_LB * a_0 @ d ))
+            if self.l2_lambda > 0: # regularization constraint
+                # constraints+=[cp.SOC(np.linalg.norm(beta_0), beta_0 + t_LB * d )]
+                print("b0 @ d: ", beta_0 @ d)
+                constraints+=[2 * t_LB * (beta_0 @ d)  <= 0 ] #-self.percentage_increase] #  + t_LB**2 * (d @ d) # still LB with the linearization
+                # obj = cp.Minimize( d_H_0_inv_norm * (cp.exp(-M_phi*t_LB) + t_LB*M_phi - 1 ) / M_phi**2 )
             # Objective 
             primal_prob = cp.Problem(obj, constraints)
             # Solve the roots
@@ -1292,12 +1356,6 @@ class GroupDeviationConstrainedLogisticRegression:
             print(fr"POF J % LB (exp): ", delta_J_lb / J_0)
             print(f"Root find for t_LB={t_LB.value} in: ", time() - t0)
 
-            
-            print("delta beta (normal): ", np.linalg.norm(beta_0 + t_LB.value*d))
-            print("delta beta (regula): ", np.linalg.norm(beta_0 + t_LB.value*d_))
-            print("norm of beta_0: ", np.linalg.norm(beta_0))
-            print("norm of beta_F: ", np.linalg.norm(beta.value))
-
                 
 
             # Roots finder for the UB: Newton Raphson/Bijection/Opt (1 dimension)
@@ -1306,16 +1364,21 @@ class GroupDeviationConstrainedLogisticRegression:
             # Variable
             t_UB = cp.Variable(1, nonneg=True)
             if M_psi > 0:
+                print("a0 @ d: ", a_0_g @ d)
                 # Constraint
-                constraints=[t_UB * (a_0_g @ d) + d_H_0_norm_g * ( cp.exp(M_phi_g*t_UB) - t_UB * M_phi_g - 1 ) / M_phi_g**2  <= tau_bound - tau] #-self.percentage_increase]
+                constraints=[t_UB * (a_0_g @ d) + d_H_0_norm_g * (cp.exp(M_phi_g*t_UB) - t_UB * M_phi_g - 1 ) / M_phi_g**2  <= tau_bound - tau] #-self.percentage_increase]
                 # Objective 
-                obj = cp.Minimize( d_H_0_inv_norm * (cp.exp(M_phi*t_UB) - t_UB * M_phi - 1 ) / M_phi**2 )
+                obj = cp.Minimize( (self.l2_lambda > 0) * t_LB * (a_0 @ d) + d_H_0_inv_norm * (cp.exp(M_phi*t_UB) - t_UB * M_phi - 1 ) / M_phi**2 )
             else:
                 # Constraint
                 constraints=[t_UB * (a_0_g @ d) +  t_UB **2 * d_H_0_norm_g / 2  <= tau_bound - tau] #-self.percentage_increase]
                 # Objective 
-                obj = cp.Minimize( t_UB **2 * d_H_0_inv_norm / 2 )
-
+                obj = cp.Minimize( (self.l2_lambda > 0) * t_LB * (a_0 @ d) + t_UB **2 * d_H_0_inv_norm / 2 )
+            if self.l2_lambda > 0: # regularization constraint
+                print("b0 @ d: ", beta_0 @ d)
+                # constraints+=[cp.SOC(np.linalg.norm(beta_0), beta_0 + t_UB * d )]
+                constraints+=[ 2 * t_UB * (beta_0 @ d) + t_UB**2 * (d @ d) <= 0 ] #-self.percentage_increase] #   # still LB with the linearization
+                # obj = cp.Minimize( d_H_0_inv_norm * (cp.exp(-M_phi*t_UB) + t_UB*M_phi - 1 ) / M_phi**2 )
             primal_prob = cp.Problem(obj, constraints)
             # Solve the roots
             t0 = time()
@@ -1325,7 +1388,7 @@ class GroupDeviationConstrainedLogisticRegression:
                 print(f"{self.solver} not available, trying default solver.")
                 delta_J_ub = primal_prob.solve(verbose=True)
             print(fr"POF J % UB (exp): ", delta_J_ub / J_0)
-            print(f"Root find for t_LB={t_LB.value} in: ", time() - t0)
+            print(f"Root find for t_UB={t_LB.value} in: ", time() - t0)
 
 
         # Fairness improvement

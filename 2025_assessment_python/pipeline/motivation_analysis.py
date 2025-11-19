@@ -216,7 +216,7 @@ if __name__ == '__main__':
     NUM_GROUPS = 3
     percentages = np.linspace(0, .1, 3)
     model_name = "logistic"
-    l2_lambda = 1e-2
+    l2_lambda = 1e-4
     # percentages = np.linspace(0, .02, 21)
 
     # --- Data Storage ---
@@ -328,7 +328,7 @@ if __name__ == '__main__':
     plt.plot(percentages*100, 100*np.array(pof_taylor_list), "--x", label="POF Taylor (lin. + quad.)", color="lightgreen", alpha=1)
     plt.plot(percentages*100, 100*np.array(pof_list), "--o", label="POF", color="blue")
     plt.plot(percentages*100, 100*np.array(pof_lb_list), "--x", label="POF LB (lin. + quad.)", color="red", alpha=0.5)
-    # plt.plot(percentages*100, 100*np.array(pof_ub_list), "--x", label="POF UB (quad. + quad.)", color="black", alpha=0.5)
+    plt.plot(percentages*100, 100*np.array(pof_ub_list), "--x", label="POF UB (quad. + quad.)", color="black", alpha=0.5)
     plt.plot(percentages*100, 100*np.array(pof_exp_lb_list), "--x", label="POF LB (exp.) [1-D opt.]", color="red", alpha=0.9)
     plt.plot(percentages*100, 100*np.array(pof_exp_ub_list), "--x", label="POF UB (exp.) [1-D opt.]", color="red", alpha=0.9)
     # plt.xlabel("Fairness Threshold Improvement (%)")
