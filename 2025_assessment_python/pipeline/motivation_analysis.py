@@ -41,9 +41,14 @@ from src_.motivation_utils import analyze_fairness_by_value, calculate_detailed_
 from fairness_models.linear_fairness_models import LeastAbsoluteDeviationRegression, MaxDeviationConstrainedLinearRegression, LeastMaxDeviationRegression, GroupDeviationConstrainedLinearRegression, StableRegression, LeastProportionalDeviationRegression#LeastMSEConstrainedRegression, LeastProportionalDeviationRegression
 from fairness_models.linear_fairness_models import MyGLMRegression, GroupDeviationConstrainedLogisticRegression
 
+# UC Irvine data
+from src_.ucirvine_preprocessing import get_uci_column_names, preprocess_adult_data
 
 #%% Data
-source = "CCAO" # "toy_data"
+# source = "CCAO" # "toy_data"
+
+
+source = "ucirvine"
 
 if source == "toy_data":
     # Toy dataset
@@ -85,121 +90,310 @@ elif source == "CCAO":
         (~df['ind_pin_is_multicard'].astype('bool').fillna(True)) &
         (~df['sv_is_outlier'].astype('bool').fillna(True))
     ]
+    target_name = "meta_sale_price"
+
+    # Get only the desired columns
+    with open('params.yaml', 'r') as file:
+        params = yaml.safe_load(file)
+
+    desired_columns = params['model']['predictor']['all'] +  [target_name, 'meta_sale_date'] 
+    df = df.loc[:,desired_columns]
+    
+    # Train - test split
+    df.sort_values(by=target_name, ascending=True, inplace=True)
+
+elif source == "sklearn":
+    from sklearn.datasets import load_breast_cancer, load_diabetes
+    # df = load_breast_cancer(as_frame=True)
+    df = load_diabetes(as_frame=True)
+    X = df.data
+    y = df.target
+
+    df = X.copy()
+    df["target"] = y
+    target_name = "target"
+    sensitive_name = "sex"
+    model_name = "linear"
+
+    np.random.seed(42)
+    shuffled_indices = df.index.to_list().copy()
+    np.random.shuffle(shuffled_indices)
+    df = df.iloc[shuffled_indices, :]
+
+
+elif source  == "liblinear":
+    from sklearn.datasets import load_svmlight_file
+    X, y = load_svmlight_file(f"data/{source}/a4a.txt")
+    X = X.toarray()
+    df = pd.DataFrame(X)
+    # for col in df.columns:
+    #     print(df[col].unique())
+    y[y == -1] = 0
+    df["target"] = y
+    target_name = "target"
+    sensitive_name = 10
+    model_name = "logistic"
+
+    print(df.head())
+    exit()
+
+elif source == "ucirvine":
+    data_name = "student"
+    if data_name == "adult":
+        # column_names = get_uci_column_names(f'data/{source}/{data_name}/{data_name}.names')
+        column_names = [
+            'age', 'workclass', 'fnlwgt', 'education', 'education-num',
+            'marital-status', 'occupation', 'relationship', 'race', 'sex',
+            'capital-gain', 'capital-loss', 'hours-per-week', 'native-country',
+            'income'  # This is the target variable
+        ]
+        # df = pd.read_csv(, header=None, names=column_names)
+        df = pd.read_csv(
+            f'data/{source}/{data_name}/{data_name}.data',
+            header=None,
+            names=column_names,
+            sep=',\s*',
+            engine='python',
+            na_values='?',
+            skiprows=1  # Skip the first row, which often has a note/header
+        )
+        target_name = "income"
+        sensitive_name = "race"#"cat__sex_Male" # sex is already as fair as it can
+        model_name = "logistic"
+        df = df.loc[df["age"] <= 65,:]
+
+
+        # Preprocessing of UC Irvine
+        X, y, pipe = preprocess_adult_data(df, pass_features=[sensitive_name])
+        sensitive_name = f"passthrough__{sensitive_name}" # updated with preprocessing
+        X = pd.DataFrame(X, columns=pipe.get_feature_names_out())
+
+        # print(X.head())
+        df = X.copy()
+        df[target_name] = y
+        df.drop(columns=["passthrough__fnlwgt"], inplace=True)
+    elif data_name == "student":
+        df = pd.read_csv(f'data/{source}/{data_name}/{data_name}-mat.csv', sep=";")
+        sensitive_name = "sex"
+        target_name = "G3"
+        model_name = "poisson"
+        X, y, pipe= preprocess_adult_data(df, target_name=target_name, pass_features=[sensitive_name])
+        sensitive_name = f"passthrough__{sensitive_name}" # updated with preprocessing
+        X = pd.DataFrame(X, columns=pipe.get_feature_names_out())
+        y = pd.Series(y)
+        # print(X.dtypes)
+        # print(X.head())
+
+        df = X.copy()
+        df[target_name] = y
+
+    # # exit()
+    # for col in X.columns:
+    #     if "school" in col:
+    #         print(col)
+
+
+    # Shuffling
+    seed=234#123
+    np.random.seed(seed)
+    shuffled_indices = df.index.to_list().copy()
+    np.random.shuffle(shuffled_indices)
+    df = df.iloc[shuffled_indices, :]
+
+    print(df.shape)
+
 
 #%% Preprocessing
 
-# Get only the desired columns
-with open('params.yaml', 'r') as file:
-    params = yaml.safe_load(file)
-
-desired_columns = params['model']['predictor']['all'] +  ['meta_sale_price', 'meta_sale_date'] 
-df = df.loc[:,desired_columns]
-
-
-# Train - test split
-df.sort_values(by="meta_sale_date", ascending=True, inplace=True)
+# Data size
 n,m = df.shape
+print(df.head())
+print(df[target_name].unique())
+
+
 print("shape: ", (n,m))
-train_prop = 0.822871 # exact match of 2022 // 2023+2024
+train_prop = 0.822871 if source == "CCAO" else 0.8 # exact match of 2022 // 2023+2024
 df_train = df.iloc[:int(train_prop*n),:]
 df_test = df.iloc[int(train_prop*n):,:]
 
 # Random sample of train
-sample_size = 10000
+sample_size = 100 # 1000 samples for Adult (?)
 if sample_size < df_train.shape[0]:
-    df_train = df_train.sample(min(sample_size, df_train.shape[0]), random_state=42, replace=False)
+    print("working with a sample (10k)")
+    df_train = df_train.sample(min(sample_size, df_train.shape[0]), random_state=seed, replace=False)
+
+    # if source == "ucirvine":
+        # Repeat rows
+        # df_train = df_train.loc[df.index.repeat(df['passthrough__fnlwgt'])].reset_index(drop=True)
+
+    print("shape: ", (n,m))
+
 else:
     sample_size = df_train.shape[0]
-df_train.sort_values(by="meta_sale_date", ascending=True, inplace=True)
+
+if source == "CCAO":
+    df_train.sort_values(by="meta_sale_date", ascending=True, inplace=True)
 
 # Train - val split
-train_prop = 0.8622 # almost exact match of 2021 // 2022, for 10k sample
+train_prop = 0.822871 if source == "CCAO" else 0.8 # almost exact match of 2021 // 2022, for 10k sample
 df_val = df_train.iloc[int(train_prop*sample_size):,:]
 df_train = df_train.iloc[:int(train_prop*sample_size),:]
-df_train['meta_sale_date']
+# df_train['meta_sale_date']
 
 
 # Create proper X,y 
-X_train, y_train = df_train.drop(columns=['meta_sale_date', 'meta_sale_price']), df_train['meta_sale_price']
-X_val, y_val = df_val.drop(columns=['meta_sale_date', 'meta_sale_price']), df_val['meta_sale_price']
-X_test, y_test = df_test.drop(columns=['meta_sale_date', 'meta_sale_price']), df_test['meta_sale_price']
+if source == "CCAO":
+    X_train, y_train = df_train.drop(columns=['meta_sale_date', 'meta_sale_price']), df_train['meta_sale_price']
+    X_val, y_val = df_val.drop(columns=['meta_sale_date', 'meta_sale_price']), df_val['meta_sale_price']
+    X_test, y_test = df_test.drop(columns=['meta_sale_date', 'meta_sale_price']), df_test['meta_sale_price']
 
-# Log version of the targets
-y_train_log = np.log(y_train)
-y_val_log = np.log(y_val)
-y_test_log = np.log(y_test)
+    # Log version of the targets
+    y_train_log = np.log(y_train)
+    y_val_log = np.log(y_val)
+    y_test_log = np.log(y_test)
+
+    # Preprocessing pipeline (TO BE REVISED)
+    linear_pipeline = build_model_pipeline(
+        pred_vars=params['model']['predictor']['all'],
+        cat_vars=params['model']['predictor']['categorical'],
+        id_vars=[],
+    )
+
+    X_train = linear_pipeline.fit_transform(X_train, y_train_log)
+    X_val = linear_pipeline.transform(X_val)
+    X_test = linear_pipeline.transform(X_test)
+    X_train.head()
+
+else:
+    X_train, y_train = df_train.drop(columns=[target_name, sensitive_name]), df_train[target_name]
+    X_val, y_val = df_val.drop(columns=[target_name, sensitive_name]), df_val[target_name]
+    X_test, y_test = df_test.drop(columns=[target_name, sensitive_name]), df_test[target_name]
 
 
-# Preprocessing pipeline (TO BE REVISED)
-linear_pipeline = build_model_pipeline(
-    pred_vars=params['model']['predictor']['all'],
-    cat_vars=params['model']['predictor']['categorical'],
-    id_vars=[],
-)
+    # def normalize_rows(X):
+    #     X_ = X.to_numpy()
+    #     norm_ = np.linalg.norm(X_, axis=1, keepdims=True)
+    #     return pd.DataFrame(X_ / norm_, columns=X.columns, index=X.index)
 
-X_train = linear_pipeline.fit_transform(X_train, y_train_log)
-X_val = linear_pipeline.transform(X_val)
-X_test = linear_pipeline.transform(X_test)
-X_train.head()
-
+    # # WARNING: Normalization
+    # scaler = MinMaxScaler()
+    # X_train = scaler.fit_transform(X_train)
+    # X_val = scaler.transform(X_val)
+    # X_test = scaler.transform(X_test)
+    # X_train = normalize_rows(X_train)
+    # X_val = normalize_rows(X_val)
+    # X_test = normalize_rows(X_test)
 #%% Linera Models
+
+# Prepare data
+if source == "CCAO":
+    y_train_scaled = y_train_log
+    y_val_scaled = y_val_log
+    y_test_scaled = y_test_log
+else: 
+    y_train_scaled = y_train
+    y_val_scaled = y_val
+    y_test_scaled = y_test
 
 from sklearn.linear_model import LinearRegression
 
 model = LinearRegression(fit_intercept=True)
-model.fit(X_train, y_train_log)
+model.fit(X_train, y_train_scaled)
 y_pred_train = model.predict(X_train)
 y_pred_val = model.predict(X_val)
 y_pred_test = model.predict(X_test)
 
-print("train RMSE: ", root_mean_squared_error(y_train_log, y_pred_train) )
-ols_mse = root_mean_squared_error(y_train_log, y_pred_train)**2
+print("train RMSE: ", root_mean_squared_error(y_train_scaled, y_pred_train) )
+ols_mse = root_mean_squared_error(y_train_scaled, y_pred_train)**2
 
-print(r"$R^2$ in Train: ",r2_score(y_pred_train, y_train_log))
-print(r"$R^2$ in Val: ",r2_score(y_pred_val, y_val_log))
-print(r"$R^2$ in Test: ",r2_score(y_pred_test, y_test_log))
+print(r"$R^2$ in Train: ",r2_score(y_pred_train, y_train_scaled))
+print(r"$R^2$ in Val: ",r2_score(y_pred_val, y_val_scaled))
+print(r"$R^2$ in Test: ",r2_score(y_pred_test, y_test_scaled))
 print("-"*100)
 print("Residual = (y - X'b)")
-print("Max residual Train: ", np.max(y_train_log - y_pred_train))
-print("Min residual Train: ", np.min(y_train_log - y_pred_train))
-print("Avg residual Train: ", np.mean(y_train_log - y_pred_train))
-print("Median residual Train: ", np.median(y_train_log - y_pred_train))
+print("Max residual Train: ", np.max(y_train_scaled - y_pred_train))
+print("Min residual Train: ", np.min(y_train_scaled - y_pred_train))
+print("Avg residual Train: ", np.mean(y_train_scaled - y_pred_train))
+print("Median residual Train: ", np.median(y_train_scaled - y_pred_train))
 print("-"*100)
-print("Max residual Val: ", np.max(y_val_log - y_pred_val))
-print("Min residual Val: ", np.min(y_val_log - y_pred_val))
-print("Avg residual Val: ", np.mean(y_val_log - y_pred_val))
-print("Median residual Val: ", np.median(y_val_log - y_pred_val))
+print("Max residual Val: ", np.max(y_val_scaled - y_pred_val))
+print("Min residual Val: ", np.min(y_val_scaled - y_pred_val))
+print("Avg residual Val: ", np.mean(y_val_scaled - y_pred_val))
+print("Median residual Val: ", np.median(y_val_scaled - y_pred_val))
 
+
+# Convert the train to binary
+if source == "CCAO":
+    y_avg = np.mean(y_train_log) # same avg for all splits
+    y_train_scaled = (y_train_log >= y_avg) + 0.0 
+    y_val_scaled = (y_val_log >= y_avg) + 0.0 
+    y_test_scaled = (y_test_log >= y_avg) + 0.0 
+    if model_name == "svm": # T: [0,1] -> [-1,1]
+        y_train_scaled = 2 * y_train_scaled - 1
+        y_val_scaled = 2 * y_val_scaled - 1
+        y_test_scaled = 2 * y_test_scaled - 1 
 
 
 # Logistic Regression
 print("-"*100)
-print("LOGISTIC REGRESSION ")
+print(f"{model_name.upper()} REGRESSION ")
 
-model_name = "svm"
 model = MyGLMRegression(fit_intercept=True, solver="MOSEK", model_name=model_name, l2_lambda=0, eps=1e-4)
 print(model)
+print(X_train.shape)
+print(df_train.shape)
 
-# Convert the train to binary
-y_avg = np.mean(y_train_log) # same avg for all splits
-y_train_binary = (y_train_log >= y_avg) + 0.0 
-y_val_binary = (y_val_log >= y_avg) + 0.0 
-y_test_binary = (y_test_log >= y_avg) + 0.0 
-if model_name == "svm": # T: [0,1] -> [-1,1]
-    y_train_binary = 2 * y_train_binary - 1
-    y_val_binary = 2 * y_val_binary - 1
-    y_test_binary = 2 * y_test_binary - 1 
+model.fit(X_train, y_train_scaled)
+y_pred_train_scaled = model.predict(X_train)
+print(y_pred_train_scaled.size)
+print(np.round(y_train_scaled[:10].to_numpy(), 0))
+# print(y_pred_train_scaled[:10])
+print(np.round(y_pred_train_scaled[:10], 0))
+y_pred_val_scaled = model.predict(X_val)
+y_pred_test_scaled = model.predict(X_test)
+if model_name in ["poisson", "linear"]:
+    print("Train Accuracy R2: ", r2_score(y_train_scaled, y_pred_train_scaled))
+    print("Val Accuracy R2: ",  r2_score(y_val_scaled, y_pred_val_scaled))
+    print("Test Accuracy R2: ", r2_score(y_test_scaled, y_pred_test_scaled))
 
-model.fit(X_train, y_train_binary)
-y_pred_train_binary = model.predict(X_train)
-print(y_train_binary[:10].to_numpy())
-print(np.round(y_pred_train_binary[:10]))
-y_pred_val_binary = model.predict(X_val)
-# y_pred_test_binary = model.predict(X_test)
-print("Train Accuracy (1-MAE): ", np.mean(y_train_binary == np.round(y_pred_train_binary)))#1-mean_absolute_error(y_train_binary, y_pred_train_binary))
-print("Val Accuracy (1-MAE): ",  np.mean(y_val_binary == np.round(y_pred_val_binary)))
-# print("Test Accuracy (1-MAE): ", 1-mean_absolute_error(y_test_binary, np.round(y_pred_test_binary)))
+    # SENSITIVE FEATURE ERROR
+    if source != "CCAO":
+        print(X_train.shape)
+        for cat in df_train[sensitive_name].unique():
+            # print(np.sum(df_train[sensitive_name] == cat))
+            mask = np.where(df_train[sensitive_name] == cat)[0]
+            print(mask)
+            print(X_train.shape)
+            X_cat, y_cat = X_train.iloc[mask, :], y_train_scaled.iloc[mask].to_numpy()
+            y_cat_pred = y_pred_train_scaled[mask]
+            print(f"Size of {sensitive_name}={cat}: ", y_cat.size)#* X_cat['passthrough__fnlwgt'].sum())
+            print(f"Accuracy of {sensitive_name}={cat}: ", r2_score(y_cat, y_cat_pred))
+            # print(f"Accuracy of {sensitive_name}={cat}: ", root_mean_squared_error(y_train_scaled, y_pred_train_scaled))
+elif model_name in ["logistic"]:
+    print("Train Accuracy (1-MAE): ", np.mean(y_train_scaled == np.round(y_pred_train_scaled)))#1-mean_absolute_error(y_train_scaled, y_pred_train_scaled))
+    print("Val Accuracy (1-MAE): ",  np.mean(y_val_scaled == np.round(y_pred_val_scaled)))
+    print("Test Accuracy (1-MAE): ", 1-mean_absolute_error(y_test_scaled, np.round(y_pred_test_scaled)))
 
+    # SENSITIVE FEATURE ERROR
+    if source != "CCAO":
+        for cat in df[sensitive_name].unique():
+            y_train_cat = y_train_scaled.loc[df_train[sensitive_name] == cat]
+            y_train_pred_cat = y_pred_train_scaled[df_train[sensitive_name] == cat]
+            X_cat, y_cat = X_train.loc[df_train[sensitive_name] == cat, :], y_train_cat
+            print(f"Size of {sensitive_name}={cat}: ", y_train_cat.size)#* X_cat['passthrough__fnlwgt'].sum())
+            acc = y_train_cat == np.round(y_train_pred_cat)
+            # print(df['passthrough__fnlwgt'].to_numpy().size)
+            # print(acc.size)
+            # acc *= X_cat['passthrough__fnlwgt'].to_numpy() / X_cat['passthrough__fnlwgt'].sum()
+            print(f"Accuracy of {sensitive_name}={cat}: ", np.mean(acc))
+
+
+    #         # Borrar
+    #         model.fit(X_cat, y_cat)
+    #         y_cat_pred = model.predict(X_cat)
+    #         # print(f"Size of {sensitive_name}={cat}: ", y_train_cat.size)
+            # print(f"Post Accuracy of {sensitive_name}={cat}: ", np.mean(y_cat == np.round(y_cat_pred)))
+exit()
 
 import numpy as np
 import pandas as pd
@@ -214,7 +408,7 @@ from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_sco
 if __name__ == '__main__':
     # --- Configuration ---
     NUM_GROUPS = 3
-    percentages = np.linspace(0, .1, 4)
+    percentages = np.linspace(0, .05, 9)
     model_name = "logistic"
     l2_lambda = 0#1e-4
     # percentages = np.linspace(0, .02, 21)
@@ -253,6 +447,7 @@ if __name__ == '__main__':
             objective="mse",
             constraint="max_mse",
             model_name=model_name,
+            eps=1e-4,
         )
         # Robust version
         # l1_, l2_ = 1e-1, 5e3#1e2*10**(10*rmse_percentage_increase) # 1e-1/10**(10*rmse_percentage_increase), 1e-1*10**(10*rmse_percentage_increase))
@@ -267,29 +462,27 @@ if __name__ == '__main__':
         # )
 
         # Train R2: 0.7954 | Val R2: 0.7876 -- l1:  1.778279410038923e-06  | l2:  5623.413251903491
-        
-        # WARNING: Normalization
-        scaler = MinMaxScaler()
-        X_train = scaler.fit_transform(X_train)
-        X_val = scaler.transform(X_val)
-        X_test = scaler.transform(X_test)
 
         # Target transformation for a given model
-        if model_name == "linear":
-            y_train_scaled = y_train_log
-        elif model_name in ["logistic", "svm"]:
-            y_train_scaled = ( y_train_log - y_train_log.min() ) / ( y_train_log.max() - y_train_log.min() )
-            if model_name == "svm":
-                y_train_scaled = 2 * np.round(y_train_scaled) - 1
-        elif model_name == "poisson":
-            print("y max: ", y_train.max())
-            print("y min: ", y_train.min())
-            y_train_scaled = y_train // 100000 + 1
-            print("y max: ", y_train_scaled.max())
-            print("y min: ", y_train_scaled.min())
+        if source == "CCAO":
+            if model_name == "linear":
+                y_train_scaled = y_train_log
+            elif model_name in ["logistic", "svm"]:
+                y_train_scaled = ( y_train_log - y_train_log.min() ) / ( y_train_log.max() - y_train_log.min() )
+                if model_name == "svm":
+                    y_train_scaled = 2 * np.round(y_train_scaled) - 1
+            elif model_name == "poisson":
+                print("y max: ", y_train.max())
+                print("y min: ", y_train.min())
+                y_train_scaled = y_train // 100000 + 1
+                print("y max: ", y_train_scaled.max())
+                print("y min: ", y_train_scaled.min())
+            result, solve_time, pof, fei, pof_exp_lb, pof_exp_ub, pof_taylor, pof_lb, pof_ub, fairness = model.fit(X_train, y_train_scaled, sensitive_feature=y_train_log, sensitive_nature="continuous")
+        else:
+
+            result, solve_time, pof, fei, pof_exp_lb, pof_exp_ub, pof_taylor, pof_lb, pof_ub, fairness = model.fit(X_train, y_train_scaled, sensitive_feature=df_train[sensitive_name], sensitive_nature="discrete")
         # Fit model and make predictions
         # result, solve_time, pof, fei, pof_lb, pof_ub, fairness = model.fit(X_train, y_train_log)
-        result, solve_time, pof, fei, pof_exp_lb, pof_exp_ub, pof_taylor, pof_lb, pof_ub, fairness = model.fit(X_train, y_train_scaled, y_real_values=y_train_log)
         
         pof_list.append(pof)
         pof_lb_list.append(pof_lb)
@@ -303,11 +496,11 @@ if __name__ == '__main__':
         y_pred_val = model.predict(X_val)
 
         # Calculate and store statistics
-        train_stats = calculate_detailed_statistics(y_train_log, y_pred_train, num_groups=NUM_GROUPS)
+        train_stats = calculate_detailed_statistics(y_train_scaled, y_pred_train, num_groups=NUM_GROUPS)
         train_stats['percentage'] = rmse_percentage_increase
         train_results_list.append(train_stats)
         
-        val_stats = calculate_detailed_statistics(y_val_log, y_pred_val, num_groups=NUM_GROUPS)
+        val_stats = calculate_detailed_statistics(y_val_scaled, y_pred_val, num_groups=NUM_GROUPS)
         val_stats['percentage'] = rmse_percentage_increase
         val_results_list.append(val_stats)
 
@@ -318,8 +511,8 @@ if __name__ == '__main__':
         print("-" * 100 + "\n")
 
         # Summary
-        print(analyze_fairness_by_value(y_pred_train, y_train).round(3).T.to_csv(f"outputs/reports/motivation/summary_train_{rmse_percentage_increase:.4f}.csv",  float_format='%.3f'))
-        print(analyze_fairness_by_value(y_pred_val, y_val).round(3).T.to_csv(f"outputs/reports/motivation/summary_val_{rmse_percentage_increase:.4f}.csv",  float_format='%.3f'))
+        # print(analyze_fairness_by_value(y_pred_train, y_train).round(3).T.to_csv(f"outputs/reports/motivation/summary_train_{rmse_percentage_increase:.4f}.csv",  float_format='%.3f'))
+        # print(analyze_fairness_by_value(y_pred_val, y_val).round(3).T.to_csv(f"outputs/reports/motivation/summary_val_{rmse_percentage_increase:.4f}.csv",  float_format='%.3f'))
 
 
     # --- Temporal Plot ---
@@ -328,7 +521,7 @@ if __name__ == '__main__':
     plt.plot(percentages*100, 100*np.array(pof_taylor_list), "--x", label="POF Taylor (lin. + quad.)", color="lightgreen", alpha=1)
     plt.plot(percentages*100, 100*np.array(pof_list), "--o", label="POF", color="blue")
     plt.plot(percentages*100, 100*np.array(pof_lb_list), "--x", label="POF LB (lin. + quad.)", color="red", alpha=0.5)
-    plt.plot(percentages*100, 100*np.array(pof_ub_list), "--x", label="POF UB (quad. + quad.)", color="black", alpha=0.5)
+    # plt.plot(percentages*100, 100*np.array(pof_ub_list), "--x", label="POF UB (quad. + quad.)", color="black", alpha=0.5)
     plt.plot(percentages*100, 100*np.array(pof_exp_lb_list), "--x", label="POF LB (exp.) [1-D opt.]", color="red", alpha=0.9)
     plt.plot(percentages*100, 100*np.array(pof_exp_ub_list), "--x", label="POF UB (exp.) [1-D opt.]", color="red", alpha=0.9)
     # plt.xlabel("Fairness Threshold Improvement (%)")
@@ -353,21 +546,21 @@ if __name__ == '__main__':
 
     # plt.plot(percentages, fei_list)
 
-    # --- Analysis and Plotting ---
-    train_results_df = pd.DataFrame(train_results_list)
-    val_results_df = pd.DataFrame(val_results_list)
+    # # --- Analysis and Plotting ---
+    # train_results_df = pd.DataFrame(train_results_list)
+    # val_results_df = pd.DataFrame(val_results_list)
 
-    print(train_results_df)
-    print(val_results_df)
+    # print(train_results_df)
+    # print(val_results_df)
 
-    # Re-map columns for plotting function compatibility
-    train_results_df.columns = train_results_df.columns.str.replace('overall_', '')
-    val_results_df.columns = val_results_df.columns.str.replace('overall_', '')
+    # # Re-map columns for plotting function compatibility
+    # train_results_df.columns = train_results_df.columns.str.replace('overall_', '')
+    # val_results_df.columns = val_results_df.columns.str.replace('overall_', '')
 
-    print("Generating plots for training data...")
-    plot_tradeoff_analysis(train_results_df, percentages, num_groups=NUM_GROUPS, save_dir="img/motivation/tradeoff_analysis/train")
+    # print("Generating plots for training data...")
+    # plot_tradeoff_analysis(train_results_df, percentages, num_groups=NUM_GROUPS, save_dir="img/motivation/tradeoff_analysis/train")
     
-    print("\nGenerating plots for validation data...")
-    plot_tradeoff_analysis(val_results_df, percentages, num_groups=NUM_GROUPS, save_dir="img/motivation/tradeoff_analysis/val")
+    # print("\nGenerating plots for validation data...")
+    # plot_tradeoff_analysis(val_results_df, percentages, num_groups=NUM_GROUPS, save_dir="img/motivation/tradeoff_analysis/val")
 
 

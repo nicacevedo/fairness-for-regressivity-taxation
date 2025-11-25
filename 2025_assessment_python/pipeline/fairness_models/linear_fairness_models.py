@@ -773,7 +773,7 @@ class MyGLMRegression:
         # To be used in constraints of CVXPY
         def get_bregman_divergence_cxpy(X, y, beta, model="logistic", eps=1e-4):
             theta = X @ beta
-            y_ = y.copy()
+            y_ = np.array(y, dtype=np.float64).copy()
             if model == "linear":
                 eta = y_ 
                 psi = lambda z: z**2/2
@@ -855,15 +855,24 @@ class MyGLMRegression:
 
 
     
-def get_group_bins_indices(y, n_groups=3):
-    interval_size = y.max() - y.min() + 1e-6 # a little bit more
-    bins = y.min() + np.array([i*interval_size /n_groups for i in range(n_groups+1)])
-    bin_indices_list = []
-    for j,lb in enumerate(bins[:-1]):
-        ub = bins[j+1]
-        bin_indices = np.where((y>=lb) & (y<ub))[0]
-        bin_indices_list.append(bin_indices)
-    return bin_indices_list
+def get_group_bins_indices(y, n_groups=3, nature="continuous"):
+    if nature == "continuous":
+        interval_size = y.max() - y.min() + 1e-6 # a little bit more
+        bins = y.min() + np.array([i*interval_size /n_groups for i in range(n_groups+1)])
+        bin_indices_list = []
+        for j,lb in enumerate(bins[:-1]):
+            ub = bins[j+1]
+            bin_indices = np.where((y>=lb) & (y<ub))[0]
+            bin_indices_list.append(bin_indices)
+    elif nature =="discrete":
+        print("doing the discete binning...")
+        groups = np.unique(y)
+        n_groups = groups.size
+        bin_indices_list = []
+        for g in groups:
+            bin_indices = np.where(y == g)[0]
+            bin_indices_list.append(bin_indices)
+    return bin_indices_list, n_groups
 
 class GroupDeviationConstrainedLogisticRegression:
     #  add_rmse_constraint=False,
@@ -872,7 +881,7 @@ class GroupDeviationConstrainedLogisticRegression:
         self.fit_intercept = fit_intercept
         self.percentage_increase = percentage_increase
         self.model_name=model_name
-        # Ooptimization
+        # Optimization
         self.objective = objective # mae / mse
         self.constraint = constraint # max_mae / max_mse / max_mae_diff / max_mse_diff
         self.solver = solver
@@ -886,7 +895,7 @@ class GroupDeviationConstrainedLogisticRegression:
 
 
 
-    def fit(self, X, y, y_real_values=None):
+    def fit(self, X, y, sensitive_feature=None, sensitive_nature="continuous"):
         try:
             X = X.to_numpy()
         except Exception as e:
@@ -956,13 +965,13 @@ class GroupDeviationConstrainedLogisticRegression:
         
         def get_bregman_divergence_value(X, y, beta, model="linear", eps=1e-4):
             theta = X @ beta
-            y_ = y.copy()
+            y_ =  np.array(y, dtype=np.float64).copy()
             if model == "linear":
                 eta = y_ 
                 psi = lambda z: z**2/2
             elif model=="logistic": 
-                y_[y > 1-eps] = 1-eps
-                y_[y < eps] = eps 
+                y_[y > 1-eps] -= eps
+                y_[y < eps] += eps 
                 eta = np.log(y_ / (1-y_)) # explodes in 0 and 1
                 psi = lambda z: np.log(1+np.exp(z)) 
             elif model =="poisson":
@@ -1003,25 +1012,29 @@ class GroupDeviationConstrainedLogisticRegression:
         H_0_inv = np.linalg.pinv(H_0)
         M_psi = 1 if self.model_name != "linear" else 0# for logistic (I think for SVM we maintain the 1)
 
-        print("Predicted y's: ", glm.predict(X[:10,:]))
-        print("The real  y's: ", np.sign(y[:10]))
+        print("Predicted y's: ", np.round(glm.predict(X[:20,:])))
+        print("The real  y's: ", y[:20])
 
         # Fairness constraints utils
-        bin_indices_list = get_group_bins_indices(y_real_values, n_groups=self.n_groups)
+        bin_indices_list, n_groups = get_group_bins_indices(sensitive_feature, n_groups=self.n_groups, nature=sensitive_nature)
+        g_max = np.argmax([len(x) for x in bin_indices_list]) # The largest group
+        print("bin_indices_list, n_groups: ", n_groups, [len(_) for _ in bin_indices_list])
+        self.n_groups = n_groups # update in case its not continuous
         tau = 0 # Compute the max diference of the unconstrained problem
         loss_0 = get_loss_value(X, y, beta_0, model=self.model_name)#j_0#np.mean( np.log( 1 + np.exp(X @ beta_0) ) - y * (X @ beta_0) )
         print("loss_0: ", loss_0)
         b_d_0 = get_bregman_divergence_value(X, y, beta_0, model=self.model_name, eps=self.eps)
-        acc_0 = np.average(y == np.sign(X @ beta_0)) 
+        acc_0 = np.average(y == np.round(get_psi_derivatives(X, y, beta_0, model=self.model_name, gamma=self.eps)[0]))
         print("Accuracy 0: ", acc_0)
         print("Bregman divergence 0: ", b_d_0)
+        g_0 = -1
         for g in range(self.n_groups):
             print("Group: ", g, len(bin_indices_list[g]))
             X_g , y_g = X[bin_indices_list[g], :], y[bin_indices_list[g]]
             # theta_0_g = X_g @ beta_0
             loss_0_g = get_loss_value(X_g, y_g, beta_0, model=self.model_name) #np.mean( np.log( 1 + np.exp(theta_0_g) ) - y_g * theta_0_g )
             print("loss_0_g: ", loss_0_g)
-            print("Accuracy 0_g: ", np.average(y_g == np.sign(X_g @ beta_0)) )
+            print("Accuracy 0_g: ", np.average(y_g == np.round(get_psi_derivatives(X_g, y_g, beta_0, model=self.model_name, gamma=self.eps)[0])))
 
             # bregman
             b_d = get_bregman_divergence_value(X_g, y_g, beta_0, model=self.model_name, eps=self.eps)
@@ -1029,15 +1042,22 @@ class GroupDeviationConstrainedLogisticRegression:
             # print("Bregman 0_g OLS: ", get_bregman_divergence_value(X_g, y_g, beta_ols, model=self.model_name, eps=self.eps))
             # print("MSE/2 0_g: ", root_mean_squared_error(y_g, X_g @ beta_ols)**2/2)
             if b_d > tau:
-                tau = b_d
+                tau, g_0 = b_d, g
         tau_bound = tau * (1-self.percentage_increase)
         print("tau 0: ", tau)
         print("fair tau bound: ", tau_bound)
 
+        # STOPPING CONDITION (cannot be more fair)
+        if g_0 == g_max:
+            print("THE MODEL CANNOT BE MORE FAIR THAN BASELINE")
+            self.beta = beta_0
+            return b_d_0, 0, 0, 0, 0, 0, 0, 0, 0, tau
+
+
         # To be used in constraints of CVXPY
         def get_bregman_divergence_cxpy(X, y, beta, model="logistic", eps=1e-4):
             theta = X @ beta
-            y_ = y.copy()
+            y_ = np.array(y, dtype=np.float64).copy()
             if model == "linear":
                 eta = y_ 
                 psi = lambda z: z**2/2
@@ -1110,23 +1130,33 @@ class GroupDeviationConstrainedLogisticRegression:
             print(f"J_0 objective (original loss): {J_0}")
             print(f"J_F objective (current loss): {result}")
             price_of_fairness = (result-J_0)/J_0
-            print(f"POF (MSE % decrease): ", price_of_fairness)
+            print(f"POF (Divergence Loss % decrease): ", price_of_fairness)
         elif self.objective == "mse": # [PENDING] Update the l2 version
             # J_0, result = get_bregman_divergence_value(X, y, beta_0, model=self.model_name, eps=self.eps), get_bregman_divergence_value(X, y, beta.value, model=self.model_name, eps=self.eps)
             print(f"J_0 objective (original loss): {J_0}")
             print(f"J_F objective (current loss): {result}")
             price_of_fairness = (result-J_0)/J_0
-            print(f"POF (MSE % decrease): ", price_of_fairness)
+            print(f"POF (Divergence Loss % decrease): ", price_of_fairness)
             acc_F = np.average(y == np.sign(X @ beta.value)) 
             print(f"POF Accuracy: ", (acc_0 - acc_F) / acc_0)
             # pass 
 
+
         # Approximating the F function
         real_tau, real_tau_g = 0, -1
+        real_taus, real_tau_gs = [], []
+
+        # 1) Fairness improvement approximation and bounds
+        fairness_improvement = np.abs(real_tau - tau)
+        delta_fairness = self.percentage_increase*tau # tau - real_tau
+
+        # Fairness improvement
+        fairness_effective_improvement = delta_fairness/tau
+        print(f"FEI (% improvement)", fairness_effective_improvement)
 
         b_d_F = get_bregman_divergence_value(X, y, beta.value, model=self.model_name, eps=self.eps)
         print("POF (bregman divergence?): ", (b_d_F - b_d_0) / b_d_0)
-        # print("New (F) Bregman divergence 0: ", b_d_F)
+        print("New (F) Bregman divergence 0: ", b_d_F)
         # print("New F Accuracy: ", acc_F)
         # print("Direct Taylor of MSE / 2: ", (beta.value - beta_0).T @ H_0 @ (beta.value - beta_0) / 2)
         for g, ind_g in enumerate(bin_indices_list):
@@ -1137,33 +1167,77 @@ class GroupDeviationConstrainedLogisticRegression:
             # approx_error_g = np.mean( np.abs( np.exp(theta_g.value)/(1 + np.exp(theta_g.value)) - y_g ) ) 
             # print("New (F) Accuracy: ", np.mean(y_g == np.sign(X_g @ beta.value)))
             b_d = get_bregman_divergence_value(X_g, y_g, beta.value, model=self.model_name, eps=self.eps)#np.mean( np.log( 1 + np.exp(theta_g) ) - y_g * theta_g - (np.log(1+ np.exp(eta_y_g)) - y_g * eta_y_g) )
-            # print("New (F) Bregman divergence g: ", g, b_d)
-            if b_d >= real_tau:
-                real_tau = b_d
-                real_tau_g = g            
+            print("New (F) Bregman divergence g: ", g, b_d)
+            if np.abs(b_d - real_tau) <= self.eps:
+                print("There are at least 2 active groups!!!!")
+                # STOPPING CONDITION (cannot be more fair)
+                print(g, g_max)
+                if g_max in real_tau_gs:
+                    print("THE MODEL CANNOT BE MORE FAIR!!")
+                    self.beta = beta.value
+                    return result, solve_time, np.nan, fairness_effective_improvement, np.nan, np.nan, np.nan, np.nan, np.nan, real_tau
+                real_taus.append(b_d)
+                real_tau_gs.append(g)
+                print("Argmax g's: ", real_tau_gs)
 
-        # 1) Fairness improvement approximation and bounds
-        fairness_improvement = np.abs(real_tau - tau)
-        delta_fairness = self.percentage_increase*tau # tau - real_tau
+            elif b_d >= real_tau:
+                real_tau = b_d
+                real_tau_g = g    
+                real_taus = [b_d]
+                real_tau_gs = [g]
+
+        # if delta_fairness == 0:
+        #     return result, solve_time, price_of_fairness, fairness_improvement, 0, 0, 0, 0, 0, real_tau 
         # virtual_fairness_improvement = np.abs(tau * (1 - self.percentage_increase) - tau)
 
 
         # Bounds on POF from MSE and MSE
         if self.objective == "mse" and self.constraint == "max_mse":
-            g, indices_g = real_tau_g, bin_indices_list[real_tau_g]
+            # if len(real_tau_gs) > 1:
+                # d_H_d = 1e3
+                # for s, real_tau_g in enumerate(real_tau_gs):
+                #     g_, indices_g_ = real_tau_g, bin_indices_list[real_tau_g]
+                #     n_g, X_g, y_g = len(indices_g_), X[indices_g_,:], y[indices_g_]
+
+                #     # Taylor approximation "bounds" (not secured to be bounds, is just the approximation)
+                #     w_0_g, w_0_2_g = get_psi_derivatives(X_g, y_g, beta_0, model=self.model_name)
+                #     a_0_g = (1/n_g) * X_g.T @ (w_0_g - y_g )
+                #     H_0_g = (1/n_g) * X_g.T @ np.diag(w_0_2_g) @ X_g
+                #     # H_0_g_inv = np.linalg.pinv(H_0_g)
+
+                #     # Direction d:=Delta beta* from the Taylor approximation
+                #     A_0 = a_0_g.T @ H_0_inv @ a_0_g 
+                #     d = -(delta_fairness) * H_0_inv @ a_0_g / A_0 # Delta beta*
+                #     if d_H_d > d.T @ H_0 @ d: # the one that minimzes ||d||_H0^2
+                #         g, indices_g = g_, indices_g_ # update if better
+                #         real_tau = real_taus[s]
+                #         d_H_d = d.T @ H_0 @ d
+                #         # d_H_inv_d = d.T @ H_0_inv @ d
+                #         print("Group: ", g)
+                #         print("d_H_d: ", d_H_d)
+                #         print("a_0 @ d: ", a_0_g @ d)
+                #         # print("d H_inv d", d_H_inv_d)
+                #         # print("Best so far: ", g, real_tau, d_H_d)
+                # exit()
+                
+            # else:
+            g, indices_g = g_0, bin_indices_list[g_0] # This is the only proper LB of the delta F
+            #real_tau_g, bin_indices_list[real_tau_g]
+            # g_LB, g_UB = g, g # they are the same best
+
+            # indices_g_LB, indices_g_UB = indices_g, indices_g 
+            print("THE CURRENT g: ", g)
+
             n_g, X_g, y_g = len(indices_g), X[indices_g,:], y[indices_g]
 
             # Taylor approximation "bounds" (not secured to be bounds, is just the approximation)
             w_0_g, w_0_2_g = get_psi_derivatives(X_g, y_g, beta_0, model=self.model_name)
-            # w_0_g = np.exp(X_g @ beta_0) / ( 1 + np.exp(X_g @ beta_0) )
             a_0_g = (1/n_g) * X_g.T @ (w_0_g - y_g )
-            # a_0_g_ = np.mean(X_g.T * (w_0_g - y_g ), axis=1)# gradient of the single J_g in b_0
             H_0_g = (1/n_g) * X_g.T @ np.diag(w_0_2_g) @ X_g
-            # H_0_g_ = np.mean( [ np.exp(X[i,:] @ beta_0) / ( 1 + np.exp(X[i,:] @ beta_0) )**2 * np.outer(X[i,:],  X[i,:]) for i in indices_g ], axis=0 )
             H_0_g_inv = np.linalg.pinv(H_0_g)
 
             # print("Checking feasibility...")
-            delta_beta_ = beta.value - beta_0
+            # delta_beta_ = beta.value - beta_0
             # print("1st order of F, using beta_F: ", a_0_g @ beta.value)
             # print("1st order of R, using beta_F: ", 2*beta_0 @ delta_beta_) # np.linalg.norm(beta_0)**2 + 
             # print("2nd order of R, using beta_F: ", 2*beta_0 @ delta_beta_ + delta_beta_ @ delta_beta_ ) # np.linalg.norm(beta_0)**2 + 
@@ -1175,6 +1249,7 @@ class GroupDeviationConstrainedLogisticRegression:
             # Direction d:=Delta beta* from the Taylor approximation
             A_0 = a_0_g.T @ H_0_inv @ a_0_g 
             d = -(delta_fairness) * H_0_inv @ a_0_g / A_0 # Delta beta*
+            
             d_old = d
             t_d = 1 # We move 1 towards d
 
@@ -1232,18 +1307,17 @@ class GroupDeviationConstrainedLogisticRegression:
             d_H_0_norm_g = d.T @ H_0_g @ d  # norm H_0_inv of Delta beta* (Computed directly with beta* instead of the previous one)
 
             # Taloy Approximation Bounds setting t=1, and d:=Delta beta*
-            if M_psi > 0:
+            if M_psi > 0 and (d @ d) > 0: # M_phi -> 0 => C(t) -> 1/2
                 M_phi = M_psi * np.max(np.abs( X @ d )) # Option 2 w./ Cauchy Schwarz (looser): M_psi * np.max(np.linalg.norm(X, axis=1))*np.linalg.norm(d)
+                print("M_phi", M_phi)
                 C_phi_LB = (np.exp(-M_phi) + M_phi - 1) / M_phi**2  # t = 1 (unless regularizer changes it)
                 C_phi_UB = (np.exp( M_phi) - M_phi - 1) / M_phi**2  # t = 1 (unless regularizer changes it)
             else:
-                M_phi, C_phi_LB, C_phi_UB = 0, .5, .5 # limit values
+                M_phi, C_phi_LB, C_phi_UB = 0, .5, .5 # limit values: M_phi -> 0 => C(t) -> 1/2
             # lambda_diff_norms = self.l2_lambda * ((beta_0 + d) @ (beta_0 + d) - beta_0 @ beta_0) # zero if l2_lambda = 0
             delta_J_taylor = (1/2) * d_H_0_inv_norm #+ lambda_diff_norms
             delta_J_taylor_lb = C_phi_LB * d_H_0_inv_norm #+ lambda_diff_norms # Lower bound
-            delta_J_taylor_ub = C_phi_UB * d_H_0_inv_norm #+ lambda_diff_norms # Lower bound
-
-
+            # delta_J_taylor_ub = C_phi_UB * d_H_0_inv_norm #+ lambda_diff_norms # Lower bound
 
             print(fr"POF J % Taylor (lin-const + taylor obj.): ", delta_J_taylor / J_0)
             print(fr"POF J % LB (lin-const + exp term.): ", delta_J_taylor_lb / J_0)
@@ -1259,19 +1333,28 @@ class GroupDeviationConstrainedLogisticRegression:
                 delta_J_taylor_ub = (t_UB**2/2) * d_H_0_inv_norm
                 print(fr"POF J % UB (taylor (const. + obj.): ", delta_J_taylor_ub / J_0)
             elif self.model_name == "logistic":
-                # Quadratic is UB with 1/4 of psi''
+                # (1) Quadratic is UB with 1/4 of psi'': d'X'D^(1/2)'D^(1/2)Xd <= ||D^(1/2)Xd||^2 <= (1/4)||Xd||^2 
                 H_0_ub = (1/n)/4 * X.T @ X
                 H_0_g_ub = (1/n_g)/4 * X_g.T @ X_g
                 d_H_0_norm_ub = d.T @ H_0_ub @ d
                 d_H_0_norm_g_ub = d.T @ H_0_g_ub @ d
-
                 a, b, c = d_H_0_norm_g_ub / 2, -delta_fairness, delta_fairness # From the fairness equality
-                t_UB_1, t_UB_2 = (-b  - np.sqrt(b**2 - 4*a*c )) / (2*a), (-b  + np.sqrt(b**2 - 4*a*c )) / (2*a)
-                print("Roots for t UB: ", (t_UB_1, t_UB_2))
-                t_UB = min(max(t_UB_1,0), max(t_UB_2,0))
-                # Future Note: constant can be either from exponential or from upper (already account for the 1/4 UB)
-                delta_J_taylor_ub = (t_UB**2/2) * d_H_0_norm_ub
-                print(fr"POF J % UB (taylor (const. + obj.): ", delta_J_taylor_ub / J_0)
+                print("a,b,c: ", (a, b, c))
+                # (2) Sum of L-smooth: 
+                # if 1/8 < a:
+                #     a=1/8 if (d@d) >= 1 else (d@d)/8  # Much looser bounds from the sum of L-smooth(?)
+                #     print("a,b,c: ", (a, b, c))
+                if b**2 >= 4*a*c and a>0:
+                    t_UB_1, t_UB_2 = (-b  - np.sqrt(b**2 - 4*a*c )) / (2*a), (-b  + np.sqrt(b**2 - 4*a*c )) / (2*a)
+                    print("Roots for t UB: ", (t_UB_1, t_UB_2))
+                    t_UB = min(max(t_UB_1,0), max(t_UB_2,0))
+                    delta_J_taylor_ub = t_UB**2 * a
+                    # Future Note: constant can be either from exponential or from upper (already account for the 1/4 UB)
+                    print(fr"POF J % UB (taylor (const. + obj.): ", delta_J_taylor_ub / J_0)
+                    print(fr"POF J % UB 2 (taylor (const. + obj.): ", (t_UB**2/8) / J_0)
+                    print(fr"POF J % UB 3 (taylor (const. + obj.): ", (t_UB**2/8) * (d@d) / J_0)
+                else:
+                    delta_J_taylor_ub = 0 if (a==0 and b==0 and c==0) else np.nan # infeasible => inf
             elif self.model_name == "poisson":
                 delta_J_taylor_ub = np.zeros(delta_J_taylor_ub.size)
                 # # Given the experiments, we are setting t\in[0,2] for now
@@ -1307,7 +1390,7 @@ class GroupDeviationConstrainedLogisticRegression:
             
             # 2) The proper Lower Bound bound with Newton Raphson/Bijection/Opt (1 dimension)
             # d := Delta beta*
-            if M_psi > 0:
+            if M_psi > 0 and (d@d)>0:
                 M_phi_g = M_psi * np.max(np.abs( X_g @ d ))
                 C_phi_LB_g = (np.exp(-M_phi_g) + M_phi_g - 1) / M_phi_g**2  # t = 1
                 C_phi_UB_g = (np.exp( M_phi_g) - M_phi_g - 1) / M_phi_g**2  # t = 1
@@ -1328,16 +1411,19 @@ class GroupDeviationConstrainedLogisticRegression:
             print("tau_bound - tau: ", tau_bound - tau)
             print("fairness delta: ", delta_fairness)
             print("-"*100)
+            print("Solving exponential LB...")
             # Variable
             t_LB = cp.Variable(1, nonneg=True)
             # d = d_ # this one could be feasible??
             # Constraint
-            if M_psi > 0:
+            if M_psi > 0 and (d @ d) > 0:
+                print("Fully exponential...")
                 print("a0g @ d: ", a_0_g @ d)
                 print("a0 @ d: ", a_0 @ d)
                 constraints=[t_LB * (a_0_g @ d)  + d_H_0_norm_g * ( cp.exp(-M_phi_g*t_LB) + t_LB*M_phi_g - 1 ) / M_phi_g**2  <= -delta_fairness ]#tau_bound - tau] #-self.percentage_increase] #
                 obj = cp.Minimize( d_H_0_inv_norm * (cp.exp(-M_phi*t_LB) + t_LB*M_phi - 1 ) / M_phi**2 + (self.l2_lambda > 0) * (t_LB * a_0 @ d ))
             else: 
+                print("Linear constrained...")
                 constraints=[t_LB * (a_0_g @ d)  <= -delta_fairness ] #tau_bound - tau] # + t_LB ** 2 * d_H_0_norm_g / 2 
                 obj = cp.Minimize(t_LB **2 * d_H_0_inv_norm / 2  + (self.l2_lambda > 0) * (t_LB * a_0 @ d ))
             # if self.l2_lambda > 0: # regularization constraint
@@ -1346,14 +1432,14 @@ class GroupDeviationConstrainedLogisticRegression:
             #     constraints+=[2 * t_LB * (beta_0 @ d)  <= 0 ] #-self.percentage_increase] #  + t_LB**2 * (d @ d) # still LB with the linearization
             #     # obj = cp.Minimize( d_H_0_inv_norm * (cp.exp(-M_phi*t_LB) + t_LB*M_phi - 1 ) / M_phi**2 )
             # # Objective 
-            primal_prob = cp.Problem(obj, constraints)
+            bound_prob = cp.Problem(obj, constraints)
             # Solve the roots
             t0 = time()
             try:
-                delta_J_lb = primal_prob.solve(solver=self.solver, verbose=False)
+                delta_J_lb = bound_prob.solve(solver=self.solver, verbose=False)
             except cp.error.SolverError:
                 print(f"{self.solver} not available, trying default solver.")
-                delta_J_lb = primal_prob.solve(verbose=True)
+                delta_J_lb = bound_prob.solve(verbose=True)
             print(fr"POF J % LB (exp): ", delta_J_lb / J_0)
             print(f"Root find for t_LB={t_LB.value} in: ", time() - t0)
 
@@ -1369,15 +1455,20 @@ class GroupDeviationConstrainedLogisticRegression:
             # Roots finder for the UB: Newton Raphson/Bijection/Opt (1 dimension)
             # Min_{t>=0} C_phi_UB(t) * d_H_inv_norm (Delta J)
             # s.t. t*(a_0_g * Delta beta*) + d_H_0_norm_g * C_phi_UB_g(t) <= -delta (Delta F)
+            print("Solving exponential UB...")
             # Variable
             t_UB = cp.Variable(1, nonneg=True)
-            if M_psi > 0:
+            if M_psi > 0 and (d@d) >0:
+                print("Fully exponential...")
                 print("a0 @ d: ", a_0_g @ d)
+                print("M_phi: ", M_phi)
+                print("M_phi_g: ", M_phi_g)
                 # Constraint
                 constraints=[t_UB * (a_0_g @ d) + d_H_0_norm_g * (cp.exp(M_phi_g*t_UB) - t_UB * M_phi_g - 1 ) / M_phi_g**2  <= -delta_fairness ]#tau_bound - tau] #-self.percentage_increase]
                 # Objective 
                 obj = cp.Minimize( (self.l2_lambda > 0) * t_LB * (a_0 @ d) + d_H_0_inv_norm * (cp.exp(M_phi*t_UB) - t_UB * M_phi - 1 ) / M_phi**2 ) # 
             else:
+                print("...?")
                 # Constraint
                 constraints=[t_UB * (a_0_g @ d) +  t_UB **2 * d_H_0_norm_g / 2  <= -delta_fairness ]#tau_bound - tau] #-self.percentage_increase]
                 # Objective 
@@ -1388,21 +1479,17 @@ class GroupDeviationConstrainedLogisticRegression:
                 # constraints+=[cp.SOC(np.linalg.norm(beta_0), beta_0 + t_UB * d )]
                 constraints+=[ 2 * t_UB * (beta_0 @ d) + t_UB**2 * (d @ d) <= 0 ] #-self.percentage_increase] #   # still LB with the linearization # 
             #     # obj = cp.Minimize( d_H_0_inv_norm * (cp.exp(-M_phi*t_UB) + t_UB*M_phi - 1 ) / M_phi**2 )
-            primal_prob = cp.Problem(obj, constraints)
+            bound_prob = cp.Problem(obj, constraints)
             # Solve the roots
             t0 = time()
             try:
-                delta_J_ub = primal_prob.solve(solver=self.solver, verbose=False)
+                delta_J_ub = bound_prob.solve(solver=self.solver, verbose=False)
             except cp.error.SolverError:
                 print(f"{self.solver} not available, trying default solver.")
-                delta_J_ub = primal_prob.solve(verbose=True)
+                delta_J_ub = bound_prob.solve(verbose=True)
             print(fr"POF J % UB (exp): ", delta_J_ub / J_0)
             print(f"Root find for t_UB={t_LB.value} in: ", time() - t0)
 
-
-        # Fairness improvement
-        fairness_effective_improvement = fairness_improvement/tau
-        print(f"FEI (% improvement)", fairness_effective_improvement)
 
         print(f"Time to solve: {solve_time}")
 
