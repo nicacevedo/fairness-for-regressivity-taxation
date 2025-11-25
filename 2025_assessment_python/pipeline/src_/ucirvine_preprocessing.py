@@ -131,9 +131,13 @@ def preprocess_adult_data(df, target_name="income", pass_features=[]):
     # 2. Binarize the target variable (income)
     # Target: >50K becomes 1, <=50K becomes 0
     # lb = LabelBinarizer()
-    le = LabelEncoder()
-    y_processed = le.fit_transform(y) #lb.fit_transform(y).ravel()
-    
+    if target_name == "Rings":
+        # print(y.head(10).to_numpy())
+        y = y.astype(int)
+        le = LabelEncoder()
+        # print(y.head(10).to_numpy())
+        y_processed = le.fit_transform(y.to_numpy())+1 #lb.fit_transform(y).ravel()
+        # print(y_processed[:10])
     # 3. Define feature types for ColumnTransformer
     # These are general types; specific columns may need adjustment
     numerical_features = X.select_dtypes(include=np.number).columns.tolist()

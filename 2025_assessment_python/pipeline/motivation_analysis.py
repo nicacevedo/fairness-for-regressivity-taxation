@@ -138,7 +138,7 @@ elif source  == "liblinear":
     exit()
 
 elif source == "ucirvine":
-    data_name = "student"
+    data_name = "abalone" #"student" # adult
     if data_name == "adult":
         # column_names = get_uci_column_names(f'data/{source}/{data_name}/{data_name}.names')
         column_names = [
@@ -177,20 +177,36 @@ elif source == "ucirvine":
         sensitive_name = "sex"
         target_name = "G3"
         model_name = "poisson"
-        X, y, pipe= preprocess_adult_data(df, target_name=target_name, pass_features=[sensitive_name])
-        sensitive_name = f"passthrough__{sensitive_name}" # updated with preprocessing
-        X = pd.DataFrame(X, columns=pipe.get_feature_names_out())
-        y = pd.Series(y)
-        # print(X.dtypes)
-        # print(X.head())
-
-        df = X.copy()
-        df[target_name] = y
-
-    # # exit()
-    # for col in X.columns:
-    #     if "school" in col:
-    #         print(col)
+    elif data_name == "abalone":
+        column_names = [
+            "Sex",
+            "Length",		    #	mm	Longest shell measurement
+            "Diameter",	    #	mm	perpendicular to length
+            "Height",		    #	mm	with meat in shell
+            "Whole weight",	#	grams	whole abalone
+            "Shucked weight",	#	grams	weight of meat
+            "Viscera weight",	#	grams	gut weight (after bleeding)
+            "Shell weight",	#	grams	after being dried
+            "Rings",		    #integer			+1.5 gives the age in years
+        ]
+        df = pd.read_csv(
+            f'data/{source}/{data_name}/{data_name}.data',
+            header=None,
+            names=column_names,
+            sep=',\s*',
+            engine='python',
+            na_values='?',
+            skiprows=1  # Skip the first row, which often has a note/header
+        )
+        sensitive_name = "Sex"
+        target_name = "Rings"
+        model_name = "poisson"
+    X, y, pipe= preprocess_adult_data(df, target_name=target_name, pass_features=[sensitive_name])
+    sensitive_name = f"passthrough__{sensitive_name}" # updated with preprocessing
+    X = pd.DataFrame(X, columns=pipe.get_feature_names_out())
+    y = pd.Series(y)
+    df = X.copy()
+    df[target_name] = y
 
 
     # Shuffling
@@ -200,8 +216,6 @@ elif source == "ucirvine":
     np.random.shuffle(shuffled_indices)
     df = df.iloc[shuffled_indices, :]
 
-    print(df.shape)
-
 
 #%% Preprocessing
 
@@ -210,14 +224,13 @@ n,m = df.shape
 print(df.head())
 print(df[target_name].unique())
 
-
 print("shape: ", (n,m))
-train_prop = 0.822871 if source == "CCAO" else 0.8 # exact match of 2022 // 2023+2024
+train_prop = 0.822871 if source == "CCAO" else 0.99 # exact match of 2022 // 2023+2024
 df_train = df.iloc[:int(train_prop*n),:]
 df_test = df.iloc[int(train_prop*n):,:]
 
 # Random sample of train
-sample_size = 100 # 1000 samples for Adult (?)
+sample_size = 10000 # 1000 samples for Adult (?)
 if sample_size < df_train.shape[0]:
     print("working with a sample (10k)")
     df_train = df_train.sample(min(sample_size, df_train.shape[0]), random_state=seed, replace=False)
@@ -239,7 +252,6 @@ train_prop = 0.822871 if source == "CCAO" else 0.8 # almost exact match of 2021 
 df_val = df_train.iloc[int(train_prop*sample_size):,:]
 df_train = df_train.iloc[:int(train_prop*sample_size),:]
 # df_train['meta_sale_date']
-
 
 # Create proper X,y 
 if source == "CCAO":
@@ -283,7 +295,10 @@ else:
     # X_train = normalize_rows(X_train)
     # X_val = normalize_rows(X_val)
     # X_test = normalize_rows(X_test)
-#%% Linera Models
+
+###########################################
+# Linear Models
+###########################################
 
 # Prepare data
 if source == "CCAO":
@@ -360,10 +375,7 @@ if model_name in ["poisson", "linear"]:
     if source != "CCAO":
         print(X_train.shape)
         for cat in df_train[sensitive_name].unique():
-            # print(np.sum(df_train[sensitive_name] == cat))
             mask = np.where(df_train[sensitive_name] == cat)[0]
-            print(mask)
-            print(X_train.shape)
             X_cat, y_cat = X_train.iloc[mask, :], y_train_scaled.iloc[mask].to_numpy()
             y_cat_pred = y_pred_train_scaled[mask]
             print(f"Size of {sensitive_name}={cat}: ", y_cat.size)#* X_cat['passthrough__fnlwgt'].sum())
@@ -382,9 +394,6 @@ elif model_name in ["logistic"]:
             X_cat, y_cat = X_train.loc[df_train[sensitive_name] == cat, :], y_train_cat
             print(f"Size of {sensitive_name}={cat}: ", y_train_cat.size)#* X_cat['passthrough__fnlwgt'].sum())
             acc = y_train_cat == np.round(y_train_pred_cat)
-            # print(df['passthrough__fnlwgt'].to_numpy().size)
-            # print(acc.size)
-            # acc *= X_cat['passthrough__fnlwgt'].to_numpy() / X_cat['passthrough__fnlwgt'].sum()
             print(f"Accuracy of {sensitive_name}={cat}: ", np.mean(acc))
 
 
@@ -393,7 +402,7 @@ elif model_name in ["logistic"]:
     #         y_cat_pred = model.predict(X_cat)
     #         # print(f"Size of {sensitive_name}={cat}: ", y_train_cat.size)
             # print(f"Post Accuracy of {sensitive_name}={cat}: ", np.mean(y_cat == np.round(y_cat_pred)))
-exit()
+# exit()
 
 import numpy as np
 import pandas as pd
@@ -408,8 +417,8 @@ from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_sco
 if __name__ == '__main__':
     # --- Configuration ---
     NUM_GROUPS = 3
-    percentages = np.linspace(0, .05, 9)
-    model_name = "logistic"
+    percentages = np.linspace(0, .0833, 9)
+    model_name = "poisson"
     l2_lambda = 0#1e-4
     # percentages = np.linspace(0, .02, 21)
 
@@ -424,6 +433,7 @@ if __name__ == '__main__':
     pof_taylor_list = []
     fei_list = []
     fairness_list = []
+    bregman_divs_dict = None
 
     # --- Main Loop ---
     for rmse_percentage_increase in percentages:
@@ -477,10 +487,14 @@ if __name__ == '__main__':
                 y_train_scaled = y_train // 100000 + 1
                 print("y max: ", y_train_scaled.max())
                 print("y min: ", y_train_scaled.min())
-            result, solve_time, pof, fei, pof_exp_lb, pof_exp_ub, pof_taylor, pof_lb, pof_ub, fairness = model.fit(X_train, y_train_scaled, sensitive_feature=y_train_log, sensitive_nature="continuous")
+            result, solve_time, pof, fei, pof_exp_lb, pof_exp_ub, pof_taylor, pof_lb, pof_ub, fairness, bregman_divs = model.fit(X_train, y_train_scaled, sensitive_feature=y_train_log, sensitive_nature="continuous")
         else:
 
-            result, solve_time, pof, fei, pof_exp_lb, pof_exp_ub, pof_taylor, pof_lb, pof_ub, fairness = model.fit(X_train, y_train_scaled, sensitive_feature=df_train[sensitive_name], sensitive_nature="discrete")
+            result, solve_time, pof, fei, pof_exp_lb, pof_exp_ub, pof_taylor, pof_lb, pof_ub, fairness, bregman_divs = model.fit(X_train, y_train_scaled, sensitive_feature=df_train[sensitive_name], sensitive_nature="discrete")
+            if bregman_divs_dict is None:
+                bregman_divs_dict = {i:[] for i in range(model.n_groups)}
+            for key,val in bregman_divs.items():
+                bregman_divs_dict[key].append(val)
         # Fit model and make predictions
         # result, solve_time, pof, fei, pof_lb, pof_ub, fairness = model.fit(X_train, y_train_log)
         
@@ -531,7 +545,11 @@ if __name__ == '__main__':
     # plt.savefig("/img/motivation/tradoff_analysis/pof/pof_vs_percentages.jpg", dpi=300)
     plt.savefig("./img/motivation/pof_vs_percentages.jpg", dpi=300, bbox_inches='tight')
 
-
+    plt.figure(figsize=(6,5))
+    for key in bregman_divs_dict:
+        plt.plot(percentages*100, bregman_divs_dict[key], "--", label=f"{key}") 
+    plt.legend()
+    plt.savefig("./img/motivation/bregman_vs_percentage.jpg", dpi=1200, bbox_inches='tight')
     # plt.figure(figsize=(6,5))
     # plt.plot(fairness_list, np.array(pof_list) * ols_mse + ols_mse, "--o", label="MSE", color="blue")
     # plt.plot(fairness_list, np.array(pof_lb_list) * ols_mse + ols_mse, "--x", label="MSE LB", color="red", alpha=0.5)

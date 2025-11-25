@@ -6,7 +6,7 @@ import numpy as np
 from time import time
 
 from sklearn.linear_model import LinearRegression, Ridge, LogisticRegression
-from sklearn.metrics import root_mean_squared_error
+from sklearn.metrics import root_mean_squared_error, r2_score
 
 class LeastAbsoluteDeviationRegression:
     def __init__(self, fit_intercept=True, solver="GUROBI", solve_dual=False):
@@ -1034,7 +1034,9 @@ class GroupDeviationConstrainedLogisticRegression:
             # theta_0_g = X_g @ beta_0
             loss_0_g = get_loss_value(X_g, y_g, beta_0, model=self.model_name) #np.mean( np.log( 1 + np.exp(theta_0_g) ) - y_g * theta_0_g )
             print("loss_0_g: ", loss_0_g)
-            print("Accuracy 0_g: ", np.average(y_g == np.round(get_psi_derivatives(X_g, y_g, beta_0, model=self.model_name, gamma=self.eps)[0])))
+            # print("Accuracy 0_g: ", np.average(y_g == np.round(get_psi_derivatives(X_g, y_g, beta_0, model=self.model_name, gamma=self.eps)[0])))
+            y_glm_pred = get_psi_derivatives(X_g, y_g, beta_0, model=self.model_name, gamma=self.eps)[0]
+            print("Accuracy 0_g: ", r2_score(y_g, y_glm_pred))
 
             # bregman
             b_d = get_bregman_divergence_value(X_g, y_g, beta_0, model=self.model_name, eps=self.eps)
@@ -1159,14 +1161,18 @@ class GroupDeviationConstrainedLogisticRegression:
         print("New (F) Bregman divergence 0: ", b_d_F)
         # print("New F Accuracy: ", acc_F)
         # print("Direct Taylor of MSE / 2: ", (beta.value - beta_0).T @ H_0 @ (beta.value - beta_0) / 2)
+        bregman_g = dict()
         for g, ind_g in enumerate(bin_indices_list):
             X_g, y_g = X[ind_g, :], y[ind_g]
             # print("Group: ", g, len(ind_g))
             loss_g = get_loss_value(X_g, y_g, beta.value, model=self.model_name)#cp.mean( cp.logistic(theta_g) - cp.multiply(y[ind_g], theta_g) ).value
             # print("New (F) group loss g: ", g, loss_g)
             # approx_error_g = np.mean( np.abs( np.exp(theta_g.value)/(1 + np.exp(theta_g.value)) - y_g ) ) 
-            # print("New (F) Accuracy: ", np.mean(y_g == np.sign(X_g @ beta.value)))
+            # print("New (F) Accuracy: ", np.average(y_g == np.round(get_psi_derivatives(X_g, y_g, beta_0, model=self.model_name, gamma=self.eps)[0])))
+            y_glm_pred = get_psi_derivatives(X_g, y_g, beta.value, model=self.model_name, gamma=self.eps)[0]
+            print("New (F) Accuracy 0_g: ", r2_score(y_g, y_glm_pred))
             b_d = get_bregman_divergence_value(X_g, y_g, beta.value, model=self.model_name, eps=self.eps)#np.mean( np.log( 1 + np.exp(theta_g) ) - y_g * theta_g - (np.log(1+ np.exp(eta_y_g)) - y_g * eta_y_g) )
+            bregman_g[g] = b_d
             print("New (F) Bregman divergence g: ", g, b_d)
             if np.abs(b_d - real_tau) <= self.eps:
                 print("There are at least 2 active groups!!!!")
@@ -1356,7 +1362,7 @@ class GroupDeviationConstrainedLogisticRegression:
                 else:
                     delta_J_taylor_ub = 0 if (a==0 and b==0 and c==0) else np.nan # infeasible => inf
             elif self.model_name == "poisson":
-                delta_J_taylor_ub = np.zeros(delta_J_taylor_ub.size)
+                delta_J_taylor_ub = np.zeros(delta_J_taylor.size)
                 # # Given the experiments, we are setting t\in[0,2] for now
                 # t_ub = 2 # UB
                 # psi_UB = np.exp(X @ (beta_0 + t_ub * d) )
@@ -1500,7 +1506,8 @@ class GroupDeviationConstrainedLogisticRegression:
             print("Solver did not find an optimal solution. Beta coefficients not set.")
             self.beta = np.zeros(m) # Fallback beta
 
-        return result, solve_time, price_of_fairness, fairness_effective_improvement, delta_J_lb/ J_0, delta_J_ub/ J_0, delta_J_taylor/ J_0, delta_J_taylor_lb / J_0, delta_J_taylor_ub / J_0, real_tau
+        print("bregman_g", bregman_g)
+        return result, solve_time, price_of_fairness, fairness_effective_improvement, delta_J_lb/ J_0, delta_J_ub/ J_0, delta_J_taylor/ J_0, delta_J_taylor_lb / J_0, delta_J_taylor_ub / J_0, real_tau, bregman_g
 
     def predict(self, X):
         if self.fit_intercept:
