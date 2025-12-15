@@ -20,3 +20,4 @@ core.*
 # Ignore outputs
 2025_assessment_python/outputs
 2025_assessment_python/logs
+2025_assessment_python/img

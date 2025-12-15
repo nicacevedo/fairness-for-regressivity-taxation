@@ -130,21 +130,28 @@ def preprocess_adult_data(df, target_name="income", pass_features=[]):
 
     # 2. Binarize the target variable (income)
     # Target: >50K becomes 1, <=50K becomes 0
-    # lb = LabelBinarizer()
-    if target_name == "Rings":
+    
+    print(y)
+    if target_name in ["Rings", "G3"]:
         # print(y.head(10).to_numpy())
         y = y.astype(int)
         le = LabelEncoder()
         # print(y.head(10).to_numpy())
         y_processed = le.fit_transform(y.to_numpy())+1 #lb.fit_transform(y).ravel()
         # print(y_processed[:10])
+    elif target_name == "income":
+        lb = LabelBinarizer()
+        y_processed = lb.fit_transform(y).ravel()
     # 3. Define feature types for ColumnTransformer
     # These are general types; specific columns may need adjustment
     numerical_features = X.select_dtypes(include=np.number).columns.tolist()
     categorical_features = X.select_dtypes(include='object').columns.tolist()
+    # print(pass_features)
+    # print(categorical_features)
     for col in pass_features:
-        categorical_features.remove(col)
-    print(categorical_features)
+        if col in categorical_features:
+            categorical_features.remove(col)
+    # print(categorical_features)
     # Exclude 'fnlwgt' (Final Weight) from standard scaling/encoding
     # fnlwgt is often dropped or handled separately as it's a population-based weight
     # We will keep it but only scale the other numerical features for simplicity

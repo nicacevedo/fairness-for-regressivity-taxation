@@ -39,16 +39,15 @@ from recipes.recipes_pipelined import build_model_pipeline, build_model_pipeline
 # My models
 from src_.motivation_utils import analyze_fairness_by_value, calculate_detailed_statistics, plot_tradeoff_analysis
 from fairness_models.linear_fairness_models import LeastAbsoluteDeviationRegression, MaxDeviationConstrainedLinearRegression, LeastMaxDeviationRegression, GroupDeviationConstrainedLinearRegression, StableRegression, LeastProportionalDeviationRegression#LeastMSEConstrainedRegression, LeastProportionalDeviationRegression
-from fairness_models.linear_fairness_models import MyGLMRegression, GroupDeviationConstrainedLogisticRegression
+from fairness_models.linear_fairness_models import MyGLMRegression, GroupDeviationConstrainedLogisticRegression, RobustStableLADPRDCODRegressor
 
 # UC Irvine data
 from src_.ucirvine_preprocessing import get_uci_column_names, preprocess_adult_data
 
 #%% Data
 # source = "CCAO" # "toy_data"
-
-
-source = "ucirvine"
+seed = 234
+source = "CCAO"
 
 if source == "toy_data":
     # Toy dataset
@@ -91,6 +90,7 @@ elif source == "CCAO":
         (~df['sv_is_outlier'].astype('bool').fillna(True))
     ]
     target_name = "meta_sale_price"
+    model_name = "linear"
 
     # Get only the desired columns
     with open('params.yaml', 'r') as file:
@@ -100,7 +100,7 @@ elif source == "CCAO":
     df = df.loc[:,desired_columns]
     
     # Train - test split
-    df.sort_values(by=target_name, ascending=True, inplace=True)
+    df.sort_values(by="meta_sale_date", ascending=True, inplace=True)
 
 elif source == "sklearn":
     from sklearn.datasets import load_breast_cancer, load_diabetes
@@ -115,7 +115,7 @@ elif source == "sklearn":
     sensitive_name = "sex"
     model_name = "linear"
 
-    np.random.seed(42)
+    np.random.seed(seed)
     shuffled_indices = df.index.to_list().copy()
     np.random.shuffle(shuffled_indices)
     df = df.iloc[shuffled_indices, :]
@@ -138,7 +138,7 @@ elif source  == "liblinear":
     exit()
 
 elif source == "ucirvine":
-    data_name = "abalone" #"student" # adult
+    data_name = "student" #"student" # adult
     if data_name == "adult":
         # column_names = get_uci_column_names(f'data/{source}/{data_name}/{data_name}.names')
         column_names = [
@@ -161,7 +161,7 @@ elif source == "ucirvine":
         sensitive_name = "race"#"cat__sex_Male" # sex is already as fair as it can
         model_name = "logistic"
         df = df.loc[df["age"] <= 65,:]
-
+        print(df.head())
 
         # Preprocessing of UC Irvine
         X, y, pipe = preprocess_adult_data(df, pass_features=[sensitive_name])
@@ -176,7 +176,7 @@ elif source == "ucirvine":
         df = pd.read_csv(f'data/{source}/{data_name}/{data_name}-mat.csv', sep=";")
         sensitive_name = "sex"
         target_name = "G3"
-        model_name = "poisson"
+        model_name = "linear"
     elif data_name == "abalone":
         column_names = [
             "Sex",
@@ -201,16 +201,21 @@ elif source == "ucirvine":
         sensitive_name = "Sex"
         target_name = "Rings"
         model_name = "poisson"
+    
+    
+    sensitive_mapping = [value for value in df[sensitive_name].unique()]
     X, y, pipe= preprocess_adult_data(df, target_name=target_name, pass_features=[sensitive_name])
     sensitive_name = f"passthrough__{sensitive_name}" # updated with preprocessing
     X = pd.DataFrame(X, columns=pipe.get_feature_names_out())
+    # print(X[sensitive_name].head(10))
+    sensitive_mapping = {i:value for i,value in enumerate(sensitive_mapping)}
     y = pd.Series(y)
     df = X.copy()
     df[target_name] = y
 
 
     # Shuffling
-    seed=234#123
+    # seed=234#123
     np.random.seed(seed)
     shuffled_indices = df.index.to_list().copy()
     np.random.shuffle(shuffled_indices)
@@ -230,7 +235,7 @@ df_train = df.iloc[:int(train_prop*n),:]
 df_test = df.iloc[int(train_prop*n):,:]
 
 # Random sample of train
-sample_size = 10000 # 1000 samples for Adult (?)
+sample_size = 10000 # 10k samples for Abalon (?)# 1000 samples for Adult (?)
 if sample_size < df_train.shape[0]:
     print("working with a sample (10k)")
     df_train = df_train.sample(min(sample_size, df_train.shape[0]), random_state=seed, replace=False)
@@ -248,14 +253,17 @@ if source == "CCAO":
     df_train.sort_values(by="meta_sale_date", ascending=True, inplace=True)
 
 # Train - val split
-train_prop = 0.822871 if source == "CCAO" else 0.8 # almost exact match of 2021 // 2022, for 10k sample
+train_prop = 0.8622 # almost exact match of 2021 // 2022, for 10k sample
 df_val = df_train.iloc[int(train_prop*sample_size):,:]
 df_train = df_train.iloc[:int(train_prop*sample_size),:]
 # df_train['meta_sale_date']
 
+
+
 # Create proper X,y 
 if source == "CCAO":
     X_train, y_train = df_train.drop(columns=['meta_sale_date', 'meta_sale_price']), df_train['meta_sale_price']
+
     X_val, y_val = df_val.drop(columns=['meta_sale_date', 'meta_sale_price']), df_val['meta_sale_price']
     X_test, y_test = df_test.drop(columns=['meta_sale_date', 'meta_sale_price']), df_test['meta_sale_price']
 
@@ -296,7 +304,7 @@ else:
     # X_val = normalize_rows(X_val)
     # X_test = normalize_rows(X_test)
 
-###########################################
+############
 # Linear Models
 ###########################################
 
@@ -310,9 +318,314 @@ else:
     y_val_scaled = y_val
     y_test_scaled = y_test
 
+
+# # Delte this part (extra hist and lin reg)
+# plt.hist(np.log(y_train), bins=100)
+
+
+# colors = ["C1",]
+
+results = {
+    "train_corrs":[],
+    "val_corrs":[],
+    "train_res_y_corrs":[],
+    "val_res_y_corrs":[],
+    "train_r2":[],
+    "val_r2":[],
+    "train_res_var":[],
+    "val_res_var":[],
+    # ASSESSMENT ACTUAL METRICS
+    "train_cod":[],
+    "val_cod":[],
+    "train_prd":[],
+    "val_prd":[],
+    "train_prb":[],
+    "val_prb":[],
+}
+
+diffs = [-1,-2, 10, 5e-2, 1e-2, 5e-3]
+for i,diff in enumerate(diffs):
+    keep_percentages = np.linspace(0.1, 1, 10)
+    corrs_train = []
+    corrs_val = []
+    corrs_res_y_train = []
+    corrs_res_y_val = []
+    r2_train = []
+    r2_val = []
+    pred_var_train = []
+    pred_var_val = []
+    # CCAO metrics
+    cod_train = []
+    cod_val = []
+    prd_train = []
+    prd_val = []
+    prb_train = []
+    prb_val = []
+    for keep_percentage in keep_percentages:
+        print("-"*100)
+        print("Diff=", diff)
+        print("Keep=", keep_percentage)
+
+        # model = LinearRegression(fit_intercept=True)
+        if diff == -1:
+            model = LinearRegression(fit_intercept=True)
+            model.fit(X_train, y_train_log)
+        elif diff == -2:
+            model = RobustStableLADPRDCODRegressor(
+                # K=200,                 # or alpha=0.2
+                alpha=keep_percentage,  # or K=200
+                w_prd=0.5,#1.0,
+                w_cod=0.5,#0.5,
+                l1=1e-1,
+                l2=1e-1,
+                fit_intercept=True,
+                ratio_anchor=1.0,
+                solver="MOSEK",
+                # solver_opts={"mosek_params": {"MSK_IPAR_LOG": 1}},
+                verbose=False,
+            )
+
+            model.fit(X_train, y_train_log, s=y_train_log, v=y_train_log)
+            print("Model results: ", model.status_, model.objective_value_)
+            # yhat = model.predict(X)
+        else:
+            model = StableRegression(
+                    fit_intercept=True, k_percentage=keep_percentage, lambda_l1=1e-4, lambda_l2=1e-4,
+                    fit_group_intercept=False, delta_l2=0, group_constraints=True, weight_by_group=False, 
+                    sensitive_idx=None, #sensitive_feature=d.loc[X_train.index].to_numpy(),
+                    group_percentage_diff=diff, solver="MOSEK")
+            model.fit(X_train, y_train_log)
+        
+        y_pred = model.predict(X_train)
+        print("R squared: ", r2_score(y_train_log, y_pred))
+        print("Corr of pred and y: ", np.corrcoef(y_train_log, y_pred)[0,1])
+        print("Corr of res and y: ", np.corrcoef(y_train_log, y_train_log - y_pred)[0,1])
+        print("Corr of ratio and y: ", np.corrcoef(y_train_log, y_pred/y_train_log)[0,1])
+        corrs_train.append(np.abs(np.corrcoef(y_train_log, y_pred/y_train_log)[0,1]))
+        corrs_res_y_train.append(np.abs(np.corrcoef(y_train_log, y_train_log-y_pred)[0,1]))
+        r2_train.append(r2_score(y_train_log, y_pred))
+        pred_var_train.append(np.std(y_train_log - y_pred)**2)
+        
+        ratios = np.exp(y_pred) / y_train
+        cod_train.append( 100/np.median(ratios)*np.mean(np.abs(ratios - np.median(ratios))) )
+        print("COD train:", 100/np.median(ratios)*np.mean(np.abs(ratios - np.median(ratios))) )
+        prd_train.append( np.mean(ratios) / (ratios @ y_train) *  np.sum(y_train)  )
+        print("PRD train:", np.mean(ratios) / (ratios @ y_train) *  np.sum(y_train) )
+        b_1, b_0 = np.polyfit(y_train_log, ratios, 1) # R_i = beta_0 + beta_1 * log(y_i) + eps_i 
+        prb = 2*(np.exp(b_1) - 1) * 100
+        print("PRB train:", prb)
+        prb_train.append(prb)
+
+        y_pred = model.predict(X_val)
+        print("R squared: ", r2_score(y_val_log, y_pred))
+        print("Corr of pred and y: ", np.corrcoef(y_val_log, y_pred)[0,1])
+        print("Corr of res and y: ", np.corrcoef(y_val_log, y_val_log - y_pred)[0,1])
+        print("Corr of ratio and y: ", np.corrcoef(y_val_log, y_pred/y_val_log)[0,1])
+        corrs_val.append(np.abs(np.corrcoef(y_val_log, y_pred/y_val_log)[0,1]))
+        corrs_res_y_val.append(np.abs(np.corrcoef(y_val_log, y_val_log-y_pred)[0,1]))
+        r2_val.append(r2_score(y_val_log, y_pred))
+        pred_var_val.append(np.std(y_val_log - y_pred)**2)
+
+        ratios = np.exp(y_pred) / y_val
+        cod_val.append( 100/np.median(ratios)*np.mean(np.abs(ratios - np.median(ratios))) )
+        print("COD val:", 100/np.median(ratios)*np.mean(np.abs(ratios - np.median(ratios))))
+        prd_val.append( np.mean(ratios) / (ratios @ y_val) *  np.sum(y_val)  )
+        print("PRD val:", np.mean(ratios) / (ratios @ y_val) *  np.sum(y_val) )
+        b_1, b_0 = np.polyfit(y_val_log, ratios, 1) # R_i = beta_0 + beta_1 * log(y_i) + eps_i 
+        prb = 2*(np.exp(b_1) - 1) * 100
+        print("PRB val:", prb)
+        prb_val.append(prb)
+
+
+    results["train_corrs"].append(corrs_train)
+    results["val_corrs"].append(corrs_val)
+    results["train_res_y_corrs"].append(corrs_res_y_train)
+    results["val_res_y_corrs"].append(corrs_res_y_val)
+    results["train_r2"].append(r2_train)
+    results["val_r2"].append(r2_val)
+    results["train_res_var"].append(pred_var_train)
+    results["val_res_var"].append(pred_var_val)
+    # CCAO
+    results["train_cod"].append(cod_train)
+    results["val_cod"].append(cod_val)
+    results["train_prd"].append(prd_train)
+    results["val_prd"].append(prd_val)
+    results["train_prb"].append(prb_train)
+    results["val_prb"].append(prb_val)
+
+
+# Correlation between RtA and y
+plt.figure(figsize=(10,6))
+for i,diff in enumerate(diffs):
+    plt.plot(keep_percentages, results["train_corrs"][i], '--o', color=f"C{i}", alpha=0.7, label=f"Diff={diff}")
+plt.grid(True, which="both", color="0.85", linewidth=0.5)  # light gray
+plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+plt.title("Stable Regression with |Cov(f(X)/y, y)|<= Diff*std(y) [Training Set]")
+plt.xlabel("Ratio of samples to keep")
+plt.ylabel("|Corr(f(x)/y, y)|")
+plt.tight_layout()
+plt.savefig("./temp/plots/hist_train_corr.png", dpi=600)
+
+plt.figure(figsize=(10,6))
+for i,diff in enumerate(diffs):
+    plt.plot(keep_percentages, results["val_corrs"][i], '--o', color=f"C{i}", alpha=0.7, label=f"Diff={diff}")
+plt.grid(True, which="both", color="0.85", linewidth=0.5)  # light gray
+plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+plt.title("Stable Regression with |Cov(f(X)/y, y)|<= Diff*std(y) [Testing Set]")
+plt.xlabel("Ratio of samples to keep")
+plt.ylabel("|Corr(f(x)/y, y)|")
+plt.tight_layout()
+plt.savefig("./temp/plots/hist_val_corr.png", dpi=600)
+
+
+# Correlation between residuals and y
+plt.figure(figsize=(10,6))
+for i,diff in enumerate(diffs):
+    plt.plot(keep_percentages, results["train_res_y_corrs"][i], '--s', color=f"C{i}", alpha=0.7, label=f"Diff={diff}")
+plt.grid(True, which="both", color="0.85", linewidth=0.5)  # light gray
+plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+plt.title("Stable Regression with |Cov(f(X)/y, y)|<= Diff*std(y) [Training Set]")
+plt.xlabel("Ratio of samples to keep")
+plt.ylabel("|Corr(res(x), y)|")
+plt.tight_layout()
+plt.savefig("./temp/plots/hist_train_res_y_corr.png", dpi=600)
+
+plt.figure(figsize=(10,6))
+for i,diff in enumerate(diffs):
+    plt.plot(keep_percentages, results["val_res_y_corrs"][i], '--s', color=f"C{i}", alpha=0.7, label=f"Diff={diff}")
+plt.grid(True, which="both", color="0.85", linewidth=0.5)  # light gray
+plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+plt.title("Stable Regression with |Cov(f(X)/y, y)|<= Diff*std(y) [Testing Set]")
+plt.xlabel("Ratio of samples to keep")
+plt.ylabel("|Corr(res(x), y)|")
+plt.tight_layout()
+plt.savefig("./temp/plots/hist_val_res_y_corr.png", dpi=600)
+
+
+# R2 plots
+plt.figure(figsize=(10,6))
+for i,diff in enumerate(diffs):
+    plt.plot(keep_percentages, results["train_r2"][i], '-.x', color=f"C{i}", alpha=0.7, label=f"Diff={diff}")
+plt.grid(True, which="both", color="0.85", linewidth=0.5)  # light gray
+plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+plt.title("Stable Regression with |Cov(f(X)/y, y)|<= Diff*std(y) [Training Set]")
+plt.xlabel("Ratio of samples to keep")
+plt.ylabel("R2 Score")
+plt.tight_layout()
+plt.savefig("./temp/plots/hist_train_r2.png", dpi=600)
+
+plt.figure(figsize=(10,6))
+for i,diff in enumerate(diffs):
+    plt.plot(keep_percentages, results["val_r2"][i], '-.x', color=f"C{i}", alpha=0.7, label=f"Diff={diff}")
+plt.grid(True, which="both", color="0.85", linewidth=0.5)  # light gray
+plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+plt.title("Stable Regression with |Cov(f(X)/y, y)|<= Diff*std(y) [Testing Set]")
+plt.xlabel("Ratio of samples to keep")
+plt.ylabel("R2 Score")
+plt.tight_layout()
+plt.savefig("./temp/plots/hist_val_r2.png", dpi=600)
+
+# Std plots
+plt.figure(figsize=(10,6))
+for i,diff in enumerate(diffs):
+    plt.plot(keep_percentages, results["train_res_var"][i], '-.^', color=f"C{i}", alpha=0.7, label=f"Diff={diff}")
+plt.grid(True, which="both", color="0.85", linewidth=0.5)  # light gray
+plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+plt.title("Stable Regression with |Cov(f(X)/y, y)|<= Diff*std(y) [Training Set]")
+plt.xlabel("Ratio of samples to keep")
+plt.ylabel("Residuals Variance")
+plt.tight_layout()
+plt.savefig("./temp/plots/hist_train_res_var.png", dpi=600)
+
+plt.figure(figsize=(10,6))
+for i,diff in enumerate(diffs):
+    plt.plot(keep_percentages, results["val_res_var"][i], '-.^', color=f"C{i}", alpha=0.7, label=f"Diff={diff}")
+plt.grid(True, which="both", color="0.85", linewidth=0.5)  # light gray
+plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+plt.title("Stable Regression with |Cov(f(X)/y, y)|<= Diff*std(y) [Testing Set]")
+plt.xlabel("Ratio of samples to keep")
+plt.ylabel("Residuals Variance")
+plt.tight_layout()
+plt.savefig("./temp/plots/hist_val_res_var.png", dpi=600)
+
+# COD plots
+plt.figure(figsize=(10,6))
+for i,diff in enumerate(diffs):
+    plt.plot(keep_percentages, results["train_cod"][i], '-v', color=f"C{i}", alpha=0.7, label=f"Diff={diff}")
+plt.grid(True, which="both", color="0.85", linewidth=0.5)  # light gray
+plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+plt.title("Stable Regression with |Cov(f(X)/y, y)|<= Diff*std(y) [Training Set]")
+plt.xlabel("Ratio of samples to keep")
+plt.ylabel("COD")
+plt.tight_layout()
+plt.savefig("./temp/plots/hist_train_cod.png", dpi=600)
+
+plt.figure(figsize=(10,6))
+for i,diff in enumerate(diffs):
+    plt.plot(keep_percentages, results["val_cod"][i], '-v', color=f"C{i}", alpha=0.7, label=f"Diff={diff}")
+plt.grid(True, which="both", color="0.85", linewidth=0.5)  # light gray
+plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+plt.title("Stable Regression with |Cov(f(X)/y, y)|<= Diff*std(y) [Testing Set]")
+plt.xlabel("Ratio of samples to keep")
+plt.ylabel("COD")
+plt.tight_layout()
+plt.savefig("./temp/plots/hist_val_cod.png", dpi=600)
+
+# PRD plots
+plt.figure(figsize=(10,6))
+for i,diff in enumerate(diffs):
+    plt.plot(keep_percentages, results["train_prd"][i], '--D', color=f"C{i}", alpha=0.7, label=f"Diff={diff}")
+plt.grid(True, which="both", color="0.85", linewidth=0.5)  # light gray
+plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+plt.title("Stable Regression with |Cov(f(X)/y, y)|<= Diff*std(y) [Training Set]")
+plt.xlabel("Ratio of samples to keep")
+plt.ylabel("PRD")
+plt.tight_layout()
+plt.savefig("./temp/plots/hist_train_prd.png", dpi=600)
+
+plt.figure(figsize=(10,6))
+for i,diff in enumerate(diffs):
+    plt.plot(keep_percentages, results["val_prd"][i], '--D', color=f"C{i}", alpha=0.7, label=f"Diff={diff}")
+plt.grid(True, which="both", color="0.85", linewidth=0.5)  # light gray
+plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+plt.title("Stable Regression with |Cov(f(X)/y, y)|<= Diff*std(y) [Testing Set]")
+plt.xlabel("Ratio of samples to keep")
+plt.ylabel("PRD")
+plt.tight_layout()
+plt.savefig("./temp/plots/hist_val_prd.png", dpi=600)
+
+# PRB plots
+plt.figure(figsize=(10,6))
+for i,diff in enumerate(diffs):
+    plt.plot(keep_percentages, results["train_prb"][i], '--D', color=f"C{i}", alpha=0.7, label=f"Diff={diff}")
+plt.grid(True, which="both", color="0.85", linewidth=0.5)  # light gray
+plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+plt.title("Stable Regression with |Cov(f(X)/y, y)|<= Diff*std(y) [Training Set]")
+plt.xlabel("Ratio of samples to keep")
+plt.ylabel("PRB")
+plt.tight_layout()
+plt.savefig("./temp/plots/hist_train_prb.png", dpi=600)
+
+plt.figure(figsize=(10,6))
+for i,diff in enumerate(diffs):
+    plt.plot(keep_percentages, results["val_prb"][i], '--D', color=f"C{i}", alpha=0.7, label=f"Diff={diff}")
+plt.grid(True, which="both", color="0.85", linewidth=0.5)  # light gray
+plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+plt.title("Stable Regression with |Cov(f(X)/y, y)|<= Diff*std(y) [Testing Set]")
+plt.xlabel("Ratio of samples to keep")
+plt.ylabel("PRB")
+plt.tight_layout()
+plt.savefig("./temp/plots/hist_val_prb.png", dpi=600)
+exit()
+###############################
+
+
+
 from sklearn.linear_model import LinearRegression
 
 model = LinearRegression(fit_intercept=True)
+print(X_train.head())
+print(y_train_scaled.head())
 model.fit(X_train, y_train_scaled)
 y_pred_train = model.predict(X_train)
 y_pred_val = model.predict(X_val)
@@ -324,29 +637,31 @@ ols_mse = root_mean_squared_error(y_train_scaled, y_pred_train)**2
 print(r"$R^2$ in Train: ",r2_score(y_pred_train, y_train_scaled))
 print(r"$R^2$ in Val: ",r2_score(y_pred_val, y_val_scaled))
 print(r"$R^2$ in Test: ",r2_score(y_pred_test, y_test_scaled))
-print("-"*100)
-print("Residual = (y - X'b)")
-print("Max residual Train: ", np.max(y_train_scaled - y_pred_train))
-print("Min residual Train: ", np.min(y_train_scaled - y_pred_train))
-print("Avg residual Train: ", np.mean(y_train_scaled - y_pred_train))
-print("Median residual Train: ", np.median(y_train_scaled - y_pred_train))
-print("-"*100)
-print("Max residual Val: ", np.max(y_val_scaled - y_pred_val))
-print("Min residual Val: ", np.min(y_val_scaled - y_pred_val))
-print("Avg residual Val: ", np.mean(y_val_scaled - y_pred_val))
-print("Median residual Val: ", np.median(y_val_scaled - y_pred_val))
+
+# print("-"*100)
+# print("Residual = (y - X'b)")
+# print("Max residual Train: ", np.max(y_train_scaled - y_pred_train))
+# print("Min residual Train: ", np.min(y_train_scaled - y_pred_train))
+# print("Avg residual Train: ", np.mean(y_train_scaled - y_pred_train))
+# print("Median residual Train: ", np.median(y_train_scaled - y_pred_train))
+# print("-"*100)
+# print("Max residual Val: ", np.max(y_val_scaled - y_pred_val))
+# print("Min residual Val: ", np.min(y_val_scaled - y_pred_val))
+# print("Avg residual Val: ", np.mean(y_val_scaled - y_pred_val))
+# print("Median residual Val: ", np.median(y_val_scaled - y_pred_val))
 
 
 # Convert the train to binary
 if source == "CCAO":
-    y_avg = np.mean(y_train_log) # same avg for all splits
-    y_train_scaled = (y_train_log >= y_avg) + 0.0 
-    y_val_scaled = (y_val_log >= y_avg) + 0.0 
-    y_test_scaled = (y_test_log >= y_avg) + 0.0 
-    if model_name == "svm": # T: [0,1] -> [-1,1]
-        y_train_scaled = 2 * y_train_scaled - 1
-        y_val_scaled = 2 * y_val_scaled - 1
-        y_test_scaled = 2 * y_test_scaled - 1 
+    if model_name in ["logistic", "svm"]:
+        y_avg = np.mean(y_train_log) # same avg for all splits
+        y_train_scaled = (y_train_log >= y_avg) + 0.0 
+        y_val_scaled = (y_val_log >= y_avg) + 0.0 
+        y_test_scaled = (y_test_log >= y_avg) + 0.0 
+        if model_name == "svm": # T: [0,1] -> [-1,1]
+            y_train_scaled = 2 * y_train_scaled - 1
+            y_val_scaled = 2 * y_val_scaled - 1
+            y_test_scaled = 2 * y_test_scaled - 1 
 
 
 # Logistic Regression
@@ -356,14 +671,13 @@ print(f"{model_name.upper()} REGRESSION ")
 model = MyGLMRegression(fit_intercept=True, solver="MOSEK", model_name=model_name, l2_lambda=0, eps=1e-4)
 print(model)
 print(X_train.shape)
-print(df_train.shape)
 
 model.fit(X_train, y_train_scaled)
 y_pred_train_scaled = model.predict(X_train)
 print(y_pred_train_scaled.size)
-print(np.round(y_train_scaled[:10].to_numpy(), 0))
-# print(y_pred_train_scaled[:10])
-print(np.round(y_pred_train_scaled[:10], 0))
+print(y_train_scaled[:10].to_numpy())
+print(y_pred_train_scaled[:10])
+# print(root_mean_squared_error(y_train_scaled, y_pred_train_scaled))
 y_pred_val_scaled = model.predict(X_val)
 y_pred_test_scaled = model.predict(X_test)
 if model_name in ["poisson", "linear"]:
@@ -402,7 +716,6 @@ elif model_name in ["logistic"]:
     #         y_cat_pred = model.predict(X_cat)
     #         # print(f"Size of {sensitive_name}={cat}: ", y_train_cat.size)
             # print(f"Post Accuracy of {sensitive_name}={cat}: ", np.mean(y_cat == np.round(y_cat_pred)))
-# exit()
 
 import numpy as np
 import pandas as pd
@@ -417,10 +730,15 @@ from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_sco
 if __name__ == '__main__':
     # --- Configuration ---
     NUM_GROUPS = 3
-    percentages = np.linspace(0, .0833, 9)
-    model_name = "poisson"
+    percentages = np.linspace(0, 0.087, 15)#linear abalon: 0.063, 3) #poisson with abalon: 0.0833, 3) #logistic with adult: 0.04, 3) 
+    model_name = model_name#"poisson"
     l2_lambda = 0#1e-4
     # percentages = np.linspace(0, .02, 21)
+    loss_names = {"linear":"MSE/2", "logistic":"Binary Cross Entropy", "poisson":"Poisson Deviance", "svm":"Hinge Loss"}
+    accuracy_names = {"linear":"R^2 Score", "logistic":"Accuracy", "poisson":"R^2 Score", "svm":"Accuracy"}
+
+    if source == "CCAO":
+        sensitive_mapping = {i:i for i in range(NUM_GROUPS)}
 
     # --- Data Storage ---
     train_results_list = []
@@ -487,14 +805,23 @@ if __name__ == '__main__':
                 y_train_scaled = y_train // 100000 + 1
                 print("y max: ", y_train_scaled.max())
                 print("y min: ", y_train_scaled.min())
-            result, solve_time, pof, fei, pof_exp_lb, pof_exp_ub, pof_taylor, pof_lb, pof_ub, fairness, bregman_divs = model.fit(X_train, y_train_scaled, sensitive_feature=y_train_log, sensitive_nature="continuous")
+            result, solve_time, pof, fei, pof_exp_lb, pof_exp_ub, pof_taylor, pof_lb, pof_ub, fairness, metrics_output, group_sizes = model.fit(X_train, y_train_scaled, sensitive_feature=y_train_log, sensitive_nature="continuous")
         else:
 
-            result, solve_time, pof, fei, pof_exp_lb, pof_exp_ub, pof_taylor, pof_lb, pof_ub, fairness, bregman_divs = model.fit(X_train, y_train_scaled, sensitive_feature=df_train[sensitive_name], sensitive_nature="discrete")
-            if bregman_divs_dict is None:
-                bregman_divs_dict = {i:[] for i in range(model.n_groups)}
-            for key,val in bregman_divs.items():
-                bregman_divs_dict[key].append(val)
+            result, solve_time, pof, fei, pof_exp_lb, pof_exp_ub, pof_taylor, pof_lb, pof_ub, fairness, metrics_output, group_sizes = model.fit(X_train, y_train_scaled, sensitive_feature=df_train[sensitive_name], sensitive_nature="discrete")
+        
+        
+
+        # Saving the metrics for this iteration
+        print(metrics_output)
+        if bregman_divs_dict is None:
+            bregman_divs_dict = {i:[] for i in range(model.n_groups)}
+            accuracies_dict = {i:[] for i in range(model.n_groups)}
+        bregman_divs = metrics_output[0]
+        accuracies = metrics_output[1]
+        for key,val in bregman_divs.items():
+            bregman_divs_dict[key].append(val)
+            accuracies_dict[key].append(accuracies[key])
         # Fit model and make predictions
         # result, solve_time, pof, fei, pof_lb, pof_ub, fairness = model.fit(X_train, y_train_log)
         
@@ -527,15 +854,17 @@ if __name__ == '__main__':
         # Summary
         # print(analyze_fairness_by_value(y_pred_train, y_train).round(3).T.to_csv(f"outputs/reports/motivation/summary_train_{rmse_percentage_increase:.4f}.csv",  float_format='%.3f'))
         # print(analyze_fairness_by_value(y_pred_val, y_val).round(3).T.to_csv(f"outputs/reports/motivation/summary_val_{rmse_percentage_increase:.4f}.csv",  float_format='%.3f'))
+    
 
 
     # --- Temporal Plot ---
     print(os.getcwd())
     plt.figure(figsize=(6,5))
+    plt.grid(True, color='gray', linestyle='-', linewidth=0.8, alpha=0.3)
     plt.plot(percentages*100, 100*np.array(pof_taylor_list), "--x", label="POF Taylor (lin. + quad.)", color="lightgreen", alpha=1)
     plt.plot(percentages*100, 100*np.array(pof_list), "--o", label="POF", color="blue")
     plt.plot(percentages*100, 100*np.array(pof_lb_list), "--x", label="POF LB (lin. + quad.)", color="red", alpha=0.5)
-    # plt.plot(percentages*100, 100*np.array(pof_ub_list), "--x", label="POF UB (quad. + quad.)", color="black", alpha=0.5)
+    plt.plot(percentages*100, 100*np.array(pof_ub_list), "--x", label="POF UB (quad. + quad.)", color="black", alpha=0.5)
     plt.plot(percentages*100, 100*np.array(pof_exp_lb_list), "--x", label="POF LB (exp.) [1-D opt.]", color="red", alpha=0.9)
     plt.plot(percentages*100, 100*np.array(pof_exp_ub_list), "--x", label="POF UB (exp.) [1-D opt.]", color="red", alpha=0.9)
     # plt.xlabel("Fairness Threshold Improvement (%)")
@@ -546,10 +875,22 @@ if __name__ == '__main__':
     plt.savefig("./img/motivation/pof_vs_percentages.jpg", dpi=300, bbox_inches='tight')
 
     plt.figure(figsize=(6,5))
+    plt.grid(True, color='gray', linestyle='-', linewidth=0.8, alpha=0.3)
     for key in bregman_divs_dict:
-        plt.plot(percentages*100, bregman_divs_dict[key], "--", label=f"{key}") 
+        plt.plot(percentages*100, bregman_divs_dict[key], "--o", label=f"g={sensitive_mapping[key]} ({group_sizes[key]} samples)", markerfacecolor='none') 
+        plt.ylabel(loss_names[model_name])
+        plt.xlabel("(Un)Fairness decrease %")
     plt.legend()
     plt.savefig("./img/motivation/bregman_vs_percentage.jpg", dpi=1200, bbox_inches='tight')
+
+    plt.figure(figsize=(6,5))
+    plt.grid(True, color='gray', linestyle='-', linewidth=0.8, alpha=0.3)
+    for key in bregman_divs_dict:
+        plt.plot(percentages*100, accuracies_dict[key], "--o", label=f"g={sensitive_mapping[key]} ({group_sizes[key]} samples)", markerfacecolor='none') 
+        plt.ylabel(accuracy_names[model_name])
+        plt.xlabel("(Un)Fairness decrease %")
+    plt.legend()
+    plt.savefig("./img/motivation/accuracies_vs_percentage.jpg", dpi=1200, bbox_inches='tight')
     # plt.figure(figsize=(6,5))
     # plt.plot(fairness_list, np.array(pof_list) * ols_mse + ols_mse, "--o", label="MSE", color="blue")
     # plt.plot(fairness_list, np.array(pof_lb_list) * ols_mse + ols_mse, "--x", label="MSE LB", color="red", alpha=0.5)
