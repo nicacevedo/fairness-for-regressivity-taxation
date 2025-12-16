@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_score
+from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_score, mean_absolute_percentage_error
 import os
 from typing import Union, List
 
@@ -328,3 +328,95 @@ def plot_tradeoff_analysis(results_df, percentages, num_groups=3, save_dir="img/
         
     print(f"All analysis plots saved to '{save_dir}' directory.")
 
+
+
+def compute_taxation_metrics(y_real, y_pred, scale="log"):
+        if scale == "log":
+            y_real_log, y_pred_log = y_real, y_pred 
+            y_real, y_pred = np.exp(y_real), np.exp(y_pred)
+        else:
+            y_real_log, y_pred_log = np.log(y_real), np.log(y_pred)
+        metrics = dict()
+
+        # 1. Accuracy metrics
+        metrics["R2 Score"] = r2_score(y_real, y_pred)
+        metrics["R2 Score (log)"] = r2_score(y_real_log, y_pred_log)
+        metrics["RMSE"] = root_mean_squared_error(y_real, y_pred)
+        metrics["MAE"] = mean_absolute_error(y_real, y_pred)
+        metrics["MAPE"] = mean_absolute_percentage_error(y_real, y_pred)
+
+        # 2. My metrics of interest
+        ratios = y_pred / y_real
+        metrics["Corr(ratio, y)"] = np.corrcoef(ratios, y_real)[0,1]
+
+        # 3. Taxation-Domain Specific Metrics
+        median_ratio = np.median(ratios)
+        metrics["COD"] = 100/median_ratio*np.mean(np.abs(ratios - median_ratio))
+        metrics["PRD"] =  np.mean(ratios) / np.sum(y_pred) * np.sum(y_real) #(ratios @ y_real) * np.sum(y_real)
+        # PRB: Calculate the "Proxy" value first (Average of Sale Price and "Indicated" Value)
+        proxy_vals = 0.5 * (y_pred / median_ratio + y_real)
+        median_proxy = np.median(proxy_vals)
+        y_prb = (ratios - median_ratio) / median_ratio
+        x_prb = np.log2(proxy_vals) - np.log2(median_proxy) 
+        metrics["PRB"] = np.polyfit(x_prb, y_prb, 1)[0]
+        metrics["MKI"] = mki(y_pred, y_real)
+        return metrics
+
+
+# MKI helpers
+def _to_1d_float_array(x):
+    """Convert array-like to a 1D float numpy array."""
+    a = np.asarray(x, dtype=float).reshape(-1)
+    return a
+
+def _gini_like_from_ordered(values):
+    """
+    Gini formula applied to a *given order* (when order isn't by itself, this is a concentration-style coefficient).
+    values must be nonnegative and not all zero.
+    """
+    v = _to_1d_float_array(values)
+    if np.any(v < 0):
+        raise ValueError("Values must be nonnegative for Gini-like computation.")
+    n = v.size
+    s = v.sum()
+    if n == 0 or s <= 0:
+        return np.nan
+    i = np.arange(1, n + 1, dtype=float)
+    return float((2.0 * np.dot(i, v)) / (n * s) - (n + 1.0) / n)
+
+def mki(estimate, sale_price, *, dropna=True):
+    """
+    Modified Kakwani Index (MKI).
+
+    Steps (per AssessPy docs):
+      1) order observations by sale_price ascending
+      2) compute Gini(sale_price) in that order (this is the usual Gini)
+      3) compute "Gini" of estimates while *remaining ordered by sale_price*
+         (this is effectively a concentration coefficient)
+      4) MKI = Gini_estimate / Gini_sale_price
+
+    Interpretation (per docs): MKI < 1 regressive, =1 vertical equity, >1 progressive. :contentReference[oaicite:3]{index=3}
+    """
+    est = _to_1d_float_array(estimate)
+    sale = _to_1d_float_array(sale_price)
+
+    if est.shape[0] != sale.shape[0]:
+        raise ValueError("estimate and sale_price must have the same length.")
+    if dropna:
+        mask = np.isfinite(est) & np.isfinite(sale)
+        est, sale = est[mask], sale[mask]
+    if est.size == 0:
+        return np.nan
+    if np.any(sale < 0) or np.any(est < 0):
+        raise ValueError("estimate and sale_price should be nonnegative for MKI.")
+
+    idx = np.argsort(sale, kind="mergesort")
+    sale_ord = sale[idx]
+    est_ord_by_sale = est[idx]
+
+    g_sale = _gini_like_from_ordered(sale_ord)
+    g_est_by_sale = _gini_like_from_ordered(est_ord_by_sale)
+
+    if not np.isfinite(g_sale) or g_sale == 0:
+        return np.nan
+    return float(g_est_by_sale / g_sale)

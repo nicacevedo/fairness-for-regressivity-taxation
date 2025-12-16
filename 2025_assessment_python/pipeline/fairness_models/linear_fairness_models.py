@@ -108,11 +108,11 @@ class LeastAbsoluteDeviationRegression:
 
 
 class StableRegression:
-    def __init__(self, fit_intercept=True, solver="GUROBI", k_percentage=0.7, lambda_l1=0, lambda_l2=0,
+    def __init__(self, fit_intercept=True, solver="GUROBI", keep=0.7, lambda_l1=0, lambda_l2=0,
                  objective="mae", sensitive_idx=None, 
                  fit_group_intercept=False, delta_l2=0, 
                  fit_group_beta=False, group_beta_l2=0,
-                 group_constraints=False, group_percentage_diff=0, sensitive_feature=None,
+                 group_constraints=False, eps=0, sensitive_feature=None,
                  weight_by_group=False,
                  residual_cov_constraint=False, residual_cov_thresh=0,
                  ):
@@ -120,7 +120,7 @@ class StableRegression:
         self.intercept = None
         self.fit_intercept = fit_intercept
         self.solver = solver
-        self.k_percentage = k_percentage
+        self.keep = keep
         self.lambda_l1 = lambda_l1
         self.lambda_l2 = lambda_l2
         self.objective = objective
@@ -136,7 +136,7 @@ class StableRegression:
 
         # Alternative: Impose direct fairness constraint of max
         self.group_constraints = group_constraints
-        self.group_percentage_diff = group_percentage_diff
+        self.eps = eps
 
         # Alternative: use weights by group and don't constraint the groups
         self.weight_by_group = weight_by_group
@@ -160,14 +160,14 @@ class StableRegression:
         if self.sensitive_idx is not None:
             n_groups = len(self.sensitive_idx)
             if self.weight_by_group:
-                k_samples = [len(g_idx) * self.k_percentage for g_idx in self.sensitive_idx]
+                k_samples = [len(g_idx) * self.keep for g_idx in self.sensitive_idx]
                 k_samples = [min(k_samples) for g_idx in self.sensitive_idx]
             else:
-                k_samples = n * self.k_percentage#int(n * self.k_percentage) 
+                k_samples = n * self.keep#int(n * self.keep) 
         else:
             # k_samples 
             # n_groups = 1
-            k_samples = n * self.k_percentage#int(n * self.k_percentage) 
+            k_samples = n * self.keep#int(n * self.keep) 
 
         # Primal approach of the problem
         beta = cp.Variable(m)
@@ -200,10 +200,10 @@ class StableRegression:
             f_X =  X @ beta + intercept
             constraints += [
                 # cp.mean( nu[g] + theta[g_idx] ) <= U,
-                #  cp.mean( ( d - np.mean(d) ) * ( f_X - cp.mean( f_X ) ) ) <= self.group_percentage_diff * np.std(d) * np.std(y),
-                # -cp.mean( ( d - np.mean(d) ) * ( f_X - cp.mean( f_X ) ) ) <= self.group_percentage_diff * np.std(d) * np.std(y),
-                 ( ( d - np.mean(d)) @ (f_X/d - cp.mean( f_X/d ) ) ) / n <= self.group_percentage_diff * np.std(d), #* np.std(y),
-                -( ( d - np.mean(d)) @ (f_X/d - cp.mean( f_X/d ) ) ) / n <= self.group_percentage_diff * np.std(d), #* np.std(y),
+                #  cp.mean( ( d - np.mean(d) ) * ( f_X - cp.mean( f_X ) ) ) <= self.eps * np.std(d) * np.std(y),
+                # -cp.mean( ( d - np.mean(d) ) * ( f_X - cp.mean( f_X ) ) ) <= self.eps * np.std(d) * np.std(y),
+                 ( ( d - np.mean(d)) @ (f_X/y - cp.mean( f_X/y ) ) ) / n <= self.eps * np.std(d), #* np.std(y),
+                -( ( d - np.mean(d)) @ (f_X/y - cp.mean( f_X/y ) ) ) / n <= self.eps * np.std(d), #* np.std(y),
             ]
 
             # self.residual_cov_thresh = residual_cov_thresh
@@ -211,17 +211,17 @@ class StableRegression:
         if self.weight_by_group:
             obj = cp.mean( [ nu[g] * float(k_samples[g]) + cp.sum(theta[g_idx])  for g, g_idx in enumerate(self.sensitive_idx) ] )
         else: 
-            obj = cp.mean( nu * k_samples + cp.sum(theta) ) 
+            obj = ( nu * k_samples + cp.sum(theta) ) / k_samples
         if self.lambda_l1 > 0:
             obj += self.lambda_l1 * cp.sum(z) 
         if self.lambda_l2 > 0:
-            obj += self.lambda_l2 * cp.norm2(beta)
+            obj += 0.5 * self.lambda_l2 * cp.norm2(beta)
         # if self.delta_l2 > 0:
         #     obj += self.delta_l2 * cp.norm2(delta)
         # if self.group_beta_l2 > 0:
         #     obj += self.group_beta_l2 * cp.norm2(group_beta)
         # if self.group_constraints:
-        #     obj += self.group_percentage_diff * U
+        #     obj += self.eps * U
         primal_prob = cp.Problem(
             cp.Minimize( obj ), 
             constraints
@@ -239,14 +239,14 @@ class StableRegression:
         print(f"Optimal objective (Weighted Mean Absolute Error): {result}")
         # print(f"Solving time: {solve_time}")
         print(f"Selected betas: {np.sum(np.abs(beta.value) >= 1e-4)}")
-        if self.fit_group_intercept:
-            print(f"Shift delta: ", delta.value)
+        # if self.fit_group_intercept:
+            # print(f"Shift delta: ", delta.value)
         print(f"Nu dual: ", nu.value)
 
         # Print the difference in MAE between groups post-optimization
         if primal_prob.status in ["optimal", "optimal_inaccurate"]:
-            print("THE MEAN COV?:", ( ( d - np.mean(d)) @ (f_X/d - cp.mean( f_X/d ) ) ).value / n)
-            print("RHS of COV: ", self.group_percentage_diff * np.std(d))
+            # print("THE MEAN COV?:", ( ( d - np.mean(d)) @ (f_X/d - cp.mean( f_X/d ) ) ).value / n)
+            # print("RHS of COV: ", self.eps * np.std(d))
             # print(" THE MEAN COV:", cp.mean( ( d - np.mean(d) ) * (cp.multiply(f_X, 1/d) - cp.mean( cp.multiply(f_X, 1/d) ) ) ).value)
             self.beta = beta.value
             self.intercept = intercept.value
@@ -261,13 +261,254 @@ class StableRegression:
         return X @ self.beta + self.intercept
     
     def __str__(self):
-        return f"StableRegression(fit_intercept={self.fit_intercept})"
-
+        if self.group_constraints:
+            return f"StableConstrained(eps={self.eps})" # b0={int(self.fit_intercept)}
+        else:
+            return f"StableRegression"
 
 
 import numpy as np
 import cvxpy as cp
 from sklearn.base import BaseEstimator, RegressorMixin
+
+
+# class StableCovarianceUpperBoundLADRegressor(BaseEstimator, RegressorMixin):
+class StableAdversarialSurrogateRegressor(BaseEstimator, RegressorMixin):
+    """
+    Stable (top-K) LAD regression with a *separable upper-bound* covariance penalty,
+    eliminating the inner maximization.
+
+    You (intentionally) use the separable upper bound:
+        | sum_i w_i z_i | <= sum_i w_i |z_i|
+    with z_i = (d_i - dbar) * (f_i - fbar),  f_i = x_i^T beta + b0,  fbar = (1/n) sum_j f_j.
+
+    Stable/top-K adversary:
+        max_{w} sum_i w_i s_i
+        s.t. 0 <= w_i <= 1,  sum_i w_i = K
+    which equals the sum of the K largest s_i.
+
+    Here s_i(beta) = |y_i - f_i| + rho * | (d_i - dbar) * (f_i - fbar) |.
+
+    Dual (single minimization):
+        min_{beta,b0,nu,theta,...}  K*nu + sum_i theta_i + l1||beta||_1 + 0.5 l2||beta||_2^2
+        s.t. s_i(beta) <= nu + theta_i,   theta_i >= 0,
+             and epigraph linearisations of absolute values.
+
+    Parameters
+    ----------
+    K : int or None
+        Number of points in the stable/top-K objective (sum of K worst per-sample scores).
+        If None, K is set from `keep` at fit time.
+    keep : float
+        Fraction in (0,1] used when K is None: K = ceil(keep * n_samples).
+    rho : float
+        Weight on the separable covariance-contribution penalty.
+    l1, l2 : float
+        L1 and L2 weights on coefficients (intercept not regularized).
+    fit_intercept : bool
+        Include an intercept b0.
+    solver : str
+        Default "MOSEK". Any solver supported by CVXPY for LP/QP.
+    solver_opts : dict or None
+        Passed to problem.solve(...).
+    """
+
+    def __init__(
+        self,
+        K=None,
+        keep=0.1,
+        rho_cov=1.0,
+        rho_var=1.0,
+        l1=0.0,
+        l2=0.0,
+        fit_intercept=True,
+        solver="MOSEK",
+        solver_opts=None,
+        verbose=False,
+        warm_start=False,
+        neg_corr_focus=False,
+    ):
+        self.K = K
+        self.keep = keep
+        self.rho_cov = rho_cov
+        self.rho_var = rho_var
+        self.l1 = l1
+        self.l2 = l2
+        self.fit_intercept = fit_intercept
+        self.solver = solver
+        self.solver_opts = solver_opts
+        self.verbose = verbose
+        self.warm_start = warm_start
+
+        # learned
+        self.coef_ = None
+        self.intercept_ = 0.0
+        self.status_ = None
+        self.objective_value_ = None
+        self.K_ = None
+        self._last_scores_ = None
+        self._last_nu_ = None
+
+        # mine
+        self.neg_corr_focus = neg_corr_focus
+
+    @staticmethod
+    def _as_2d_float(X):
+        X = np.asarray(X)
+        if X.ndim != 2:
+            raise ValueError("X must be 2D array-like.")
+        return X.astype(float)
+
+    @staticmethod
+    def _as_1d_float(x, name):
+        x = np.asarray(x)
+        if x.ndim != 1:
+            raise ValueError(f"{name} must be 1D array-like.")
+        return x.astype(float)
+
+    def fit(self, X, y, d=None):
+        X = self._as_2d_float(X)
+        y = self._as_1d_float(y, "y")
+        # if d is not None:
+        d = self._as_1d_float(d, "d") if d is not None else y
+
+        n, p = X.shape
+        if y.shape[0] != n or d.shape[0] != n:
+            raise ValueError("X, y, d must have the same number of samples.")
+
+        # choose K
+        if self.K is None:
+            keep = float(self.keep)
+            if not (0.0 < keep <= 1.0):
+                raise ValueError("keep must be in (0,1].")
+            K = int(np.ceil(keep * n))
+        else:
+            K = int(self.K)
+        if not (1 <= K <= n):
+            raise ValueError("K must satisfy 1 <= K <= n.")
+        self.K_ = K
+
+        rho_cov, rho_var = float(self.rho_cov), float(self.rho_var)
+        if rho_cov < 0 or rho_var < 0:
+            raise ValueError("ALL rho weights must be >= 0.")
+
+        # centered d and mean prediction
+        dbar = float(np.mean(d))
+        d_center = d - dbar  # constants
+
+        # variables
+        beta = cp.Variable(p)
+        b0 = cp.Variable() if self.fit_intercept else None
+
+        nu = cp.Variable()                    # threshold in top-K epigraph
+        theta = cp.Variable(n, nonneg=True)   # slacks
+
+        # LAD abs residual linearisation
+        # u = cp.Variable(n, nonneg=True)
+        # ell = cp.Variable(n, nonneg=True)
+
+        # abs covariance-contribution linearisation
+        c = cp.Variable(n, nonneg=True)
+        q = cp.Variable(n, nonneg=True)
+
+        # abs variance-constribution linearisation
+        r = cp.Variable(n, nonneg=True)
+        s = cp.Variable(n, nonneg=True)
+        
+
+        # model prediction
+        yhat = X @ beta + (b0 if self.fit_intercept else 0.0)
+
+        # fairness contribution: z_i = (d_i-dbar)*(yhat_i - mean(yhat))
+        ratio_bar = (1.0 / n) * cp.sum(yhat / y)
+        # z =  # affine in (beta,b0)
+
+        # abs(z): z = c - q  => |z| = c + q
+        constraints =  [ cp.multiply(d_center, yhat/y - ratio_bar) == c - q]
+        constraints += [ yhat/y - cp.mean(yhat/y) == r - s] # ratio mean deviation
+        # abs_z = c + q_
+
+        # top-K epigraph constraints: score_i <= nu + theta_i
+        cov_term = c + q if not self.neg_corr_focus else q 
+        constraints += [
+             y - yhat + rho_cov * cov_term + rho_var * (r + s) <= nu + theta,
+            -y + yhat + rho_cov * cov_term + rho_var * (r + s) <= nu + theta,
+        ]
+
+        # objective: sum of K largest scores = min_{nu,theta} K*nu + sum theta
+        obj = nu + (1/K) * cp.sum(theta)
+
+        # regularization (do not regularize intercept)
+        if self.l1 and self.l1 > 0:
+            obj += float(self.l1) * cp.norm1(beta)
+        if self.l2 and self.l2 > 0:
+            obj += 0.5 * float(self.l2) * cp.sum_squares(beta)
+
+        prob = cp.Problem(cp.Minimize(obj), constraints)
+
+        # solve
+        solver_opts = {} if self.solver_opts is None else dict(self.solver_opts)
+        solve_kwargs = dict(verbose=self.verbose, warm_start=self.warm_start, **solver_opts)
+
+        solver_map = {
+            "MOSEK": cp.MOSEK,
+            "ECOS": cp.ECOS,
+            "SCS": cp.SCS,
+            "OSQP": cp.OSQP,     # OK here (QP/LP), but may need tuning for accuracy
+            "GUROBI": cp.GUROBI,
+            "CPLEX": cp.CPLEX,
+        }
+        key = str(self.solver).upper()
+        if key not in solver_map:
+            raise ValueError(f"Unknown solver '{self.solver}'. Choose from {list(solver_map.keys())}.")
+
+        prob.solve(solver=solver_map[key], **solve_kwargs)
+
+        self.status_ = prob.status
+        self.objective_value_ = prob.value
+
+        if beta.value is None:
+            raise RuntimeError(f"Optimization failed. Status: {prob.status}")
+
+        self.coef_ = np.asarray(beta.value).reshape(-1)
+        self.intercept_ = float(b0.value) if self.fit_intercept else 0.0
+
+        # store diagnostics (optional)
+        yhat_val = (X @ self.coef_) + self.intercept_
+        fbar_val = float(np.mean(yhat_val))
+        z_val = (d_center) * (yhat_val - fbar_val)
+        score_val = np.abs(y - yhat_val) + rho_cov * np.abs(z_val)
+        self._last_scores_ = score_val
+        self._last_nu_ = float(nu.value) if nu.value is not None else None
+
+        return self
+
+    def predict(self, X):
+        if self.coef_ is None:
+            raise RuntimeError("Model is not fitted yet.")
+        X = self._as_2d_float(X)
+        return X @ self.coef_ + self.intercept_
+
+    def worst_case_indices_(self):
+        """
+        Returns indices of the K samples with largest composite score under the fitted model.
+        This matches the intended top-K interpretation of the stable objective.
+        """
+        if self._last_scores_ is None or self.K_ is None:
+            raise RuntimeError("Fit the model first.")
+        idx = np.argsort(self._last_scores_)[::-1]
+        return idx[: self.K_]
+
+    def score(self, X, y):
+        """
+        sklearn-like score; returns negative MAE (since the fit objective is LAD-like).
+        """
+        y = self._as_1d_float(y, "y")
+        yhat = self.predict(X)
+        return -float(np.mean(np.abs(y - yhat)))
+    
+    def __str__(self):
+        return f"StableAdversarial(rho_cov={self.rho_cov}, rho_var={self.rho_var})"
 
 
 class RobustStableLADPRDCODRegressor(BaseEstimator, RegressorMixin):

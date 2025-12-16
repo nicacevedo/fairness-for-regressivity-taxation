@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from scipy.stats import kurtosis, skew
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LinearRegression, ElasticNet
 # from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from sklearn.metrics import root_mean_squared_error, r2_score, mean_absolute_error
 
@@ -37,12 +37,15 @@ sys.path.append(folder_path)
 from recipes.recipes_pipelined import build_model_pipeline, build_model_pipeline_supress_onehot, ModelMainRecipe, ModelMainRecipeImputer
 
 # My models
-from src_.motivation_utils import analyze_fairness_by_value, calculate_detailed_statistics, plot_tradeoff_analysis
+from src_.motivation_utils import analyze_fairness_by_value, calculate_detailed_statistics, plot_tradeoff_analysis, compute_taxation_metrics
 from fairness_models.linear_fairness_models import LeastAbsoluteDeviationRegression, MaxDeviationConstrainedLinearRegression, LeastMaxDeviationRegression, GroupDeviationConstrainedLinearRegression, StableRegression, LeastProportionalDeviationRegression#LeastMSEConstrainedRegression, LeastProportionalDeviationRegression
-from fairness_models.linear_fairness_models import MyGLMRegression, GroupDeviationConstrainedLogisticRegression, RobustStableLADPRDCODRegressor
+from fairness_models.linear_fairness_models import MyGLMRegression, GroupDeviationConstrainedLogisticRegression, RobustStableLADPRDCODRegressor, StableAdversarialSurrogateRegressor
 
 # UC Irvine data
 from src_.ucirvine_preprocessing import get_uci_column_names, preprocess_adult_data
+
+# Results utils
+from src_.plotting_utils import results_to_dataframe, plotting_dict_of_models_results
 
 #%% Data
 # source = "CCAO" # "toy_data"
@@ -235,7 +238,7 @@ df_train = df.iloc[:int(train_prop*n),:]
 df_test = df.iloc[int(train_prop*n):,:]
 
 # Random sample of train
-sample_size = 10000 # 10k samples for Abalon (?)# 1000 samples for Adult (?)
+sample_size = 5000 # 10k samples for Abalon (?)# 1000 samples for Adult (?)
 if sample_size < df_train.shape[0]:
     print("working with a sample (10k)")
     df_train = df_train.sample(min(sample_size, df_train.shape[0]), random_state=seed, replace=False)
@@ -319,48 +322,106 @@ else:
     y_test_scaled = y_test
 
 
-# # Delte this part (extra hist and lin reg)
-# plt.hist(np.log(y_train), bins=100)
+################################################################################
+# Experiments on Stable Regression and Covariance Constrained Models 
+################################################################################
+
+# Inputs
+random_state = 42
+n_jobs = 10
+
+fit_intercept = True
+l1,l2 = 1e-3, 1e-4
+
+# Model-specific
+epsilons = [1e-2, 7.5e-3, 5e-3]
+rhos_cov = [0, 1, 2]#, 1.5] # Cov
+rhos_var = [0, 0.5, 1]#, 10] # Var
+keep_percentages = np.linspace(0.1, 0.9, 5)
+
+models = [
+    LinearRegression(fit_intercept=fit_intercept, n_jobs=n_jobs),
+    ElasticNet(fit_intercept=fit_intercept, l1_ratio=l1/(l1 + l2), alpha=(l1 + l2), selection="random", random_state=random_state, warm_start=True),
+]
+baseline_models = [str(model).split("(")[0] for model in models] # Save baseline models names
 
 
-# colors = ["C1",]
+# Stable Regression
+models.append(
+    StableRegression(
+        fit_intercept=fit_intercept, keep=1, lambda_l1=l1, lambda_l2=l2,
+        fit_group_intercept=False, delta_l2=0,  weight_by_group=False, solver="MOSEK",
+        sensitive_idx=None, #sensitive_feature=d.loc[X_train.index].to_numpy(),
+        group_constraints=False, eps=0,
+    )
+)
 
-results = {
-    "train_corrs":[],
-    "val_corrs":[],
-    "train_res_y_corrs":[],
-    "val_res_y_corrs":[],
-    "train_r2":[],
-    "val_r2":[],
-    "train_res_var":[],
-    "val_res_var":[],
-    # ASSESSMENT ACTUAL METRICS
-    "train_cod":[],
-    "val_cod":[],
-    "train_prd":[],
-    "val_prd":[],
-    "train_prb":[],
-    "val_prb":[],
-}
+# Experimental models
+# for eps in epsilons:
+#     models.append(
+#         StableRegression(
+#             fit_intercept=fit_intercept, keep=1, lambda_l1=l1, lambda_l2=l2,
+#             fit_group_intercept=False, delta_l2=0,  weight_by_group=False, solver="MOSEK",
+#             sensitive_idx=None, #sensitive_feature=d.loc[X_train.index].to_numpy(),
+#             group_constraints=True, eps=eps,
+#         )
+#     )
+for rho_var in rhos_var:
+    for rho_cov in rhos_cov:
+        models.append(
+            StableAdversarialSurrogateRegressor(
+                fit_intercept=fit_intercept, keep=1, l1=l1, l2=l2,
+                solver="MOSEK", verbose=False, warm_start=True,
+                rho_cov=rho_cov, neg_corr_focus=False,
+                rho_var=rho_var, 
+            )
+        )
 
-diffs = [-1,-2, 10, 5e-2, 1e-2, 5e-3]
-for i,diff in enumerate(diffs):
+# Correction of baseline models
+model_names = [str(model) for model in models]
+for name_1 in baseline_models:
+    for i,name_2 in enumerate(model_names):
+        if name_1 in name_2:
+            model_names[i] = name_1
+
+# Save results on a dict
+results_train = {name:[] for name in model_names}
+results_val = {name:[] for name in model_names}
+
+for i, model in enumerate(models):
+    model_name = model_names[i]
+
+    # Loop the percentages
+    r_list = [None] if model_name in baseline_models else keep_percentages
+    for r_per in r_list:
+
+        print("Fitting model: ", model_name)
+        print("( r=", r_per,")")
+        if model_name not in baseline_models:
+            model.keep = r_per # update the percentage
+        model.fit(X_train, y_train_log)
+
+        # Prediction
+        y_pred_log = model.predict(X_train)
+        metrics_train = compute_taxation_metrics(y_train_log, y_pred_log, scale="log")
+        results_train[model_name].append(metrics_train)
+
+        # Out of sample Prediction
+        y_pred_log = model.predict(X_val)
+        metrics_val = compute_taxation_metrics(y_val_log, y_pred_log, scale="log")
+        results_val[model_name].append(metrics_val)
+
+print(results_to_dataframe(results_train, r_values=r_list))
+print(results_to_dataframe(results_val, r_values=r_list))
+
+plotting_dict_of_models_results(results_train, r_list=r_list, source="train")
+plotting_dict_of_models_results(results_val, r_list=r_list, source="val")
+
+exit()
+diffs_ = [-1, -2]#, #10, 5] #5e-2, 1e-2, 5e-3]
+for i,diff in enumerate(diffs_):
     keep_percentages = np.linspace(0.1, 1, 10)
-    corrs_train = []
-    corrs_val = []
-    corrs_res_y_train = []
-    corrs_res_y_val = []
-    r2_train = []
-    r2_val = []
-    pred_var_train = []
-    pred_var_val = []
-    # CCAO metrics
-    cod_train = []
-    cod_val = []
-    prd_train = []
-    prd_val = []
-    prb_train = []
-    prb_val = []
+
     for keep_percentage in keep_percentages:
         print("-"*100)
         print("Diff=", diff)
@@ -371,87 +432,78 @@ for i,diff in enumerate(diffs):
             model = LinearRegression(fit_intercept=True)
             model.fit(X_train, y_train_log)
         elif diff == -2:
-            model = RobustStableLADPRDCODRegressor(
-                # K=200,                 # or alpha=0.2
-                alpha=keep_percentage,  # or K=200
-                w_prd=0.5,#1.0,
-                w_cod=0.5,#0.5,
-                l1=1e-1,
-                l2=1e-1,
+            model = StableAdversarialSurrogateRegressor(
+                keep=keep_percentage,
+                rho=1.0,
+                l1=1e-4,
+                l2=1e-4,
                 fit_intercept=True,
-                ratio_anchor=1.0,
                 solver="MOSEK",
-                # solver_opts={"mosek_params": {"MSK_IPAR_LOG": 1}},
+                # solver_opts=None,
                 verbose=False,
+                warm_start=True,
+                neg_corr_focus=False,
             )
 
-            model.fit(X_train, y_train_log, s=y_train_log, v=y_train_log)
+            model.fit(X_train, y_train_log, d=y_train_log) #s=y_train_log, v=y_train_log)
             print("Model results: ", model.status_, model.objective_value_)
-            # yhat = model.predict(X)
         else:
             model = StableRegression(
-                    fit_intercept=True, k_percentage=keep_percentage, lambda_l1=1e-4, lambda_l2=1e-4,
+                    fit_intercept=True, keep=keep_percentage, lambda_l1=1e-4, lambda_l2=1e-4,
                     fit_group_intercept=False, delta_l2=0, group_constraints=True, weight_by_group=False, 
                     sensitive_idx=None, #sensitive_feature=d.loc[X_train.index].to_numpy(),
                     group_percentage_diff=diff, solver="MOSEK")
             model.fit(X_train, y_train_log)
         
-        y_pred = model.predict(X_train)
-        print("R squared: ", r2_score(y_train_log, y_pred))
-        print("Corr of pred and y: ", np.corrcoef(y_train_log, y_pred)[0,1])
-        print("Corr of res and y: ", np.corrcoef(y_train_log, y_train_log - y_pred)[0,1])
-        print("Corr of ratio and y: ", np.corrcoef(y_train_log, y_pred/y_train_log)[0,1])
-        corrs_train.append(np.abs(np.corrcoef(y_train_log, y_pred/y_train_log)[0,1]))
-        corrs_res_y_train.append(np.abs(np.corrcoef(y_train_log, y_train_log-y_pred)[0,1]))
-        r2_train.append(r2_score(y_train_log, y_pred))
-        pred_var_train.append(np.std(y_train_log - y_pred)**2)
-        
-        ratios = np.exp(y_pred) / y_train
-        cod_train.append( 100/np.median(ratios)*np.mean(np.abs(ratios - np.median(ratios))) )
-        print("COD train:", 100/np.median(ratios)*np.mean(np.abs(ratios - np.median(ratios))) )
-        prd_train.append( np.mean(ratios) / (ratios @ y_train) *  np.sum(y_train)  )
-        print("PRD train:", np.mean(ratios) / (ratios @ y_train) *  np.sum(y_train) )
-        b_1, b_0 = np.polyfit(y_train_log, ratios, 1) # R_i = beta_0 + beta_1 * log(y_i) + eps_i 
-        prb = 2*(np.exp(b_1) - 1) * 100
-        print("PRB train:", prb)
-        prb_train.append(prb)
+        y_pred_log = model.predict(X_val)
+        results_val = compute_taxation_metrics(y_val_log, y_pred_log, scale="log")
+        print(results_val)
 
-        y_pred = model.predict(X_val)
-        print("R squared: ", r2_score(y_val_log, y_pred))
-        print("Corr of pred and y: ", np.corrcoef(y_val_log, y_pred)[0,1])
-        print("Corr of res and y: ", np.corrcoef(y_val_log, y_val_log - y_pred)[0,1])
-        print("Corr of ratio and y: ", np.corrcoef(y_val_log, y_pred/y_val_log)[0,1])
-        corrs_val.append(np.abs(np.corrcoef(y_val_log, y_pred/y_val_log)[0,1]))
-        corrs_res_y_val.append(np.abs(np.corrcoef(y_val_log, y_val_log-y_pred)[0,1]))
-        r2_val.append(r2_score(y_val_log, y_pred))
-        pred_var_val.append(np.std(y_val_log - y_pred)**2)
-
-        ratios = np.exp(y_pred) / y_val
-        cod_val.append( 100/np.median(ratios)*np.mean(np.abs(ratios - np.median(ratios))) )
-        print("COD val:", 100/np.median(ratios)*np.mean(np.abs(ratios - np.median(ratios))))
-        prd_val.append( np.mean(ratios) / (ratios @ y_val) *  np.sum(y_val)  )
-        print("PRD val:", np.mean(ratios) / (ratios @ y_val) *  np.sum(y_val) )
-        b_1, b_0 = np.polyfit(y_val_log, ratios, 1) # R_i = beta_0 + beta_1 * log(y_i) + eps_i 
-        prb = 2*(np.exp(b_1) - 1) * 100
-        print("PRB val:", prb)
-        prb_val.append(prb)
+        y_pred_log = model.predict(X_val)
+        results_val = compute_taxation_metrics(y_val_log, y_pred_log, scale="log")
+        print(results_val)
 
 
-    results["train_corrs"].append(corrs_train)
-    results["val_corrs"].append(corrs_val)
-    results["train_res_y_corrs"].append(corrs_res_y_train)
-    results["val_res_y_corrs"].append(corrs_res_y_val)
-    results["train_r2"].append(r2_train)
-    results["val_r2"].append(r2_val)
-    results["train_res_var"].append(pred_var_train)
-    results["val_res_var"].append(pred_var_val)
-    # CCAO
-    results["train_cod"].append(cod_train)
-    results["val_cod"].append(cod_val)
-    results["train_prd"].append(prd_train)
-    results["val_prd"].append(prd_val)
-    results["train_prb"].append(prb_train)
-    results["val_prb"].append(prb_val)
+exit()
+
+
+
+        # y_pred = model.predict(X_val)
+        # print("R squared: ", r2_score(y_val_log, y_pred))
+        # print("Corr of pred and y: ", np.corrcoef(y_val_log, y_pred)[0,1])
+        # print("Corr of res and y: ", np.corrcoef(y_val_log, y_val_log - y_pred)[0,1])
+        # print("Corr of ratio and y: ", np.corrcoef(y_val_log, y_pred/y_val_log)[0,1])
+        # corrs_val.append(np.abs(np.corrcoef(y_val_log, y_pred/y_val_log)[0,1]))
+        # corrs_res_y_val.append(np.abs(np.corrcoef(y_val_log, y_val_log-y_pred)[0,1]))
+        # r2_val.append(r2_score(y_val_log, y_pred))
+        # pred_var_val.append(np.std(y_val_log - y_pred)**2)
+
+        # ratios = np.exp(y_pred) / y_val
+        # cod_val.append( 100/np.median(ratios)*np.mean(np.abs(ratios - np.median(ratios))) )
+        # print("COD val:", 100/np.median(ratios)*np.mean(np.abs(ratios - np.median(ratios))))
+        # prd_val.append( np.mean(ratios) / (ratios @ y_val) *  np.sum(y_val)  )
+        # print("PRD val:", np.mean(ratios) / (ratios @ y_val) *  np.sum(y_val) )
+        # b_1, b_0 = np.polyfit(y_val_log, ratios, 1) # R_i = beta_0 + beta_1 * log(y_i) + eps_i 
+        # prb = 2*(np.exp(b_1) - 1) * 100
+        # print("PRB val:", prb)
+        # prb_val.append(prb)
+
+
+    # results["train_corrs"].append(corrs_train)
+    # results["val_corrs"].append(corrs_val)
+    # results["train_res_y_corrs"].append(corrs_res_y_train)
+    # results["val_res_y_corrs"].append(corrs_res_y_val)
+    # results["train_r2"].append(r2_train)
+    # results["val_r2"].append(r2_val)
+    # results["train_res_var"].append(pred_var_train)
+    # results["val_res_var"].append(pred_var_val)
+    # # CCAO
+    # results["train_cod"].append(cod_train)
+    # results["val_cod"].append(cod_val)
+    # results["train_prd"].append(prd_train)
+    # results["val_prd"].append(prd_val)
+    # results["train_prb"].append(prb_train)
+    # results["val_prb"].append(prb_val)
 
 
 # Correlation between RtA and y
@@ -782,7 +834,7 @@ if __name__ == '__main__':
         # print("l1: ", l1_," | l2: ", l2_)
         # model = StableRegression(
         #     fit_intercept=True,
-        #     k_percentage=(1-0.02),#(1-rmse_percentage_increase),
+        #     keep=(1-0.02),#(1-rmse_percentage_increase),
         #     solver="MOSEK",
         #     lambda_l1=l1_,#1e-1/10**(10*rmse_percentage_increase),
         #     lambda_l2=l2_,#1e-1*10**(10*rmse_percentage_increase),
