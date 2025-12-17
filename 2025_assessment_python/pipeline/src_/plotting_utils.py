@@ -74,7 +74,7 @@ def plotting_dict_of_models_results(results, r_list, source="train"):
     # 3. Setup styling
     # Assign a unique color to each model
     model_names = list(results.keys())
-    colors = plt.cm.tab10(np.linspace(0, 1, len(model_names)))
+    colors = plt.cm.tab20(np.linspace(0, 1, len(model_names)))
     model_color_map = dict(zip(model_names, colors))
 
     # Assign different markers/linestyles for each metric (to distinguish plots visually)
@@ -116,3 +116,4 @@ def plotting_dict_of_models_results(results, r_list, source="train"):
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         plt.savefig(f"./temp/plots/metrics/{metric}_{source}.png", dpi=600)
+        plt.close()

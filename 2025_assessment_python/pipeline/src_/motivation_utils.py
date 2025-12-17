@@ -348,6 +348,7 @@ def compute_taxation_metrics(y_real, y_pred, scale="log"):
         # 2. My metrics of interest
         ratios = y_pred / y_real
         metrics["Corr(ratio, y)"] = np.corrcoef(ratios, y_real)[0,1]
+        metrics["Var(ratio)"] = np.var(ratios)
 
         # 3. Taxation-Domain Specific Metrics
         median_ratio = np.median(ratios)

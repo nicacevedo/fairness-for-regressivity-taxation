@@ -8,6 +8,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.linear_model import LinearRegression, ElasticNet
 # from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+from sklearn.ensemble import RandomForestRegressor, HistGradientBoostingRegressor
 from sklearn.metrics import root_mean_squared_error, r2_score, mean_absolute_error
 
 # from src.preliminary_models import ConstraintBothRegression, ConstraintDeviationRegression, ConstraintGroupsMeanRegression, UpperBoundLossRegression
@@ -39,7 +40,7 @@ from recipes.recipes_pipelined import build_model_pipeline, build_model_pipeline
 # My models
 from src_.motivation_utils import analyze_fairness_by_value, calculate_detailed_statistics, plot_tradeoff_analysis, compute_taxation_metrics
 from fairness_models.linear_fairness_models import LeastAbsoluteDeviationRegression, MaxDeviationConstrainedLinearRegression, LeastMaxDeviationRegression, GroupDeviationConstrainedLinearRegression, StableRegression, LeastProportionalDeviationRegression#LeastMSEConstrainedRegression, LeastProportionalDeviationRegression
-from fairness_models.linear_fairness_models import MyGLMRegression, GroupDeviationConstrainedLogisticRegression, RobustStableLADPRDCODRegressor, StableAdversarialSurrogateRegressor
+from fairness_models.linear_fairness_models import MyGLMRegression, GroupDeviationConstrainedLogisticRegression, RobustStableLADPRDCODRegressor, StableAdversarialSurrogateRegressor, StableAdversarialSurrogateRegressor2
 
 # UC Irvine data
 from src_.ucirvine_preprocessing import get_uci_column_names, preprocess_adult_data
@@ -238,7 +239,7 @@ df_train = df.iloc[:int(train_prop*n),:]
 df_test = df.iloc[int(train_prop*n):,:]
 
 # Random sample of train
-sample_size = 5000 # 10k samples for Abalon (?)# 1000 samples for Adult (?)
+sample_size = 100000 # 10k samples for Abalon (?)# 1000 samples for Adult (?)
 if sample_size < df_train.shape[0]:
     print("working with a sample (10k)")
     df_train = df_train.sample(min(sample_size, df_train.shape[0]), random_state=seed, replace=False)
@@ -328,20 +329,25 @@ else:
 
 # Inputs
 random_state = 42
-n_jobs = 10
+n_jobs = 190
 
 fit_intercept = True
 l1,l2 = 1e-3, 1e-4
+max_depth = 10
 
 # Model-specific
-epsilons = [1e-2, 7.5e-3, 5e-3]
-rhos_cov = [0, 1, 2]#, 1.5] # Cov
-rhos_var = [0, 0.5, 1]#, 10] # Var
-keep_percentages = np.linspace(0.1, 0.9, 5)
+epsilons_cov = [1e-2, 8.75e-3, 7.5e-3]#, 5e-3] # Cov
+# epsilons_var = [1e-1, 7.5e-2, 5e-2, 2.5e-2] # Var: Not doing anything
+rhos_cov = [1, 3, 5]#, 1.5] # Cov
+# rhos_var = [0] #[0, 1e-1, 1, 5, 10, 20]#, 10] # Var: Not doing anything
+keep_percentages = np.linspace(0.3, 0.9, 4)
 
 models = [
     LinearRegression(fit_intercept=fit_intercept, n_jobs=n_jobs),
     ElasticNet(fit_intercept=fit_intercept, l1_ratio=l1/(l1 + l2), alpha=(l1 + l2), selection="random", random_state=random_state, warm_start=True),
+    # RandomForestRegressor(n_estimators=n_jobs, criterion='squared_error', max_depth=max_depth, min_samples_split=50, min_samples_leaf=30, bootstrap=True, n_jobs=n_jobs, random_state=random_state, warm_start=True, ccp_alpha=1e-3),
+    # GradientBoostingRegressor(loss='squared_error', learning_rate=1e-3, n_estimators=100, subsample=0.8, criterion='friedman_mse', min_samples_split=50, min_samples_leaf=20, max_depth=3, random_state=random_state, alpha=0.9, warm_start=True, validation_fraction=0.1, tol=1e-4, ccp_alpha=1e-3)
+    # HistGradientBoostingRegressor(loss='squared_error', learning_rate=1e-1, max_iter=20*n_jobs, max_leaf_nodes=31, max_depth=max_depth, min_samples_leaf=30, l2_regularization=l2*100, max_bins=255, warm_start=True, early_stopping='auto', scoring='loss', validation_fraction=0.2, n_iter_no_change=10, tol=1e-6, random_state=random_state)
 ]
 baseline_models = [str(model).split("(")[0] for model in models] # Save baseline models names
 
@@ -352,30 +358,49 @@ models.append(
         fit_intercept=fit_intercept, keep=1, lambda_l1=l1, lambda_l2=l2,
         fit_group_intercept=False, delta_l2=0,  weight_by_group=False, solver="MOSEK",
         sensitive_idx=None, #sensitive_feature=d.loc[X_train.index].to_numpy(),
-        group_constraints=False, eps=0,
+        cov_constraint=False, eps_cov=0,
+        var_constraint=False, eps_var=0,
     )
 )
 
 # Experimental models
-# for eps in epsilons:
+# 1. Constrained Stable
+# for eps in epsilons_var:
+for eps in epsilons_cov:
+    models.append(
+        StableRegression(
+            fit_intercept=fit_intercept, keep=1, lambda_l1=l1, lambda_l2=l2,
+            fit_group_intercept=False, delta_l2=0,  weight_by_group=False, solver="MOSEK",
+            sensitive_idx=None, #sensitive_feature=d.loc[X_train.index].to_numpy(),
+            cov_constraint=True, eps_cov=eps,
+            var_constraint=False, eps_var=0,
+        )
+    )
+
+# # 2. Adversarial Stable
+# # for rho_var in rhos_var:
+# for rho_cov in rhos_cov:
 #     models.append(
-#         StableRegression(
-#             fit_intercept=fit_intercept, keep=1, lambda_l1=l1, lambda_l2=l2,
-#             fit_group_intercept=False, delta_l2=0,  weight_by_group=False, solver="MOSEK",
-#             sensitive_idx=None, #sensitive_feature=d.loc[X_train.index].to_numpy(),
-#             group_constraints=True, eps=eps,
+#         StableAdversarialSurrogateRegressor(
+#             fit_intercept=fit_intercept, keep=1, l1=l1, l2=l2,
+#             solver="MOSEK", verbose=False, warm_start=True,
+#             rho_cov=rho_cov, neg_corr_focus=False,
+#             rho_var=0, 
 #         )
 #     )
-for rho_var in rhos_var:
-    for rho_cov in rhos_cov:
-        models.append(
-            StableAdversarialSurrogateRegressor(
-                fit_intercept=fit_intercept, keep=1, l1=l1, l2=l2,
-                solver="MOSEK", verbose=False, warm_start=True,
-                rho_cov=rho_cov, neg_corr_focus=False,
-                rho_var=rho_var, 
-            )
-        )
+
+# # 3. Separable AdversarialStable
+# # for rho_var in rhos_var:
+# for rho_cov in rhos_cov:
+#     models.append(
+#         StableAdversarialSurrogateRegressor2(
+#             fit_intercept=fit_intercept, keep=1, l1=l1, l2=l2,
+#             solver="MOSEK", verbose=False, warm_start=True,
+#             rho_cov=rho_cov, neg_corr_focus=False,
+#             rho_var=0, 
+#         )
+#     )
+
 
 # Correction of baseline models
 model_names = [str(model) for model in models]
