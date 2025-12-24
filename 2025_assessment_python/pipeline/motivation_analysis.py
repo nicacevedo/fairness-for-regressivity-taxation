@@ -42,6 +42,12 @@ from src_.motivation_utils import analyze_fairness_by_value, calculate_detailed_
 from fairness_models.linear_fairness_models import LeastAbsoluteDeviationRegression, MaxDeviationConstrainedLinearRegression, LeastMaxDeviationRegression, GroupDeviationConstrainedLinearRegression, StableRegression, LeastProportionalDeviationRegression#LeastMSEConstrainedRegression, LeastProportionalDeviationRegression
 from fairness_models.linear_fairness_models import MyGLMRegression, GroupDeviationConstrainedLogisticRegression, RobustStableLADPRDCODRegressor, StableAdversarialSurrogateRegressor, StableAdversarialSurrogateRegressor2
 
+# My boosting models
+import lightgbm as lgb
+# from fairness_models.boosting_fairness_models import custom_objective, custom_eval
+from fairness_models.boosting_fairness_models import make_constrained_mse_objective, make_covariance_metric
+from fairness_models.boosting_fairness_models import LGBMCovRatioRegressor, CovPenaltyConfig
+
 # UC Irvine data
 from src_.ucirvine_preprocessing import get_uci_column_names, preprocess_adult_data
 
@@ -239,7 +245,7 @@ df_train = df.iloc[:int(train_prop*n),:]
 df_test = df.iloc[int(train_prop*n):,:]
 
 # Random sample of train
-sample_size = 100000 # 10k samples for Abalon (?)# 1000 samples for Adult (?)
+sample_size = 10000 # 10k samples for Abalon (?)# 1000 samples for Adult (?)
 if sample_size < df_train.shape[0]:
     print("working with a sample (10k)")
     df_train = df_train.sample(min(sample_size, df_train.shape[0]), random_state=seed, replace=False)
@@ -329,53 +335,116 @@ else:
 
 # Inputs
 random_state = 42
-n_jobs = 190
+n_jobs = 12#190
+max_iter=1000
 
 fit_intercept = True
 l1,l2 = 1e-3, 1e-4
-max_depth = 10
+max_depth = 15
+lr = 1e-2
 
 # Model-specific
-epsilons_cov = [1e-2, 8.75e-3, 7.5e-3]#, 5e-3] # Cov
+epsilons_cov = [2.25e-2, 1e-2, 8.75e-3, 7.5e-3]#, 5e-3] # Cov 2.25e-2, 
 # epsilons_var = [1e-1, 7.5e-2, 5e-2, 2.5e-2] # Var: Not doing anything
-rhos_cov = [1, 3, 5]#, 1.5] # Cov
+rhos_cov = [1e-1, 1, 5, 10]#, 1.5] # Cov
 # rhos_var = [0] #[0, 1e-1, 1, 5, 10, 20]#, 10] # Var: Not doing anything
-keep_percentages = np.linspace(0.3, 0.9, 4)
+keep_percentages = np.linspace(0.2, 1, 5)
+
 
 models = [
     LinearRegression(fit_intercept=fit_intercept, n_jobs=n_jobs),
+    LeastAbsoluteDeviationRegression(fit_intercept=fit_intercept, solver="MOSEK"),
     ElasticNet(fit_intercept=fit_intercept, l1_ratio=l1/(l1 + l2), alpha=(l1 + l2), selection="random", random_state=random_state, warm_start=True),
     # RandomForestRegressor(n_estimators=n_jobs, criterion='squared_error', max_depth=max_depth, min_samples_split=50, min_samples_leaf=30, bootstrap=True, n_jobs=n_jobs, random_state=random_state, warm_start=True, ccp_alpha=1e-3),
     # GradientBoostingRegressor(loss='squared_error', learning_rate=1e-3, n_estimators=100, subsample=0.8, criterion='friedman_mse', min_samples_split=50, min_samples_leaf=20, max_depth=3, random_state=random_state, alpha=0.9, warm_start=True, validation_fraction=0.1, tol=1e-4, ccp_alpha=1e-3)
-    # HistGradientBoostingRegressor(loss='squared_error', learning_rate=1e-1, max_iter=20*n_jobs, max_leaf_nodes=31, max_depth=max_depth, min_samples_leaf=30, l2_regularization=l2*100, max_bins=255, warm_start=True, early_stopping='auto', scoring='loss', validation_fraction=0.2, n_iter_no_change=10, tol=1e-6, random_state=random_state)
+    # HistGradientBoostingRegressor(loss='squared_error', learning_rate=lr, max_iter=max_iter, max_leaf_nodes=31, max_depth=max_depth, min_samples_leaf=30, l2_regularization=l2, max_bins=255, warm_start=True, early_stopping='auto', scoring='loss', validation_fraction=0.2, n_iter_no_change=10, tol=1e-6, random_state=random_state),
 ]
+
+
 baseline_models = [str(model).split("(")[0] for model in models] # Save baseline models names
 
 
-# Stable Regression
-models.append(
-    StableRegression(
-        fit_intercept=fit_intercept, keep=1, lambda_l1=l1, lambda_l2=l2,
-        fit_group_intercept=False, delta_l2=0,  weight_by_group=False, solver="MOSEK",
-        sensitive_idx=None, #sensitive_feature=d.loc[X_train.index].to_numpy(),
-        cov_constraint=False, eps_cov=0,
-        var_constraint=False, eps_var=0,
-    )
-)
+# Light GBM custom metric
+class LGBCustomObjective:
+    def __init__(self, rho=1e-3, keep=0.7):
+        self.rho = rho
+        self.keep = keep
+        
+    def fobj(self, y_true, y_pred):
+        # Loss function value
+        loss_value = np.mean( (y_true - y_pred)**2 ) + self.rho * np.mean( (y_pred/y_true-1)**2 * (y - np.mean(y))**2 )  
+        print("Loss value: ", loss_value)
 
-# Experimental models
-# 1. Constrained Stable
-# for eps in epsilons_var:
-for eps in epsilons_cov:
-    models.append(
-        StableRegression(
-            fit_intercept=fit_intercept, keep=1, lambda_l1=l1, lambda_l2=l2,
-            fit_group_intercept=False, delta_l2=0,  weight_by_group=False, solver="MOSEK",
-            sensitive_idx=None, #sensitive_feature=d.loc[X_train.index].to_numpy(),
-            cov_constraint=True, eps_cov=eps,
-            var_constraint=False, eps_var=0,
-        )
+        # Get worst r=K/n fraction 
+        n = y_pred.size
+        K = int(n * self.keep)
+        worst_K = np.argpartition(loss_value, -K)[-K:]
+        w = np.zeros(n)
+        w[worst_K] = 1/K
+
+        # base gradients/hessians for 0.5*(pred-logy)^2
+        grad_base = 2 * (y_pred[worst_K] - y_true[worst_K]) / K
+        hess_base = 2 * np.ones_like(y_pred[worst_K]) / K
+
+        # MINE
+        z = y_true[worst_K]
+        z_c = (y_true[worst_K] - np.mean(y_true[worst_K]))
+        grad_pen = 2 * (y_pred[worst_K] - z) * (z_c/z) ** 2 / K
+        hess_pen = 2 * (z_c/z) ** 2 / K
+
+        grad = grad_base + self.rho * grad_pen
+        hess = hess_base + self.rho  * hess_pen # keep stable diagonal Hessian
+
+
+        return grad, hess
+
+    def __str__(self):
+        return "LGBCustomObjective"    
+    
+# for eps in [1e-3, 1e-1, 1e1, 1e3]:
+rhos = [5e3, 1e4, 1e5, 1e6]
+for rho in rhos:
+    cobj = LGBCustomObjective(rho=rho)
+
+    #         # Lgbm params
+    models.append( # custom_obj # 
+        lgb.LGBMRegressor(boosting_type='gbdt', num_leaves=31, max_depth=max_depth, learning_rate=lr, n_estimators=max_iter, subsample_for_bin=200000, objective=cobj.fobj,#"mse", 
+                        class_weight=None, min_child_samples=30, colsample_bytree=1.0, reg_alpha=l1, reg_lambda=l2, random_state=random_state, n_jobs=n_jobs, importance_type='split'),
     )
+
+baseline_models += [str(model) for model in models[-len(rhos):]] # Save baseline models names
+
+
+
+
+
+# # Stable Regression
+# models.append(
+#     StableRegression(
+#         fit_intercept=fit_intercept, keep=1, lambda_l1=l1, lambda_l2=l2,
+#         fit_group_intercept=False, delta_l2=0,  weight_by_group=False, solver="MOSEK",
+#         sensitive_idx=None, #sensitive_feature=d.loc[X_train.index].to_numpy(),
+#         cov_constraint=False, eps_cov=0,
+#         var_constraint=False, eps_var=0,
+#     )
+# )
+
+
+
+
+# # Experimental models
+# # 1. Constrained Stable
+# # for eps in epsilons_var:
+# for eps in epsilons_cov:
+#     models.append(
+#         StableRegression(
+#             fit_intercept=fit_intercept, keep=1, lambda_l1=l1, lambda_l2=l2,
+#             fit_group_intercept=False, delta_l2=0,  weight_by_group=False, solver="MOSEK",
+#             sensitive_idx=None, #sensitive_feature=d.loc[X_train.index].to_numpy(),
+#             cov_constraint=True, eps_cov=eps,
+#             var_constraint=False, eps_var=0,
+#         )
+#     )
 
 # # 2. Adversarial Stable
 # # for rho_var in rhos_var:
@@ -443,9 +512,15 @@ plotting_dict_of_models_results(results_train, r_list=r_list, source="train")
 plotting_dict_of_models_results(results_val, r_list=r_list, source="val")
 
 exit()
+
+
+
+
+
+
 diffs_ = [-1, -2]#, #10, 5] #5e-2, 1e-2, 5e-3]
 for i,diff in enumerate(diffs_):
-    keep_percentages = np.linspace(0.1, 1, 10)
+    keep_percentages = np.linspace(0.1, 1, 1)
 
     for keep_percentage in keep_percentages:
         print("-"*100)

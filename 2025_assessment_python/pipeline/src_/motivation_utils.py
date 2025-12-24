@@ -339,16 +339,19 @@ def compute_taxation_metrics(y_real, y_pred, scale="log"):
         metrics = dict()
 
         # 1. Accuracy metrics
-        metrics["R2 Score"] = r2_score(y_real, y_pred)
-        metrics["R2 Score (log)"] = r2_score(y_real_log, y_pred_log)
+        metrics["R2"] = r2_score(y_real, y_pred)
+        metrics["R2 (log)"] = r2_score(y_real_log, y_pred_log)
         metrics["RMSE"] = root_mean_squared_error(y_real, y_pred)
         metrics["MAE"] = mean_absolute_error(y_real, y_pred)
         metrics["MAPE"] = mean_absolute_percentage_error(y_real, y_pred)
 
         # 2. My metrics of interest
         ratios = y_pred / y_real
-        metrics["Corr(ratio, y)"] = np.corrcoef(ratios, y_real)[0,1]
-        metrics["Var(ratio)"] = np.var(ratios)
+        metrics["Corr ratio_y"] = np.corrcoef(ratios, y_real)[0,1]
+        metrics["Var ratio"] = np.var(ratios)
+        metrics["Median ratio"] = np.median(ratios)
+        metrics["Mean ratio"] = np.mean(ratios)
+        metrics["W. Mean ratio"] = np.sum(y_pred)/np.sum(y_real)
 
         # 3. Taxation-Domain Specific Metrics
         median_ratio = np.median(ratios)

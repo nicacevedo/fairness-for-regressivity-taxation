@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 
-def results_to_dataframe(results, r_values, round_decimals=4):
+def results_to_dataframe(results, r_values, round_decimals=3):
     rows = []
     for model_name, metrics_list in results.items():
         # Loop through the list of results for this specific model
@@ -14,16 +14,16 @@ def results_to_dataframe(results, r_values, round_decimals=4):
             # If it's a baseline (length 1), we can set r_value to None or 'Baseline'
             if len(metrics_list) > 1:
                 # Safely access r_list, or fallback to index if r_list is too short
-                row['r_value'] = r_values[i] if i < len(r_values) else i
+                row['r'] = r_values[i] if i < len(r_values) else i
             else:
-                row['r_value'] = None  # Or 'Baseline'
+                row['r'] = None  # Or 'Baseline'
                 
             rows.append(row)
 
     # Create DataFrame
     df = pd.DataFrame(rows)
     # Optional: Reorder columns to put Model and r_value first
-    cols = ['Model', 'r_value'] + [c for c in df.columns if c not in ['Model', 'r_value']]
+    cols = ['Model', 'r'] + [c for c in df.columns if c not in ['Model', 'r']]
     df = df[cols]
     return df.round(round_decimals)
 
@@ -74,7 +74,7 @@ def plotting_dict_of_models_results(results, r_list, source="train"):
     # 3. Setup styling
     # Assign a unique color to each model
     model_names = list(results.keys())
-    colors = plt.cm.tab20(np.linspace(0, 1, len(model_names)))
+    colors = plt.cm.tab20b(np.linspace(0, 1, len(model_names)))
     model_color_map = dict(zip(model_names, colors))
 
     # Assign different markers/linestyles for each metric (to distinguish plots visually)
@@ -109,11 +109,11 @@ def plotting_dict_of_models_results(results, r_list, source="train"):
                         label=model,
                         color=c, marker=marker, linestyle=linestyle, linewidth=2)
         
-        plt.title(f'Comparison of {metric} vs. Constraint Radius (r)', fontsize=14)
-        plt.xlabel('r_list Value', fontsize=12)
+        plt.title(f'Comparison of {metric} vs. Ratio to Keep (r) [{source}]', fontsize=14)
+        plt.xlabel(r'$r=K/n$ (Ratio of samples to keep)', fontsize=12)
         plt.ylabel(metric, fontsize=12)
-        plt.legend()
-        plt.grid(True, alpha=0.3)
+        plt.legend(fontsize=8, borderpad=0.5, labelspacing=0.3, handletextpad=0.5)
+        plt.grid(True, alpha=0.5)
         plt.tight_layout()
         plt.savefig(f"./temp/plots/metrics/{metric}_{source}.png", dpi=600)
         plt.close()
