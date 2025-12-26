@@ -32,6 +32,71 @@ except ImportError as e:  # pragma: no cover
     raise ImportError("This module requires scikit-learn. Install via `pip install scikit-learn`.") from e
 
 
+
+
+# MINE: Light GBM custom metric
+class LGBCustomObjective:
+    def __init__(self, rho=1e-3, keep=0.7, adversary_type="overall", lgbm_params=None):
+        self.rho = rho
+        self.keep = keep
+        self.adversary_type = adversary_type
+        self.model = lgb.LGBMRegressor(**lgbm_params)
+
+    def fit(self, X, y):
+        
+        # Update lgbm params
+        self.model.set_params(
+            objective=self.fobj
+        )
+        self.model.fit(X,y)
+
+    def predict(self, X):
+        return self.model.predict(X)
+        
+    def fobj(self, y_true, y_pred):
+        # Loss function value
+        mse_value = (y_true - y_pred)**2
+        cov_surr_value = (y_pred/y_true-1)**2 * (y_true - np.mean(y_true))**2
+        loss_value = mse_value + self.rho * cov_surr_value  
+        print("Loss value: ", np.mean(loss_value), "| MSE value: ", np.mean(mse_value), "| CovSurr value: ", np.mean(cov_surr_value))
+
+        # Get worst r=K/n fraction 
+        n = y_pred.size
+        K = int(n * self.keep)
+
+        if self.adversary_type == "overall":
+            worst_K_base = np.argpartition(loss_value, -K)[-K:]
+            worst_K_pen = worst_K_base
+        elif self.adversary_type == "individual":
+            worst_K_base = np.argpartition(mse_value, -K)[-K:]
+            worst_K_pen = np.argpartition(cov_surr_value, -K)[-K:]
+        else:
+            raise ValueError(f"No adversary_type called: {self.adversary_type}")
+
+        # base gradients/hessians for 0.5*(pred-logy)^2
+        grad_base = 2 * (y_pred[worst_K_base] - y_true[worst_K_base]) / K
+        hess_base = 2 * np.ones_like(y_pred[worst_K_base]) / K
+
+        # MINE
+        z = y_true[worst_K_pen]
+        z_c = (y_true[worst_K_pen] - np.mean(y_true[worst_K_pen]))
+        grad_pen = 2 * (y_pred[worst_K_pen] - z) * (z_c/z) ** 2 / K
+        hess_pen = 2 * (z_c/z) ** 2 / K
+
+        # Adversarial grad/hess (?)
+        grad, hess = np.zeros(n), np.zeros(n)
+        grad[worst_K_base] += grad_base
+        hess[worst_K_base] += hess_base
+        grad[worst_K_pen] += self.rho * grad_pen
+        hess[worst_K_pen] += self.rho  * hess_pen # keep stable diagonal Hessian
+
+        return grad, hess
+
+    def __str__(self):
+        return f"LGBCustomObjective({self.rho}, adversary_type={self.adversary_type})"    
+    
+
+
 def _sigmoid(x: np.ndarray) -> np.ndarray:
     """Numerically stable sigmoid."""
     x = np.asarray(x, dtype=float)

@@ -355,72 +355,363 @@ def compute_taxation_metrics(y_real, y_pred, scale="log"):
 
         # 3. Taxation-Domain Specific Metrics
         median_ratio = np.median(ratios)
-        metrics["COD"] = 100/median_ratio*np.mean(np.abs(ratios - median_ratio))
-        metrics["PRD"] =  np.mean(ratios) / np.sum(y_pred) * np.sum(y_real) #(ratios @ y_real) * np.sum(y_real)
+        # metrics["COD"] = 100/median_ratio*np.mean(np.abs(ratios - median_ratio))
+        metrics["COD"] = cod(ratios, na_rm=True)
+        # metrics["PRD"] =  np.mean(ratios) / np.sum(y_pred) * np.sum(y_real) #(ratios @ y_real) * np.sum(y_real)
+        metrics["PRD"] = prd(y_pred, y_real, na_rm=True)
         # PRB: Calculate the "Proxy" value first (Average of Sale Price and "Indicated" Value)
-        proxy_vals = 0.5 * (y_pred / median_ratio + y_real)
-        median_proxy = np.median(proxy_vals)
-        y_prb = (ratios - median_ratio) / median_ratio
-        x_prb = np.log2(proxy_vals) - np.log2(median_proxy) 
-        metrics["PRB"] = np.polyfit(x_prb, y_prb, 1)[0]
-        metrics["MKI"] = mki(y_pred, y_real)
+        # proxy_vals = 0.5 * (y_pred / median_ratio + y_real)
+        # median_proxy = np.median(proxy_vals)
+        # y_prb = (ratios - median_ratio) / median_ratio
+        # x_prb = np.log2(proxy_vals) - np.log2(median_proxy) 
+        # metrics["PRB"] = np.polyfit(x_prb, y_prb, 1)[0]
+        metrics["PRB"] = prb(y_pred, y_real, na_rm=True)
+        # metrics["MKI"] = mki(y_pred, y_real)
+        metrics["MKI"] = mki(y_pred, y_real, na_rm=True)
         return metrics
 
 
-# MKI helpers
-def _to_1d_float_array(x):
-    """Convert array-like to a 1D float numpy array."""
-    a = np.asarray(x, dtype=float).reshape(-1)
+# # MKI helpers
+# def _to_1d_float_array(x):
+#     """Convert array-like to a 1D float numpy array."""
+#     a = np.asarray(x, dtype=float).reshape(-1)
+#     return a
+
+# def _gini_like_from_ordered(values):
+#     """
+#     Gini formula applied to a *given order* (when order isn't by itself, this is a concentration-style coefficient).
+#     values must be nonnegative and not all zero.
+#     """
+#     v = _to_1d_float_array(values)
+#     if np.any(v < 0):
+#         raise ValueError("Values must be nonnegative for Gini-like computation.")
+#     n = v.size
+#     s = v.sum()
+#     if n == 0 or s <= 0:
+#         return np.nan
+#     i = np.arange(1, n + 1, dtype=float)
+#     return float((2.0 * np.dot(i, v)) / (n * s) - (n + 1.0) / n)
+
+# def mki(estimate, sale_price, *, dropna=True):
+#     """
+#     Modified Kakwani Index (MKI).
+
+#     Steps (per AssessPy docs):
+#       1) order observations by sale_price ascending
+#       2) compute Gini(sale_price) in that order (this is the usual Gini)
+#       3) compute "Gini" of estimates while *remaining ordered by sale_price*
+#          (this is effectively a concentration coefficient)
+#       4) MKI = Gini_estimate / Gini_sale_price
+
+#     Interpretation (per docs): MKI < 1 regressive, =1 vertical equity, >1 progressive. :contentReference[oaicite:3]{index=3}
+#     """
+#     est = _to_1d_float_array(estimate)
+#     sale = _to_1d_float_array(sale_price)
+
+#     if est.shape[0] != sale.shape[0]:
+#         raise ValueError("estimate and sale_price must have the same length.")
+#     if dropna:
+#         mask = np.isfinite(est) & np.isfinite(sale)
+#         est, sale = est[mask], sale[mask]
+#     if est.size == 0:
+#         return np.nan
+#     if np.any(sale < 0) or np.any(est < 0):
+#         raise ValueError("estimate and sale_price should be nonnegative for MKI.")
+
+#     idx = np.argsort(sale, kind="mergesort")
+#     sale_ord = sale[idx]
+#     est_ord_by_sale = est[idx]
+
+#     g_sale = _gini_like_from_ordered(sale_ord)
+#     g_est_by_sale = _gini_like_from_ordered(est_ord_by_sale)
+
+#     if not np.isfinite(g_sale) or g_sale == 0:
+#         return np.nan
+#     return float(g_est_by_sale / g_sale)
+
+
+
+################################################################################################
+# CCAO's package translation to python
+# original source (.R code): https://github.com/ccao-data/assessr/blob/master/R/formulas.R
+################################################################################################ 
+
+
+from scipy import stats
+
+def _ensure_arrays(a, b=None):
+    """Helper to convert inputs to numpy arrays."""
+    a = np.asarray(a, dtype=float)
+    if b is not None:
+        b = np.asarray(b, dtype=float)
+        return a, b
     return a
 
-def _gini_like_from_ordered(values):
+def _handle_na(arrays, na_rm=False):
     """
-    Gini formula applied to a *given order* (when order isn't by itself, this is a concentration-style coefficient).
-    values must be nonnegative and not all zero.
+    Helper to handle NA values across one or more arrays.
+    Returns cleaned arrays or raises/returns nan based on na_rm.
     """
-    v = _to_1d_float_array(values)
-    if np.any(v < 0):
-        raise ValueError("Values must be nonnegative for Gini-like computation.")
-    n = v.size
-    s = v.sum()
-    if n == 0 or s <= 0:
+    # Stack arrays to find common NaN indices
+    if isinstance(arrays, tuple):
+        combined = np.column_stack(arrays)
+        mask = ~np.isnan(combined).any(axis=1)
+        
+        if na_rm:
+            return [arr[mask] for arr in arrays]
+        elif not np.all(mask):
+            return [None] * len(arrays) # Signal to return NaN
+        return arrays
+    else:
+        # Single array case
+        mask = ~np.isnan(arrays)
+        if na_rm:
+            return arrays[mask]
+        elif not np.all(mask):
+            return None
+        return arrays
+
+# ----- COD -----
+
+def cod(ratio, na_rm=False):
+    """
+    Calculate Coefficient of Dispersion (COD).
+    
+    COD is the average absolute percent deviation from the median ratio.
+    Lower is better (indicates uniformity).
+    
+    Args:
+        ratio: Array-like of ratios (Assessed Value / Sale Price).
+        na_rm: Boolean, remove NAs if True.
+        
+    Returns:
+        float: The COD value.
+    """
+    ratio = _ensure_arrays(ratio)
+    
+    # Handle NA
+    ratio = _handle_na(ratio, na_rm)
+    if ratio is None: return np.nan
+    if len(ratio) == 0: return np.nan
+
+    med_ratio = np.median(ratio)
+    
+    # Avoid division by zero
+    if med_ratio == 0:
         return np.nan
-    i = np.arange(1, n + 1, dtype=float)
-    return float((2.0 * np.dot(i, v)) / (n * s) - (n + 1.0) / n)
+        
+    cod_val = (np.mean(np.abs(ratio - med_ratio)) / med_ratio) * 100
+    return cod_val
 
-def mki(estimate, sale_price, *, dropna=True):
+# ----- PRD -----
+
+def prd(assessed, sale_price, na_rm=False):
     """
-    Modified Kakwani Index (MKI).
-
-    Steps (per AssessPy docs):
-      1) order observations by sale_price ascending
-      2) compute Gini(sale_price) in that order (this is the usual Gini)
-      3) compute "Gini" of estimates while *remaining ordered by sale_price*
-         (this is effectively a concentration coefficient)
-      4) MKI = Gini_estimate / Gini_sale_price
-
-    Interpretation (per docs): MKI < 1 regressive, =1 vertical equity, >1 progressive. :contentReference[oaicite:3]{index=3}
+    Calculate Price-Related Differential (PRD).
+    
+    Measures vertical equity (regressivity/progressivity).
+    Target range: 0.98 to 1.03.
+    > 1.03 indicates regressivity (low value properties over-assessed).
+    
+    Args:
+        assessed: Array-like of assessed values.
+        sale_price: Array-like of sale prices.
+        na_rm: Boolean, remove NAs if True.
+        
+    Returns:
+        float: The PRD value.
     """
-    est = _to_1d_float_array(estimate)
-    sale = _to_1d_float_array(sale_price)
+    assessed, sale_price = _ensure_arrays(assessed, sale_price)
+    
+    cleaned = _handle_na((assessed, sale_price), na_rm)
+    if cleaned[0] is None: return np.nan
+    assessed, sale_price = cleaned
+    
+    if len(assessed) == 0: return np.nan
 
-    if est.shape[0] != sale.shape[0]:
-        raise ValueError("estimate and sale_price must have the same length.")
-    if dropna:
-        mask = np.isfinite(est) & np.isfinite(sale)
-        est, sale = est[mask], sale[mask]
-    if est.size == 0:
+    # Calculate ratios
+    # Use standard numpy division, handling division by zero if sale_price is 0
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ratio = assessed / sale_price
+        
+    # Remove any infinite ratios generated by 0 sale price if they exist
+    valid_ratios = np.isfinite(ratio)
+    ratio = ratio[valid_ratios]
+    assessed = assessed[valid_ratios]
+    sale_price = sale_price[valid_ratios]
+
+    mean_ratio = np.mean(ratio)
+    
+    # Weighted mean: sum(ratio * weight) / sum(weight)
+    # Here weight is sale_price.
+    # Note: R's weighted.mean(x, w) = sum(x*w)/sum(w)
+    # weighted_mean = sum((av/sp) * sp) / sum(sp) = sum(av) / sum(sp)
+    weighted_mean_ratio = np.sum(assessed) / np.sum(sale_price)
+    
+    if weighted_mean_ratio == 0:
         return np.nan
-    if np.any(sale < 0) or np.any(est < 0):
-        raise ValueError("estimate and sale_price should be nonnegative for MKI.")
+        
+    prd_val = mean_ratio / weighted_mean_ratio
+    return prd_val
 
-    idx = np.argsort(sale, kind="mergesort")
-    sale_ord = sale[idx]
-    est_ord_by_sale = est[idx]
+# ----- PRB -----
 
-    g_sale = _gini_like_from_ordered(sale_ord)
-    g_est_by_sale = _gini_like_from_ordered(est_ord_by_sale)
+def prb(assessed, sale_price, na_rm=False):
+    """
+    Calculate Coefficient of Price-Related Bias (PRB).
+    
+    Measures relationship between ratios and value.
+    Target range: -0.05 to 0.05.
+    Positive = Progressive, Negative = Regressive.
+    
+    Args:
+        assessed: Array-like of assessed values.
+        sale_price: Array-like of sale prices.
+        na_rm: Boolean, remove NAs if True.
+        
+    Returns:
+        float: The PRB coefficient.
+    """
+    assessed, sale_price = _ensure_arrays(assessed, sale_price)
+    
+    cleaned = _handle_na((assessed, sale_price), na_rm)
+    if cleaned[0] is None: return np.nan
+    assessed, sale_price = cleaned
+    
+    if len(assessed) < 2: return np.nan # Need at least 2 points for regression
 
-    if not np.isfinite(g_sale) or g_sale == 0:
+    ratio = assessed / sale_price
+    med_ratio = np.median(ratio)
+    
+    if med_ratio == 0: return np.nan
+
+    # LHS: Percentage difference from median
+    lhs = (ratio - med_ratio) / med_ratio
+    
+    # RHS: Proxy for value (log base 2)
+    # The formula: log2( ( (AV / Median) + SP ) / 2 )
+    inner_term = ((assessed / med_ratio) + sale_price) * 0.5
+    
+    # Filter out non-positive values for log
+    valid_idx = inner_term > 0
+    if not np.any(valid_idx): return np.nan
+    
+    lhs = lhs[valid_idx]
+    rhs_inner = inner_term[valid_idx]
+    
+    rhs = np.log2(rhs_inner)
+    
+    # Linear Regression: lhs ~ rhs
+    # np.polyfit returns [slope, intercept] for deg=1
+    try:
+        slope, intercept = np.polyfit(rhs, lhs, 1)
+        return slope
+    except:
         return np.nan
-    return float(g_est_by_sale / g_sale)
+
+# ----- MKI & KI (Gini-based) -----
+
+def _calc_gini(assessed, sale_price):
+    """Helper to calculate Gini coefficients for KI/MKI."""
+    # Create DataFrame for stable sorting
+    df = pd.DataFrame({'av': assessed, 'sp': sale_price})
+    
+    # Sort by SP ascending, then AV descending (Standard from Quintos paper)
+    df = df.sort_values(by=['sp', 'av'], ascending=[True, False])
+    
+    assessed_sorted = df['av'].values
+    sale_sorted = df['sp'].values
+    n = len(assessed_sorted)
+    
+    # Generate sequence 1 to n
+    seq = np.arange(1, n + 1)
+    
+    # Gini Assessed
+    av_sum_prod = np.sum(assessed_sorted * seq)
+    av_sum = np.sum(assessed_sorted)
+    g_assessed = (2 * av_sum_prod / av_sum) - (n + 1)
+    gini_assessed = g_assessed / n
+    
+    # Gini Sale
+    sp_sum_prod = np.sum(sale_sorted * seq)
+    sp_sum = np.sum(sale_sorted)
+    g_sale = (2 * sp_sum_prod / sp_sum) - (n + 1)
+    gini_sale = g_sale / n
+    
+    return gini_assessed, gini_sale
+
+def ki(assessed, sale_price, na_rm=False):
+    """
+    Calculate Kakwani Index (KI).
+    KI = Gini(Assessed) - Gini(Sale)
+    """
+    assessed, sale_price = _ensure_arrays(assessed, sale_price)
+    
+    cleaned = _handle_na((assessed, sale_price), na_rm)
+    if cleaned[0] is None: return np.nan
+    assessed, sale_price = cleaned
+    
+    if len(assessed) == 0: return np.nan
+
+    g_av, g_sp = _calc_gini(assessed, sale_price)
+    return g_av - g_sp
+
+def mki(assessed, sale_price, na_rm=False):
+    """
+    Calculate Modified Kakwani Index (MKI).
+    MKI = Gini(Assessed) / Gini(Sale)
+    """
+    assessed, sale_price = _ensure_arrays(assessed, sale_price)
+    
+    cleaned = _handle_na((assessed, sale_price), na_rm)
+    if cleaned[0] is None: return np.nan
+    assessed, sale_price = cleaned
+    
+    if len(assessed) == 0: return np.nan
+
+    g_av, g_sp = _calc_gini(assessed, sale_price)
+    
+    if g_sp == 0: return np.nan
+    return g_av / g_sp
+
+# ----- Standards Checks -----
+
+def cod_met(x):
+    """Returns True if COD is between 5 and 15."""
+    x = np.asarray(x)
+    return (x >= 5.0) & (x <= 15.0)
+
+def prd_met(x):
+    """Returns True if PRD is between 0.98 and 1.03."""
+    x = np.asarray(x)
+    return (x >= 0.98) & (x <= 1.03)
+
+def prb_met(x):
+    """Returns True if PRB is between -0.05 and 0.05."""
+    x = np.asarray(x)
+    return (x >= -0.05) & (x <= 0.05)
+
+def mki_met(x):
+    """Returns True if MKI is between 0.95 and 1.05."""
+    x = np.asarray(x)
+    return (x >= 0.95) & (x <= 1.05)
+
+def med_ratio_met(x):
+    """Returns True if Median Ratio is between 0.9 and 1.1."""
+    x = np.asarray(x)
+    return (x >= 0.9) & (x <= 1.1)
+
+# # ----- Example Usage -----
+# if __name__ == "__main__":
+#     # Create dummy data similar to what might be in 'ratios_sample'
+#     np.random.seed(42)
+#     sale_prices = np.random.uniform(100000, 500000, 100)
+#     # Simulate assessed values with some noise
+#     assessed_values = sale_prices * np.random.normal(1.0, 0.1, 100)
+    
+#     ratios = assessed_values / sale_prices
+    
+#     print(f"COD: {cod(ratios):.4f} (Met: {cod_met(cod(ratios))})")
+#     print(f"PRD: {prd(assessed_values, sale_prices):.4f} (Met: {prd_met(prd(assessed_values, sale_prices))})")
+#     print(f"PRB: {prb(assessed_values, sale_prices):.4f} (Met: {prb_met(prb(assessed_values, sale_prices))})")
+#     print(f"MKI: {mki(assessed_values, sale_prices):.4f} (Met: {mki_met(mki(assessed_values, sale_prices))})")
