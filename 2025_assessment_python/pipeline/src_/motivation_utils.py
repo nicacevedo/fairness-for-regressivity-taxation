@@ -345,6 +345,9 @@ def compute_taxation_metrics(y_real, y_pred, scale="log"):
         metrics["MAE"] = mean_absolute_error(y_real, y_pred)
         metrics["MAPE"] = mean_absolute_percentage_error(y_real, y_pred)
 
+        # # 1.5 Loss function
+        # metrics["Loss"] = 
+
         # 2. My metrics of interest
         ratios = y_pred / y_real
         metrics["Corr ratio_y"] = np.corrcoef(ratios, y_real)[0,1]

@@ -46,7 +46,7 @@ from fairness_models.linear_fairness_models import MyGLMRegression, GroupDeviati
 import lightgbm as lgb
 # from fairness_models.boosting_fairness_models import custom_objective, custom_eval
 # from fairness_models.boosting_fairness_models import make_constrained_mse_objective, make_covariance_metric
-from fairness_models.boosting_fairness_models import LGBMCovRatioRegressor, CovPenaltyConfig, LGBCustomObjective
+from fairness_models.boosting_fairness_models import LGBCustomObjective, FairGBMCustomObjective
 
 # UC Irvine data
 from src_.ucirvine_preprocessing import get_uci_column_names, preprocess_adult_data
@@ -245,7 +245,7 @@ df_train = df.iloc[:int(train_prop*n),:]
 df_test = df.iloc[int(train_prop*n):,:]
 
 # Random sample of train
-sample_size = 100000 # 10k samples for Abalon (?)# 1000 samples for Adult (?)
+sample_size = 10000 # 10k samples for Abalon (?)# 1000 samples for Adult (?)
 if sample_size < df_train.shape[0]:
     print("working with a sample (10k)")
     df_train = df_train.sample(min(sample_size, df_train.shape[0]), random_state=seed, replace=False)
@@ -336,7 +336,7 @@ else:
 # Inputs
 random_state = 42
 n_jobs =380#190
-max_iter=1000
+max_iter=200 #1000
 
 fit_intercept = True
 l1,l2 = 1e-3, 1e-2
@@ -348,7 +348,7 @@ epsilons_cov = [2.25e-2, 1e-2, 8.75e-3, 7.5e-3]#, 5e-3] # Cov 2.25e-2,
 # epsilons_var = [1e-1, 7.5e-2, 5e-2, 2.5e-2] # Var: Not doing anything
 rhos_cov = [1e-1, 1, 5, 10]#, 1.5] # Cov
 # rhos_var = [0] #[0, 1e-1, 1, 5, 10, 20]#, 10] # Var: Not doing anything
-keep_percentages = np.linspace(0.3, 1, 8)
+keep_percentages = np.linspace(0.3, 1, 3)
 
 
 models = [
@@ -366,6 +366,46 @@ models = [
 
 baseline_models = [str(model).split("(")[0] for model in models] # Save baseline models names
 
+
+# 5. FairGBM ( needs the actual max constraint allowed )
+lgbm_params = {
+    "boosting_type": "gbdt",
+    "num_leaves": 31,
+    "max_depth": max_depth,
+    "learning_rate": lr,
+    "n_estimators": max_iter,
+    "subsample_for_bin": 200000,
+    "objective": "mse", # To be updated inside
+    "class_weight": None,
+    "min_child_samples": 30,
+    "colsample_bytree": 1.0,
+    "reg_alpha": l1,
+    "reg_lambda": l2,
+    "random_state": random_state,
+    "n_jobs": 1,#n_jobs,
+    "importance_type": "split",
+}
+new_models = []
+taus = [1e-7, 1e-5, 1e-1]
+for tau in taus:
+    step_size = lgbm_params["learning_rate"]
+    new_models.append(
+        FairGBMCustomObjective(
+            tau=tau,
+            step_size_lamb=step_size,
+            # lambda_init=lambda_inits[i],
+            # max_iter=200,
+            lgbm_params=lgbm_params,
+            use_penalty_hessian=True,   # Hessian of the lambda (cov surr is 2nd order)
+            verbose=1,
+        )
+    )
+
+models += new_models
+baseline_models += [str(model) for model in new_models] # Save baseline models names
+
+
+run_in_parallel = True
 
 
 # # Stable Regression
@@ -422,84 +462,196 @@ baseline_models = [str(model).split("(")[0] for model in models] # Save baseline
 
 
 # # 4. Sof-penalized LGBM
-lgbm_params = {
-    "boosting_type": "gbdt",
-    "num_leaves": 31,
-    "max_depth": max_depth,
-    "learning_rate": lr,
-    "n_estimators": max_iter,
-    "subsample_for_bin": 200000,
-    "objective": "mse", # To be updated inside
-    "class_weight": None,
-    "min_child_samples": 30,
-    "colsample_bytree": 1.0,
-    "reg_alpha": l1,
-    "reg_lambda": l2,
-    "random_state": random_state,
-    "n_jobs": 1,#n_jobs,
-    "importance_type": "split",
-}
 # for eps in [1e-3, 1e-1, 1e1, 1e3]:
-rhos = [1e2, 5e2, 1e3, 1e4]#[1e1, 1e2]#, 1e3, 1e4]#, 1e5] #5e3, 1e4, 5e4] # Last ones: 5e2,5e3,
-for rho in rhos:
-    for adversary_type in ["overall", "individual"]:
-        # for r_keep in keep_percentages:
-            # cobj = LGBCustomObjective(rho=rho)
-            #         # Lgbm params
-            # models.append( # custom_obj # 
-            #     lgb.LGBMRegressor(boosting_type='gbdt', num_leaves=31, max_depth=max_depth, learning_rate=lr, n_estimators=max_iter, subsample_for_bin=200000, objective=cobj.fobj,#"mse", 
-            #                     class_weight=None, min_child_samples=30, colsample_bytree=1.0, reg_alpha=l1, reg_lambda=l2, random_state=random_state, n_jobs=n_jobs, importance_type='split'),
-            # )
-            models.append(
-                LGBCustomObjective(rho=rho, keep=1, adversary_type=adversary_type, lgbm_params=lgbm_params)
-            )
+# rhos = [5e2, 1e3, 5e3, 1e4]#[1e1, 1e2]#, 1e3, 1e4]#, 1e5] #5e3, 1e4, 5e4] # Last ones: 5e2,5e3,
+# for rho in rhos:
+#     for adversary_type in ["overall"]:#, "individual"]:
+#             for zero_tol in [0, 1e-6, 1e-4]:
+#             # for r_keep in keep_percentages:
+#                 # cobj = LGBCustomObjective(rho=rho)
+#                 #         # Lgbm params
+#                 # models.append( # custom_obj # 
+#                 #     lgb.LGBMRegressor(boosting_type='gbdt', num_leaves=31, max_depth=max_depth, learning_rate=lr, n_estimators=max_iter, subsample_for_bin=200000, objective=cobj.fobj,#"mse", 
+#                 #                     class_weight=None, min_child_samples=30, colsample_bytree=1.0, reg_alpha=l1, reg_lambda=l2, random_state=random_state, n_jobs=n_jobs, importance_type='split'),
+#                 # )
+#                 models.append(
+#                     LGBCustomObjective(rho=rho, keep=1, adversary_type=adversary_type, zero_grad_tol=zero_tol, lgbm_params=lgbm_params)
+#                 )
 
 
+if run_in_parallel == False:
+
+    
+    # SQUENTIAL SETTING
+    #
+
+    # Correction of baseline models
+    model_names = [str(model) for model in models]
+    for name_1 in baseline_models:
+        for i,name_2 in enumerate(model_names):
+            if name_1 in name_2:
+                model_names[i] = name_1
 
 
+    print("models: ", model_names)
 
-# Correction of baseline models
-model_names = [str(model) for model in models]
-for name_1 in baseline_models:
-    for i,name_2 in enumerate(model_names):
-        if name_1 in name_2:
-            model_names[i] = name_1
+    # Save results on a dict
+    results_train = {name:[] for name in model_names}
+    results_val = {name:[] for name in model_names}
+
+    for i, model in enumerate(models):
+        model_name = model_names[i]
+
+        # Loop the percentages
+        r_list = [None] if model_name in baseline_models else keep_percentages
+        for r_per in r_list:
+
+            print("( r=", r_per,")")
+            if model_name not in baseline_models:
+                model.keep = r_per # update the percentage
+            print("Fitting model: ", model_name)
+            model.fit(X_train, y_train_log)
+
+            # Prediction
+            y_pred_log = model.predict(X_train)
+            metrics_train = compute_taxation_metrics(y_train_log, y_pred_log, scale="log")
+            results_train[model_name].append(metrics_train)
+
+            # Out of sample Prediction
+            y_pred_log = model.predict(X_val)
+            metrics_val = compute_taxation_metrics(y_val_log, y_pred_log, scale="log")
+            results_val[model_name].append(metrics_val)
+
+    print(results_to_dataframe(results_train, r_values=r_list))
+    print(results_to_dataframe(results_val, r_values=r_list))
+
+    plotting_dict_of_models_results(results_train, r_list=r_list, source="train")
+    plotting_dict_of_models_results(results_val, r_list=r_list, source="val")
 
 
-print("models: ", model_names)
+else: 
 
-# Save results on a dict
-results_train = {name:[] for name in model_names}
-results_val = {name:[] for name in model_names}
+    #
+    # PARALELL SETTING
+    # 
 
-for i, model in enumerate(models):
-    model_name = model_names[i]
+    import tempfile
+    import shutil
+    import os
+    from joblib import Parallel, delayed, dump, load
 
-    # Loop the percentages
-    r_list = [None] if model_name in baseline_models else keep_percentages
-    for r_per in r_list:
+    # Correction of baseline models
+    model_names = [str(model) for model in models]
+    for name_1 in baseline_models:
+        for i,name_2 in enumerate(model_names):
+            if name_1 in name_2:
+                model_names[i] = name_1
 
-        print("( r=", r_per,")")
-        if model_name not in baseline_models:
-            model.keep = r_per # update the percentage
-        print("Fitting model: ", model_name)
+    print("models: ", model_names)
+
+    # Save results on a dict
+    results_train = {name:[] for name in model_names}
+    results_val = {name:[] for name in model_names}
+
+    # Define the unit of work for parallelization
+    def train_evaluate_single_task(model, model_name, r_per, is_baseline, X_train, y_train_log, X_val, y_val_log):
+        # When using mmap_mode='r', the data inputs here are not copies. 
+        # They are views into the shared memory on disk.
+        
+        if not is_baseline:
+            model.keep = r_per 
+        
+        # Note: Some models might trigger an internal copy if they require a specific 
+        # memory layout (e.g., C-contiguous vs Fortran-contiguous). 
+        # Standard sklearn models are usually efficient with read-only mmaps.
         model.fit(X_train, y_train_log)
 
-        # Prediction
-        y_pred_log = model.predict(X_train)
-        metrics_train = compute_taxation_metrics(y_train_log, y_pred_log, scale="log")
-        results_train[model_name].append(metrics_train)
+        y_pred_log_train = model.predict(X_train)
+        metrics_train = compute_taxation_metrics(y_train_log, y_pred_log_train, scale="log")
 
-        # Out of sample Prediction
-        y_pred_log = model.predict(X_val)
-        metrics_val = compute_taxation_metrics(y_val_log, y_pred_log, scale="log")
-        results_val[model_name].append(metrics_val)
+        y_pred_log_val = model.predict(X_val)
+        metrics_val = compute_taxation_metrics(y_val_log, y_pred_log_val, scale="log")
+        
+        return model_name, metrics_train, metrics_val
 
-print(results_to_dataframe(results_train, r_values=r_list))
-print(results_to_dataframe(results_val, r_values=r_list))
+    # --- MEMORY OPTIMIZATION START ---
+    # Create a temp directory to store the memory-mapped data
+    temp_folder = tempfile.mkdtemp()
+    print(f"Optimizing memory: Mapping datasets to shared memory at {temp_folder}...")
 
-plotting_dict_of_models_results(results_train, r_list=r_list, source="train")
-plotting_dict_of_models_results(results_val, r_list=r_list, source="val")
+    try:
+        # 1. Dump data to disk. This creates a binary file that can be mapped into memory.
+        #    This ensures that 100 processes don't create 100 copies of X_train.
+        path_X_train = os.path.join(temp_folder, 'X_train.mmap')
+        path_y_train = os.path.join(temp_folder, 'y_train.mmap')
+        path_X_val = os.path.join(temp_folder, 'X_val.mmap')
+        path_y_val = os.path.join(temp_folder, 'y_val.mmap')
+
+        dump(X_train, path_X_train)
+        dump(y_train_log, path_y_train)
+        dump(X_val, path_X_val)
+        dump(y_val_log, path_y_val)
+
+        # 2. Load in read-only mode ('r'). This creates the shared memory object.
+        X_train_shared = load(path_X_train, mmap_mode='r')
+        y_train_shared = load(path_y_train, mmap_mode='r')
+        X_val_shared = load(path_X_val, mmap_mode='r')
+        y_val_shared = load(path_y_val, mmap_mode='r')
+
+        # 3. Prepare tasks using the SHARED variables
+        tasks = []
+        last_r_list = [] 
+
+        for i, model in enumerate(models):
+            model_name = model_names[i]
+            is_baseline = model_name in baseline_models
+            r_list = [None] if is_baseline else keep_percentages
+            last_r_list = r_list 
+            
+            for r_per in r_list:
+                tasks.append((
+                    model, 
+                    model_name, 
+                    r_per, 
+                    is_baseline,
+                    X_train_shared,  # Passing the shared object
+                    y_train_shared, 
+                    X_val_shared, 
+                    y_val_shared
+                ))
+
+        print(f"Running {len(tasks)} training jobs in parallel...")
+        
+        # MEMORY THROTTLING:
+        # If you run out of RAM, decrease N_JOBS. 
+        # Rule of thumb: N_JOBS = Total_RAM / (Peak_RAM_per_Model_Fit)
+        # Using -1 (all CPUs) is risky for large data/models.
+        N_JOBS = 8#-1 
+
+        parallel_results = Parallel(n_jobs=N_JOBS)(
+            delayed(train_evaluate_single_task)(*task) for task in tasks
+        )
+
+        # Aggregate results
+        for model_name, m_train, m_val in parallel_results:
+            results_train[model_name].append(m_train)
+            results_val[model_name].append(m_val)
+
+    finally:
+        # Always clean up the large temporary files
+        try:
+            shutil.rmtree(temp_folder)
+            print("Cleaned up shared memory temporary files.")
+        except Exception as e:
+            print(f"Warning: Could not remove temp folder {temp_folder}: {e}")
+    # --- MEMORY OPTIMIZATION END ---
+
+    # Use last_r_list to maintain compatibility
+    print(results_to_dataframe(results_train, r_values=last_r_list))
+    print(results_to_dataframe(results_val, r_values=last_r_list))
+
+    plotting_dict_of_models_results(results_train, r_list=keep_percentages, source="train")
+    plotting_dict_of_models_results(results_val, r_list=keep_percentages, source="val")
 
 exit()
 
@@ -1065,3 +1217,5 @@ if __name__ == '__main__':
     # plot_tradeoff_analysis(val_results_df, percentages, num_groups=NUM_GROUPS, save_dir="img/motivation/tradeoff_analysis/val")
 
 
+
+# %%
