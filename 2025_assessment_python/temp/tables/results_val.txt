@@ -1,0 +1,19 @@
+\begin{table}[htbp]
+    \centering
+    \resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrrrrrrrrrr}
+\toprule
+Model & r & R2 & R2 (log) & RMSE & MAE & MAPE & Corr ratio_y & Var ratio & Median ratio & Mean ratio & W. Mean ratio & COD & PRD & PRB & MKI \\
+\midrule
+LinearRegression & NaN & 0.297 & 0.490 & 449940.871 & 170075.612 & 0.343 & -0.314 & 0.202 & 0.856 & 0.936 & 0.769 & 35.804 & 1.218 & -0.119 & 0.727 \\
+ElasticNet & NaN & 0.317 & 0.503 & 443587.739 & 172123.801 & 0.348 & -0.309 & 0.215 & 0.878 & 0.956 & 0.786 & 36.437 & 1.217 & -0.114 & 0.732 \\
+LGBMRegressor & NaN & 0.343 & 0.451 & 434825.284 & 176304.614 & 0.378 & -0.344 & 0.281 & 0.819 & 0.963 & 0.746 & 41.865 & 1.290 & -0.234 & 0.629 \\
+LGBPrimalDual(0, overall) & 0.010 & 0.349 & 0.444 & 433065.573 & 175958.889 & 0.393 & -0.342 & 0.315 & 0.829 & 0.977 & 0.749 & 42.732 & 1.305 & -0.253 & 0.617 \\
+LGBPrimalDual(0, overall) & 0.505 & 0.349 & 0.444 & 433065.573 & 175958.889 & 0.393 & -0.342 & 0.315 & 0.829 & 0.977 & 0.749 & 42.732 & 1.305 & -0.253 & 0.617 \\
+LGBPrimalDual(0, overall) & 1.000 & 0.349 & 0.444 & 433065.573 & 175958.889 & 0.393 & -0.342 & 0.315 & 0.829 & 0.977 & 0.749 & 42.732 & 1.305 & -0.253 & 0.617 \\
+\bottomrule
+\end{tabular}
+     }
+    \caption{Results for val}
+    \label{tab:results_val}
+\end{table}

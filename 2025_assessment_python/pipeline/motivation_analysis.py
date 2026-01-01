@@ -46,7 +46,7 @@ from fairness_models.linear_fairness_models import MyGLMRegression, GroupDeviati
 import lightgbm as lgb
 # from fairness_models.boosting_fairness_models import custom_objective, custom_eval
 # from fairness_models.boosting_fairness_models import make_constrained_mse_objective, make_covariance_metric
-from fairness_models.boosting_fairness_models import LGBCustomObjective, FairGBMCustomObjective
+from fairness_models.boosting_fairness_models import LGBCustomObjective,  LGBPrimalDual, FairGBMCustomObjective
 
 # UC Irvine data
 from src_.ucirvine_preprocessing import get_uci_column_names, preprocess_adult_data
@@ -245,7 +245,7 @@ df_train = df.iloc[:int(train_prop*n),:]
 df_test = df.iloc[int(train_prop*n):,:]
 
 # Random sample of train
-sample_size = 10000 # 10k samples for Abalon (?)# 1000 samples for Adult (?)
+sample_size = 1000#00 # 10k samples for Abalon (?)# 1000 samples for Adult (?)
 if sample_size < df_train.shape[0]:
     print("working with a sample (10k)")
     df_train = df_train.sample(min(sample_size, df_train.shape[0]), random_state=seed, replace=False)
@@ -335,8 +335,8 @@ else:
 
 # Inputs
 random_state = 42
-n_jobs =380#190
-max_iter=200 #1000
+n_jobs =190
+max_iter=500 #0
 
 fit_intercept = True
 l1,l2 = 1e-3, 1e-2
@@ -348,7 +348,7 @@ epsilons_cov = [2.25e-2, 1e-2, 8.75e-3, 7.5e-3]#, 5e-3] # Cov 2.25e-2,
 # epsilons_var = [1e-1, 7.5e-2, 5e-2, 2.5e-2] # Var: Not doing anything
 rhos_cov = [1e-1, 1, 5, 10]#, 1.5] # Cov
 # rhos_var = [0] #[0, 1e-1, 1, 5, 10, 20]#, 10] # Var: Not doing anything
-keep_percentages = np.linspace(0.3, 1, 3)
+keep_percentages = np.linspace(0.01, 1, 3)
 
 
 models = [
@@ -365,48 +365,6 @@ models = [
 
 
 baseline_models = [str(model).split("(")[0] for model in models] # Save baseline models names
-
-
-# 5. FairGBM ( needs the actual max constraint allowed )
-lgbm_params = {
-    "boosting_type": "gbdt",
-    "num_leaves": 31,
-    "max_depth": max_depth,
-    "learning_rate": lr,
-    "n_estimators": max_iter,
-    "subsample_for_bin": 200000,
-    "objective": "mse", # To be updated inside
-    "class_weight": None,
-    "min_child_samples": 30,
-    "colsample_bytree": 1.0,
-    "reg_alpha": l1,
-    "reg_lambda": l2,
-    "random_state": random_state,
-    "n_jobs": 1,#n_jobs,
-    "importance_type": "split",
-}
-new_models = []
-taus = [1e-7, 1e-5, 1e-1]
-for tau in taus:
-    step_size = lgbm_params["learning_rate"]
-    new_models.append(
-        FairGBMCustomObjective(
-            tau=tau,
-            step_size_lamb=step_size,
-            # lambda_init=lambda_inits[i],
-            # max_iter=200,
-            lgbm_params=lgbm_params,
-            use_penalty_hessian=True,   # Hessian of the lambda (cov surr is 2nd order)
-            verbose=1,
-        )
-    )
-
-models += new_models
-baseline_models += [str(model) for model in new_models] # Save baseline models names
-
-
-run_in_parallel = True
-
 
 # # Stable Regression
 # models.append(
@@ -462,21 +420,54 @@ run_in_parallel = True
 
 
 # # 4. Sof-penalized LGBM
-# for eps in [1e-3, 1e-1, 1e1, 1e3]:
-# rhos = [5e2, 1e3, 5e3, 1e4]#[1e1, 1e2]#, 1e3, 1e4]#, 1e5] #5e3, 1e4, 5e4] # Last ones: 5e2,5e3,
+lgbm_params = {
+    "boosting_type": "gbdt",
+    "num_leaves": 31,
+    "max_depth": max_depth,
+    "learning_rate": lr,
+    "n_estimators": max_iter,
+    "subsample_for_bin": 200000,
+    "objective": "mse", # To be updated inside
+    "class_weight": None,
+    "min_child_samples": 30,
+    "colsample_bytree": 1.0,
+    "reg_alpha": l1,
+    "reg_lambda": l2,
+    "random_state": random_state,
+    "n_jobs": 1,#n_jobs,
+    "importance_type": "split",
+}
+
+rhos = [0]#[5e2, 1e3, 5e3, 1e4] #[5e2, 1e3, 5e3, 1e4] # Last ones: 5e2,5e3,
+adversary_types = ["overall"]
+zero_tols = [0] # 1e-8, 1e-6
 # for rho in rhos:
-#     for adversary_type in ["overall"]:#, "individual"]:
-#             for zero_tol in [0, 1e-6, 1e-4]:
-#             # for r_keep in keep_percentages:
-#                 # cobj = LGBCustomObjective(rho=rho)
-#                 #         # Lgbm params
-#                 # models.append( # custom_obj # 
-#                 #     lgb.LGBMRegressor(boosting_type='gbdt', num_leaves=31, max_depth=max_depth, learning_rate=lr, n_estimators=max_iter, subsample_for_bin=200000, objective=cobj.fobj,#"mse", 
-#                 #                     class_weight=None, min_child_samples=30, colsample_bytree=1.0, reg_alpha=l1, reg_lambda=l2, random_state=random_state, n_jobs=n_jobs, importance_type='split'),
-#                 # )
+#     for adversary_type in adversary_types:
+#             for zero_tol in zero_tols:
 #                 models.append(
 #                     LGBCustomObjective(rho=rho, keep=1, adversary_type=adversary_type, zero_grad_tol=zero_tol, lgbm_params=lgbm_params)
 #                 )
+
+# for rho in rhos:
+#     for adversary_type in ["individual"]:
+#             for zero_tol in zero_tols:
+#                 models.append(
+#                     LGBCustomObjective(rho=rho, keep=1, adversary_type=adversary_type, zero_grad_tol=zero_tol, lgbm_params=lgbm_params)
+#                 )
+
+
+
+# 5. LGBPrimalDual: Smoother version of the adversarial K samples
+for rho in rhos:
+    for adversary_type in adversary_types: # Not sure why no difference between the indiv overall in small sizes (check this)
+            for zero_tol in zero_tols:
+                # for eta_adv in [1e-3, 1e-1]:
+                models.append(
+                    LGBPrimalDual(rho=rho, keep=1, adversary_type=adversary_type, eta_adv=lr, zero_grad_tol=zero_tol, lgbm_params=lgbm_params)
+                )
+
+
+run_in_parallel = True
 
 
 if run_in_parallel == False:
@@ -522,8 +513,10 @@ if run_in_parallel == False:
             metrics_val = compute_taxation_metrics(y_val_log, y_pred_log, scale="log")
             results_val[model_name].append(metrics_val)
 
-    print(results_to_dataframe(results_train, r_values=r_list))
-    print(results_to_dataframe(results_val, r_values=r_list))
+    print(results_to_dataframe(results_train, r_values=r_list, source="train"))
+    print(results_to_dataframe(results_val, r_values=r_list, source="val"))
+
+    print("Saving results...")
 
     plotting_dict_of_models_results(results_train, r_list=r_list, source="train")
     plotting_dict_of_models_results(results_val, r_list=r_list, source="val")
@@ -626,7 +619,7 @@ else:
         # If you run out of RAM, decrease N_JOBS. 
         # Rule of thumb: N_JOBS = Total_RAM / (Peak_RAM_per_Model_Fit)
         # Using -1 (all CPUs) is risky for large data/models.
-        N_JOBS = 8#-1 
+        N_JOBS = 16#-1 
 
         parallel_results = Parallel(n_jobs=N_JOBS)(
             delayed(train_evaluate_single_task)(*task) for task in tasks
@@ -647,13 +640,25 @@ else:
     # --- MEMORY OPTIMIZATION END ---
 
     # Use last_r_list to maintain compatibility
-    print(results_to_dataframe(results_train, r_values=last_r_list))
-    print(results_to_dataframe(results_val, r_values=last_r_list))
+    print(results_to_dataframe(results_train, r_values=keep_percentages, source="train"))
+    print(results_to_dataframe(results_val, r_values=keep_percentages, source="val"))
+
+    print("Saving results...")
 
     plotting_dict_of_models_results(results_train, r_list=keep_percentages, source="train")
     plotting_dict_of_models_results(results_val, r_list=keep_percentages, source="val")
 
 exit()
+
+
+
+
+
+
+
+
+
+
 
 
 

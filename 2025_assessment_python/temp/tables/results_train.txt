@@ -1,0 +1,19 @@
+\begin{table}[htbp]
+    \centering
+    \resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrrrrrrrrrr}
+\toprule
+Model & r & R2 & R2 (log) & RMSE & MAE & MAPE & Corr ratio_y & Var ratio & Median ratio & Mean ratio & W. Mean ratio & COD & PRD & PRB & MKI \\
+\midrule
+LinearRegression & NaN & 0.856 & 0.912 & 135186.162 & 51805.993 & 0.180 & -0.160 & 0.068 & 0.995 & 1.029 & 0.983 & 18.101 & 1.047 & -0.045 & 0.961 \\
+ElasticNet & NaN & 0.841 & 0.905 & 142004.241 & 51776.908 & 0.184 & -0.187 & 0.074 & 0.995 & 1.031 & 0.975 & 18.438 & 1.057 & -0.055 & 0.946 \\
+LGBMRegressor & NaN & 0.968 & 1.000 & 63221.594 & 3404.150 & 0.004 & -0.448 & 0.000 & 1.000 & 1.000 & 0.994 & 0.376 & 1.006 & -0.002 & 0.991 \\
+LGBPrimalDual(0, overall) & 0.010 & 0.969 & 1.000 & 62900.865 & 3338.958 & 0.004 & -0.429 & 0.000 & 1.000 & 1.000 & 0.994 & 0.379 & 1.006 & -0.002 & 0.991 \\
+LGBPrimalDual(0, overall) & 0.505 & 0.969 & 1.000 & 62900.865 & 3338.958 & 0.004 & -0.429 & 0.000 & 1.000 & 1.000 & 0.994 & 0.379 & 1.006 & -0.002 & 0.991 \\
+LGBPrimalDual(0, overall) & 1.000 & 0.969 & 1.000 & 62900.865 & 3338.958 & 0.004 & -0.429 & 0.000 & 1.000 & 1.000 & 0.994 & 0.379 & 1.006 & -0.002 & 0.991 \\
+\bottomrule
+\end{tabular}
+     }
+    \caption{Results for train}
+    \label{tab:results_train}
+\end{table}

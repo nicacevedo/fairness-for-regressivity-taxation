@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 
-def results_to_dataframe(results, r_values, round_decimals=3):
+def results_to_dataframe(results, r_values, round_decimals=3, source="train"):
     rows = []
     for model_name, metrics_list in results.items():
         # Loop through the list of results for this specific model
@@ -24,8 +24,43 @@ def results_to_dataframe(results, r_values, round_decimals=3):
     df = pd.DataFrame(rows)
     # Optional: Reorder columns to put Model and r_value first
     cols = ['Model', 'r'] + [c for c in df.columns if c not in ['Model', 'r']]
-    df = df[cols]
-    return df.round(round_decimals)
+    df = df[cols] #.style.format(precision=round_decimals) #.round(round_decimals)
+
+    # --- New Saving Logic ---
+    file_name = f"./temp/tables/results_{source}.txt"
+    try:
+        # Generate the tabular content only (no caption/label yet).
+        # We removed booktabs=True as requested.
+        latex_tabular = df.to_latex(
+            index=False,
+            escape=False,     # Set to True if you want special characters escaped
+            column_format=None, # Allow pandas to default the column formats
+            # booktabs=False    # Removed booktabs for standard formatting
+            float_format="%.3f",
+        )
+        
+        # Manually wrap the tabular content to add font sizing (\footnotesize).
+        full_latex_content = (
+            "\\begin{table}[htbp]\n"
+            "    \\centering\n"
+            "    \\resizebox{\\textwidth}{!}{%\n"
+            f"{latex_tabular}"
+            "     }\n"
+            f"    \\caption{{Results for {source}}}\n"
+            f"    \\label{{tab:results_{source}}}\n"
+            "\\end{table}"
+        )
+        
+        # Save to .txt file
+        with open(file_name, "w", encoding="utf-8") as f:
+            f.write(full_latex_content)
+            
+        print(f"Successfully saved LaTeX table to: {file_name}")
+        
+    except Exception as e:
+        print(f"Error saving LaTeX file: {e}")
+
+    return df
 
 # def plotting_dict_of_models_results(dict_of_results, label_names=None):
 #     n_experiments = len(dict_of_results)
@@ -83,7 +118,7 @@ def plotting_dict_of_models_results(results, r_list, source="train"):
 
     # 4. Generate one plot per metric
     for i, metric in enumerate(metrics_names):
-        plt.figure(figsize=(10, 6))
+        plt.figure(figsize=(12, 6))
         
         # Pick style for this specific metric
         marker = markers[i % len(markers)]
@@ -112,7 +147,7 @@ def plotting_dict_of_models_results(results, r_list, source="train"):
         plt.title(f'Comparison of {metric} vs. Ratio to Keep (r) [{source}]', fontsize=14)
         plt.xlabel(r'$r=K/n$ (Ratio of samples to keep)', fontsize=12)
         plt.ylabel(metric, fontsize=12)
-        plt.legend(fontsize=8, borderpad=0.5, labelspacing=0.3, handletextpad=0.5)
+        plt.legend(loc="center left", bbox_to_anchor=(1, 0.5), fontsize=6, borderpad=0.5, labelspacing=0.3, handletextpad=0.5)
         plt.grid(True, alpha=0.5)
         plt.tight_layout()
         plt.savefig(f"./temp/plots/metrics/{metric}_{source}.png", dpi=600)

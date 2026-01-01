@@ -59,8 +59,14 @@ class LGBCustomObjective:
         mse_value = (y_true - y_pred)**2
         cov_surr_value = (y_pred/y_true-1)**2 * (y_true - np.mean(y_true))**2
         loss_value = mse_value + self.rho * cov_surr_value  
-        print("Loss value: ", np.mean(loss_value), "| MSE value: ", np.mean(mse_value), "| CovSurr value: ", np.mean(cov_surr_value), "| Corr(r,y): ", np.corrcoef(y_pred/y_true, y_true)[0,1])
-
+        model_name = self.__str__()
+        print(
+            f"[{model_name.split('(')[0]}] "
+            f"Loss value: {np.mean(loss_value):.6f} "
+            f"| MSE value: {np.mean(mse_value):.6f} "
+            f"| CovSurr value: {np.mean(cov_surr_value):.6f} "
+            f"| Corr(r,y): {np.corrcoef(y_pred / y_true, y_true)[0, 1]:.6f} "
+        )
         # Get worst r=K/n fraction 
         n = y_pred.size
         K = int(n * self.keep)
@@ -80,7 +86,7 @@ class LGBCustomObjective:
 
         # MINE
         z = y_true[worst_K_pen]
-        z_c = (y_true[worst_K_pen] - np.mean(y_true[worst_K_pen]))
+        z_c = (y_true[worst_K_pen] - np.mean(y_true)) # np.mean(y_true[worst_K_pen]))
         grad_pen = 2 * (y_pred[worst_K_pen] - z) * (z_c/z) ** 2 / K
         hess_pen = 2 * (z_c/z) ** 2 / K
 
@@ -103,15 +109,161 @@ class LGBCustomObjective:
         return np.mean(mse_value + self.rho * cov_surr_value)
 
     def __str__(self):
-        return f"LGBCustomObjective({self.rho}, adversary_type={self.adversary_type}, tol={self.zero_grad_tol})"    
+        return f"LGBCustomObjective({self.rho}, {self.adversary_type})" #adversary_type={self.adversary_type})" #, tol={self.zero_grad_tol})"    
     
 
 
 
+# ==========================================================
+# Primal–Dual (smooth) version (kept very close to yours)
+# ==========================================================
+
+class LGBPrimalDual:
+    def __init__(self, rho=1e-3, keep=0.7, adversary_type="overall", eta_adv=0.1, zero_grad_tol=1e-6, lgbm_params=None):
+        self.rho = rho
+        self.keep = keep
+        self.adversary_type = adversary_type
+        self.eta_adv = eta_adv
+        self.zero_grad_tol = zero_grad_tol
+        self.model = lgb.LGBMRegressor(**lgbm_params)
+
+    def fit(self, X, y):
+        # cache for the callback
+        self.X_ = X
+        self.y_ = y
+        self.y_mean_ = np.mean(y)
+        self.n_ = y.size
+        # Update: cache current ensemble predictions so we can update them incrementally
+        self.y_hat_ = np.ones(self.n_) * self.y_mean_   # matches boost_from_average=True default
+
+        # CVaR cap: w_i <= 1/(alpha*n), with alpha = keep
+        self.cap_ = 1.0 / (max(1, int(self.keep * self.n_)) )  # = 1/K
+
+        # initialize adversary weights (uniform)
+        w0 = np.ones(self.n_) / self.n_
+        if self.adversary_type == "overall":
+            self.w_ = w0
+        elif self.adversary_type == "individual":
+            self.p_ = w0
+            self.q_ = w0
+        else:
+            raise ValueError(f"No adversary_type called: {self.adversary_type}")
+
+        # Update lgbm params
+        self.model.set_params(objective=self.fobj)
+        self.model.fit(X, y, callbacks=[self._adv_callback])
+
+    def predict(self, X):
+        return self.model.predict(X)
+
+    def _project_capped_simplex(self, w):
+        """Project to {w>=0, sum w=1, w_i<=cap_} (simple cap + redistribute)."""
+        w = np.maximum(w, 0)
+        if w.sum() <= 0:
+            w = np.ones_like(w) / w.size
+        else:
+            w = w / w.sum()
+
+        cap = self.cap_
+        # cap-and-redistribute until feasible (usually 1-2 passes)
+        for _ in range(10):
+            over = w > cap
+            if not np.any(over):
+                break
+            excess = w[over].sum() - cap * over.sum()
+            w[over] = cap
+            under = ~over
+            if not np.any(under):
+                # everything capped -> already sums to 1 by definition of cap=1/K
+                break
+            w[under] += excess * (w[under] / w[under].sum())
+        return w
+
+    def _mirror_step(self, w, v):
+        # exponentiated-gradient / mirror-ascent step
+        z = self.eta_adv * (v - np.max(v))
+        w_new = w * np.exp(z)
+        return self._project_capped_simplex(w_new)
+
+    def _adv_callback(self, env):
+        # update adversary once per boosting iteration using current predictions
+        it = env.iteration + 1
+        # y_hat = env.model.predict(self.X_, num_iteration=it)
+        # Update: predict ONLY the new tree’s contribution and add it to cached predictions
+        delta = env.model.predict(self.X_, start_iteration=it-1, num_iteration=1)
+        self.y_hat_ = self.y_hat_ + delta
+        y_hat = self.y_hat_
+
+        mse_value = (self.y_ - y_hat) ** 2
+        cov_surr_value = (y_hat / self.y_ - 1) ** 2 * (self.y_ - self.y_mean_) ** 2
+
+        if self.adversary_type == "overall":
+            v = mse_value + self.rho * cov_surr_value
+            self.w_ = self._mirror_step(self.w_, v)
+        else:
+            self.p_ = self._mirror_step(self.p_, mse_value)
+            self.q_ = self._mirror_step(self.q_, cov_surr_value)
+
+    def fobj(self, y_true, y_pred):
+        # Loss function value (same prints as yours)
+        mse_value = (y_true - y_pred) ** 2
+        cov_surr_value = (y_pred / y_true - 1) ** 2 * (y_true - np.mean(y_true)) ** 2
+        loss_value = mse_value + self.rho * cov_surr_value
+        model_name = self.__str__()
+        print(
+            f"[{model_name.split('(')[0]}] "
+            f"Loss value: {np.mean(loss_value):.6f} "
+            f"| MSE value: {np.mean(mse_value):.6f} "
+            f"| CovSurr value: {np.mean(cov_surr_value):.6f} "
+            f"| Corr(r,y): {np.corrcoef(y_pred / y_true, y_true)[0, 1]:.6f} "
+        )
+
+        # base gradients/hessians for 0.5*(pred-y)^2  (now for ALL samples)
+        grad_base = 2 * (y_pred - y_true)
+        hess_base = 2 * np.ones_like(y_pred)
+
+        # penalty gradients/hessians (same structure as yours, for ALL samples)
+        z = y_true
+        z_c = (y_true - np.mean(y_true))
+        grad_pen = 2 * (y_pred - z) * (z_c / z) ** 2
+        hess_pen = 2 * (z_c / z) ** 2
+
+        n = y_pred.size
+
+        # primal step uses current adversary weights (scaled by n so magnitudes stay reasonable)
+        if self.adversary_type == "overall":
+            w_eff = n * self.w_
+            grad = w_eff * (grad_base + self.rho * grad_pen)
+            hess = w_eff * (hess_base + self.rho * hess_pen)
+        else:
+            p_eff = n * self.p_
+            q_eff = n * self.q_
+            grad = p_eff * grad_base + self.rho * q_eff * grad_pen
+            hess = p_eff * hess_base + self.rho * q_eff * hess_pen
+
+        # zero grad/hess tol (same as yours)
+        grad[grad == 0] += self.zero_grad_tol
+        hess[hess == 0] += self.zero_grad_tol
+
+        return grad, hess
+
+    def __str__(self):
+        return f"LGBPrimalDual({self.rho}, {self.adversary_type})" #adversary_type={self.adversary_type})" #, eta_adv={self.eta_adv}, tol={self.zero_grad_tol})"
 
 
 
 
+
+
+
+
+
+
+
+
+
+
+# Single lambda. Weird behavior
 class FairGBMCustomObjective:
     """Simple primal–dual wrapper around LightGBM.
 
@@ -947,168 +1099,154 @@ class FairGBMCustomObjective:
 
 
 
+# import numpy as np
+# import lightgbm as lgb
+# from sklearn.datasets import make_regression
+# from sklearn.model_selection import train_test_split
+# from sklearn.metrics import mean_squared_error
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-import numpy as np
-import lightgbm as lgb
-from sklearn.datasets import make_regression
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error
-
-def get_covariance_stats(y_true, y_pred):
-    """
-    Helper function to calculate the covariance between the ratio (y_pred/y_true)
-    and y_true.
+# def get_covariance_stats(y_true, y_pred):
+#     """
+#     Helper function to calculate the covariance between the ratio (y_pred/y_true)
+#     and y_true.
     
-    Returns:
-        covariance (float): The calculated covariance.
-        w (np.array): The vector of weights needed for the gradient calculation.
-    """
-    # Prevent division by zero
-    safe_labels = np.where(y_true == 0, 1e-6, y_true)
+#     Returns:
+#         covariance (float): The calculated covariance.
+#         w (np.array): The vector of weights needed for the gradient calculation.
+#     """
+#     # Prevent division by zero
+#     safe_labels = np.where(y_true == 0, 1e-6, y_true)
     
-    # Calculate statistics
-    real_mean = np.mean(y_true)  
-    ratio = y_pred / safe_labels
+#     # Calculate statistics
+#     real_mean = np.mean(y_true)  
+#     ratio = y_pred / safe_labels
     
-    # C = Cov(ratio, labels)
-    # Formula simplification: C = mean( ratio * (labels - mean(labels)) )
-    # This simplification holds because sum(labels - mean) is 0.
-    covariance = np.mean(ratio * (y_true - real_mean))
+#     # C = Cov(ratio, labels)
+#     # Formula simplification: C = mean( ratio * (labels - mean(labels)) )
+#     # This simplification holds because sum(labels - mean) is 0.
+#     covariance = np.mean(ratio * (y_true - real_mean))
     
-    # Calculate the gradient weights w_i for the chain rule
-    # d(Cov)/d(pred_i) = (1/N) * (1/label_i) * (label_i - mean_label)
-    N = len(y_true)
-    w = (y_true - real_mean) / (N * safe_labels)
+#     # Calculate the gradient weights w_i for the chain rule
+#     # d(Cov)/d(pred_i) = (1/N) * (1/label_i) * (label_i - mean_label)
+#     N = len(y_true)
+#     w = (y_true - real_mean) / (N * safe_labels)
     
-    return covariance, w
+#     return covariance, w
 
-def make_constrained_mse_objective(penalty_weight, epsilon):
-    """
-    Factory function that returns a custom LightGBM objective function
-    with fixed parameters for penalty_weight and epsilon.
+# def make_constrained_mse_objective(penalty_weight, epsilon):
+#     """
+#     Factory function that returns a custom LightGBM objective function
+#     with fixed parameters for penalty_weight and epsilon.
     
-    Args:
-        penalty_weight (float): The strength of the regularization (lambda).
-        epsilon (float): The allowed margin for the covariance (soft constraint).
+#     Args:
+#         penalty_weight (float): The strength of the regularization (lambda).
+#         epsilon (float): The allowed margin for the covariance (soft constraint).
         
-    Returns:
-        function: A function with signature (y_true, y_pred) -> (grad, hess)
-    """
+#     Returns:
+#         function: A function with signature (y_true, y_pred) -> (grad, hess)
+#     """
     
-    def objective(y_true, y_pred):
-        # 1. Calculate Covariance and its gradient weights
-        cov_val, w = get_covariance_stats(y_true, y_pred)
+#     def objective(y_true, y_pred):
+#         # 1. Calculate Covariance and its gradient weights
+#         cov_val, w = get_covariance_stats(y_true, y_pred)
         
-        # 2. Calculate Penalty Gradient and Hessian
-        # We use a squared hinge loss for the penalty: 
-        # Loss_penalty = lambda * max(0, |Cov| - epsilon)^2
+#         # 2. Calculate Penalty Gradient and Hessian
+#         # We use a squared hinge loss for the penalty: 
+#         # Loss_penalty = lambda * max(0, |Cov| - epsilon)^2
         
-        diff = abs(cov_val) - epsilon
+#         diff = abs(cov_val) - epsilon
         
-        if diff > 0:
-            # Gradient of Penalty w.r.t Covariance
-            # dP/dC = 2 * lambda * (|C| - eps) * sign(C)
-            grad_penalty_wrt_cov = 2 * penalty_weight * diff * np.sign(cov_val)
+#         if diff > 0:
+#             # Gradient of Penalty w.r.t Covariance
+#             # dP/dC = 2 * lambda * (|C| - eps) * sign(C)
+#             grad_penalty_wrt_cov = 2 * penalty_weight * diff * np.sign(cov_val)
             
-            # Chain rule: dP/dPred_i = dP/dC * dC/dPred_i
-            grad_penalty = grad_penalty_wrt_cov * w
+#             # Chain rule: dP/dPred_i = dP/dC * dC/dPred_i
+#             grad_penalty = grad_penalty_wrt_cov * w
             
-            # Hessian approximation
-            # We ignore off-diagonal terms (w_i * w_j) for computational efficiency
-            # and numerical stability in diagonal-hessian boosting.
-            # d^2P/dPred_i^2 approx 2 * lambda * w_i^2
-            hess_penalty = 2 * penalty_weight * (w ** 2)
-        else:
-            grad_penalty = np.zeros_like(y_pred)
-            hess_penalty = np.zeros_like(y_pred)
+#             # Hessian approximation
+#             # We ignore off-diagonal terms (w_i * w_j) for computational efficiency
+#             # and numerical stability in diagonal-hessian boosting.
+#             # d^2P/dPred_i^2 approx 2 * lambda * w_i^2
+#             hess_penalty = 2 * penalty_weight * (w ** 2)
+#         else:
+#             grad_penalty = np.zeros_like(y_pred)
+#             hess_penalty = np.zeros_like(y_pred)
 
-        # 3. Base Loss (MSE) derivatives
-        # L_base = 0.5 * (pred - true)^2
-        # grad = pred - true
-        # hess = 1
-        grad_mse = y_pred - y_true
-        hess_mse = np.ones_like(y_pred)
+#         # 3. Base Loss (MSE) derivatives
+#         # L_base = 0.5 * (pred - true)^2
+#         # grad = pred - true
+#         # hess = 1
+#         grad_mse = y_pred - y_true
+#         hess_mse = np.ones_like(y_pred)
         
-        # 4. Combine
-        grad = grad_mse + grad_penalty
-        hess = hess_mse + hess_penalty
+#         # 4. Combine
+#         grad = grad_mse + grad_penalty
+#         hess = hess_mse + hess_penalty
         
-        return grad, hess
+#         return grad, hess
     
-    return objective
+#     return objective
 
-def make_covariance_metric(epsilon):
-    """
-    Factory function for a custom validation metric to monitor the covariance.
-    """
-    def eval_metric(y_true, y_pred):
-        cov_val, _ = get_covariance_stats(y_true, y_pred)
+# def make_covariance_metric(epsilon):
+#     """
+#     Factory function for a custom validation metric to monitor the covariance.
+#     """
+#     def eval_metric(y_true, y_pred):
+#         cov_val, _ = get_covariance_stats(y_true, y_pred)
         
-        # We want to check if |Cov| <= Epsilon
-        is_violated = abs(cov_val) > epsilon
+#         # We want to check if |Cov| <= Epsilon
+#         is_violated = abs(cov_val) > epsilon
         
-        # Return name, value, is_higher_better
-        return 'cov_violation', abs(cov_val), False
+#         # Return name, value, is_higher_better
+#         return 'cov_violation', abs(cov_val), False
     
-    return eval_metric
+#     return eval_metric
 
-# ==========================================
-# Example Usage with Scikit-Learn API
-# ==========================================
+# # ==========================================
+# # Example Usage with Scikit-Learn API
+# # ==========================================
 
-if __name__ == "__main__":
-    # 1. Generate synthetic regression data
-    # We add some specific noise to create a correlation between ratio and target
-    X, y = make_regression(n_samples=5000, n_features=20, noise=0.1, random_state=42)
-    y = np.abs(y) + 1  # Ensure y is positive for ratio calculation stability
+# if __name__ == "__main__":
+#     # 1. Generate synthetic regression data
+#     # We add some specific noise to create a correlation between ratio and target
+#     X, y = make_regression(n_samples=5000, n_features=20, noise=0.1, random_state=42)
+#     y = np.abs(y) + 1  # Ensure y is positive for ratio calculation stability
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+#     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    # 2. Define parameters
-    LAMBDA = 10000.0  # High penalty to force the constraint
-    EPSILON = 0.001   # Strict covariance limit
+#     # 2. Define parameters
+#     LAMBDA = 10000.0  # High penalty to force the constraint
+#     EPSILON = 0.001   # Strict covariance limit
 
-    # 3. Create the custom objective and metric functions
-    custom_obj = make_constrained_mse_objective(penalty_weight=LAMBDA, epsilon=EPSILON)
-    custom_eval = make_covariance_metric(epsilon=EPSILON)
+#     # 3. Create the custom objective and metric functions
+#     custom_obj = make_constrained_mse_objective(penalty_weight=LAMBDA, epsilon=EPSILON)
+#     custom_eval = make_covariance_metric(epsilon=EPSILON)
 
-    # 4. Initialize LGBMRegressor
-    # Note: We pass the custom objective to the constructor or set_params
-    model = lgb.LGBMRegressor(
-        n_estimators=100,
-        learning_rate=0.05,
-        objective=custom_obj,  # <--- Injecting the custom objective
-        verbose=-1
-    )
+#     # 4. Initialize LGBMRegressor
+#     # Note: We pass the custom objective to the constructor or set_params
+#     model = lgb.LGBMRegressor(
+#         n_estimators=100,
+#         learning_rate=0.05,
+#         objective=custom_obj,  # <--- Injecting the custom objective
+#         verbose=-1
+#     )
 
-    # 5. Train
-    print(f"Training with Lambda={LAMBDA}, Epsilon={EPSILON}...")
-    model.fit(
-        X_train, 
-        y_train,
-        eval_set=[(X_test, y_test)],
-        eval_metric=custom_eval # <--- Injecting the custom metric
-    )
+#     # 5. Train
+#     print(f"Training with Lambda={LAMBDA}, Epsilon={EPSILON}...")
+#     model.fit(
+#         X_train, 
+#         y_train,
+#         eval_set=[(X_test, y_test)],
+#         eval_metric=custom_eval # <--- Injecting the custom metric
+#     )
 
-    # 6. Verify Results
-    preds = model.predict(X_test)
-    final_cov, _ = get_covariance_stats(y_test, preds)
-    mse = mean_squared_error(y_test, preds)
+#     # 6. Verify Results
+#     preds = model.predict(X_test)
+#     final_cov, _ = get_covariance_stats(y_test, preds)
+#     mse = mean_squared_error(y_test, preds)
 
-    print("\n--- Final Results ---")
-    print(f"MSE: {mse:.4f}")
-    print(f"Covariance(Ratio, Real): {final_cov:.6f}")
-    print(f"Constraint satisfied (|Cov| <= {EPSILON})? {abs(final_cov) <= EPSILON}")
+#     print("\n--- Final Results ---")
+#     print(f"MSE: {mse:.4f}")
+#     print(f"Covariance(Ratio, Real): {final_cov:.6f}")
+#     print(f"Constraint satisfied (|Cov| <= {EPSILON})? {abs(final_cov) <= EPSILON}")
