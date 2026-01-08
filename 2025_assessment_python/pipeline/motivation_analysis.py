@@ -46,7 +46,9 @@ from fairness_models.linear_fairness_models import MyGLMRegression, GroupDeviati
 import lightgbm as lgb
 # from fairness_models.boosting_fairness_models import custom_objective, custom_eval
 # from fairness_models.boosting_fairness_models import make_constrained_mse_objective, make_covariance_metric
-from fairness_models.boosting_fairness_models import LGBCustomObjective,  LGBPrimalDual, FairGBMCustomObjective
+from fairness_models.boosting_fairness_models import LGBCustomObjective,  LGBPrimalDual#, FairGBMCustomObjective
+from fairness_models.boosting_fairness_models import LGBSmoothPenalty, LGBPrimalDualImproved, LGBCovPenalty, LGBMomentPenalty # post primal-dual methods
+
 
 # UC Irvine data
 from src_.ucirvine_preprocessing import get_uci_column_names, preprocess_adult_data
@@ -245,7 +247,7 @@ df_train = df.iloc[:int(train_prop*n),:]
 df_test = df.iloc[int(train_prop*n):,:]
 
 # Random sample of train
-sample_size = 1000#00 # 10k samples for Abalon (?)# 1000 samples for Adult (?)
+sample_size = 100000 # 10k samples for Abalon (?)# 1000 samples for Adult (?)
 if sample_size < df_train.shape[0]:
     print("working with a sample (10k)")
     df_train = df_train.sample(min(sample_size, df_train.shape[0]), random_state=seed, replace=False)
@@ -336,7 +338,7 @@ else:
 # Inputs
 random_state = 42
 n_jobs =190
-max_iter=500 #0
+max_iter=200#500 #0
 
 fit_intercept = True
 l1,l2 = 1e-3, 1e-2
@@ -348,7 +350,7 @@ epsilons_cov = [2.25e-2, 1e-2, 8.75e-3, 7.5e-3]#, 5e-3] # Cov 2.25e-2,
 # epsilons_var = [1e-1, 7.5e-2, 5e-2, 2.5e-2] # Var: Not doing anything
 rhos_cov = [1e-1, 1, 5, 10]#, 1.5] # Cov
 # rhos_var = [0] #[0, 1e-1, 1, 5, 10, 20]#, 10] # Var: Not doing anything
-keep_percentages = np.linspace(0.01, 1, 3)
+keep_percentages = np.linspace(0.01, 1, 2)
 
 
 models = [
@@ -418,7 +420,8 @@ baseline_models = [str(model).split("(")[0] for model in models] # Save baseline
 #         )
 #     )
 
-
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
 # # 4. Sof-penalized LGBM
 lgbm_params = {
     "boosting_type": "gbdt",
@@ -436,11 +439,17 @@ lgbm_params = {
     "random_state": random_state,
     "n_jobs": 1,#n_jobs,
     "importance_type": "split",
+    # "verbose":-2,
+    # "verbosity":-2,
+    # "verbose_eval":False,
+    # "verbosity_eval":False,
 }
 
-rhos = [0]#[5e2, 1e3, 5e3, 1e4] #[5e2, 1e3, 5e3, 1e4] # Last ones: 5e2,5e3,
-adversary_types = ["overall"]
+rhos = [1e2, 5e2, 1e3, 5e3, 1e4]#[5e2, 1e3, 5e3, 1e4] #[5e2, 1e3, 5e3, 1e4] # Last ones: 5e2,5e3,
+adversary_types = ["overall"]#$, "individual"]
 zero_tols = [0] # 1e-8, 1e-6
+eta_advs = [lr*1e-2, lr*1e-1, lr]
+# eta_adv
 # for rho in rhos:
 #     for adversary_type in adversary_types:
 #             for zero_tol in zero_tols:
@@ -457,16 +466,67 @@ zero_tols = [0] # 1e-8, 1e-6
 
 
 
-# 5. LGBPrimalDual: Smoother version of the adversarial K samples
+# # 5. LGBPrimalDual: Smoother version of the adversarial K samples
+# for rho in rhos:
+#     for adversary_type in adversary_types: # Not sure why no difference between the indiv overall in small sizes (check this)
+#             for zero_tol in zero_tols:
+#                 for eta_adv in eta_advs:
+#                     models.append(
+#                         LGBPrimalDual(rho=rho, keep=1, adversary_type=adversary_type, eta_adv=eta_adv, zero_grad_tol=zero_tol, lgbm_params=lgbm_params)
+#                     )
+
+# 6. Non-adversarial LGB (same obj as previous but no weights)
 for rho in rhos:
-    for adversary_type in adversary_types: # Not sure why no difference between the indiv overall in small sizes (check this)
-            for zero_tol in zero_tols:
-                # for eta_adv in [1e-3, 1e-1]:
-                models.append(
-                    LGBPrimalDual(rho=rho, keep=1, adversary_type=adversary_type, eta_adv=lr, zero_grad_tol=zero_tol, lgbm_params=lgbm_params)
+    for zero_tol in zero_tols:
+        models.append(
+            LGBSmoothPenalty(rho=rho, zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params)
+        )
+
+
+# # 7. Improved version of primal-dual (?)
+# for rho in rhos:
+#     for adversary_type in adversary_types: # Not sure why no difference between the indiv overall in small sizes (check this)
+#             for zero_tol in zero_tols:
+#                 for eta_adv in eta_advs:
+#                     models.append(
+#                         LGBPrimalDualImproved(rho=rho, keep=1, adversary_type=adversary_type, dual_update="mirror", eta_adv=eta_adv, zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params)
+#                     )
+#         # dual_update="mirror",  # "mirror" or "topk"
+
+
+# 8. Direct cov penalty (?)
+for rho in rhos:
+    for zero_tol in zero_tols:
+        models.append(
+            LGBCovPenalty(rho=rho, zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params)
+        )
+    # not adversarial?
+
+rhos = [5e0, 1e1, 15]
+# 9. Direct K-moments penalty
+for l_norm in ["l1", "l2", "linf"]:
+    for rho in rhos:
+        for zero_tol in zero_tols:
+            models.append(
+                LGBMomentPenalty(
+                    rho=rho, 
+                    K=4, # number of moments
+                    basis="poly_log",               # "poly_log" or "poly_y"
+                    include_intercept_moment=False,  # include φ0(y)=1 as the first moment
+                    lambda_norm=l_norm,              # "l2", "linf", "l1" (norm on λ)
+                    scale_by_n=True, # maintain gradients O(1)?
+
+                    eps_y=1e-12,                   # for y_true division
+                    eps_norm=1e-12,                # for smoothing norms
+                    softmax_beta=20.0,             # for smooth ||m||_inf approx when lambda_norm="l1"
+                    zero_grad_tol=zero_tol,
+        
+                    verbose=True,
+                    lgbm_params=lgbm_params
                 )
+            )
 
-
+        
 run_in_parallel = True
 
 
@@ -553,6 +613,9 @@ else:
         
         if not is_baseline:
             model.keep = r_per 
+            print("="*100)
+            print("\n\n UPDATED THE MODEL: ", model, " \n\n")
+            print("="*100)
         
         # Note: Some models might trigger an internal copy if they require a specific 
         # memory layout (e.g., C-contiguous vs Fortran-contiguous). 

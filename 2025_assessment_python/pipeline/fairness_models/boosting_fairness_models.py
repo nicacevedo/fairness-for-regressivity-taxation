@@ -115,7 +115,7 @@ class LGBCustomObjective:
 
 
 # ==========================================================
-# Primal–Dual (smooth) version (kept very close to yours)
+# Primal–Dual (smooth) version (kept very close to the other ones)
 # ==========================================================
 
 class LGBPrimalDual:
@@ -248,7 +248,7 @@ class LGBPrimalDual:
         return grad, hess
 
     def __str__(self):
-        return f"LGBPrimalDual({self.rho}, {self.adversary_type})" #adversary_type={self.adversary_type})" #, eta_adv={self.eta_adv}, tol={self.zero_grad_tol})"
+        return f"LGBPrimalDual({self.rho}, {self.adversary_type}, {self.eta_adv})" #adversary_type={self.adversary_type})" #, eta_adv={self.eta_adv}, tol={self.zero_grad_tol})"
 
 
 
@@ -258,204 +258,907 @@ class LGBPrimalDual:
 
 
 
+### 
 
+# Models to compare primal-dual method
 
+### 
 
+# ==========================================================
+# 1) Plain (no dual/adversary): minimize MSE + rho * surrogate
+# ==========================================================
 
+class LGBSmoothPenalty:
+    """LightGBM custom objective: per-sample MSE + rho * separable surrogate.
 
-# Single lambda. Weird behavior
-class FairGBMCustomObjective:
-    """Simple primal–dual wrapper around LightGBM.
+    This is the same objective structure as your current code, but WITHOUT
+    any CVaR/top-k adversary / dual weights.
 
-    Trains with a custom objective:
-        L(ŷ) = MSE(y, ŷ) + λ * cov_surr(y, ŷ)
-
-    and updates a single nonnegative multiplier once per boosting iteration:
-        λ <- max(0, λ + η * (E[cov_surr] - τ))
-
-    IMPORTANT implementation detail:
-    - Do NOT scale grad/hess by 1/n. LightGBM has constraints like
-      min_sum_hessian_in_leaf; scaling by 1/n can make Hessians tiny and
-      prevent any split (you'll see "best gain: -inf").
-
-    This is *not* the full FairGBM paper algorithm; it is the minimal primal–dual
-    scheme for your single surrogate constraint.
+    Surrogate (separable): ((y_pred / y_true) - 1)^2 * (y_true - y_mean)^2
     """
 
-    def __init__(
-        self,
-        tau: float = 10.0,
-        keep: float = 1.0,
-        step_size_lamb: float = 1e-3,
-        max_iter: int = 100,
-        lambda_init: float = 0.0,
-        lambda_max: float | None = None,
-        y_eps: float = 1e-8,
-        hess_floor: float = 1e-12,
-        use_penalty_hessian: bool = True,
-        lgbm_params: dict | None = None,
-        verbose: int = 1,
-        update_on: str = "train",  # "train" or "valid"
-        pred_delta_tol: float = 0.0,  # set e.g. 1e-10 to monitor stagnation
-    ):
-        self.tau = float(tau) * keep
-        self.keep = keep
-        self.step_size_lamb = float(step_size_lamb)
-        self.max_iter = int(max_iter)
-        self.lambda_init = float(lambda_init)
-        self.lambda_max = lambda_max if lambda_max is None else float(lambda_max)
-        self.y_eps = float(y_eps)
-        self.hess_floor = float(hess_floor)
-        self.use_penalty_hessian = bool(use_penalty_hessian)
-        self.verbose = int(verbose)
-        self.update_on = str(update_on)
-        self.pred_delta_tol = float(pred_delta_tol)
+    def __init__(self, rho=1e-3, zero_grad_tol=1e-6, eps_y=1e-12, lgbm_params=None):
+        self.rho = rho
+        self.zero_grad_tol = zero_grad_tol
+        self.eps_y = eps_y
+        self.model = lgb.LGBMRegressor(**(lgbm_params or {}))
 
-        self.lgbm_params = dict(lgbm_params) if lgbm_params is not None else {}
-        self.lgbm_params.setdefault("n_estimators", self.max_iter)
-        self.model = lgb.LGBMRegressor(**self.lgbm_params)
-
-        self.lamb_pen: float = max(0.0, self.lambda_init)
-        self.history_: list[dict] = []
-
-        self._X_train = None
-        self._y_train = None
-        self._y_mean = None
-
-    # ----------------------- public API -----------------------
-    def fit(self, X, y, eval_set=None):
-        y = np.asarray(y, dtype=float).reshape(-1)
-        self._X_train = X
-        self._y_train = y
-        self._y_mean = float(np.mean(y))
-
-        # reset state
-        self.lamb_pen = max(0.0, self.lambda_init)
-        if self.lambda_max is not None:
-            self.lamb_pen = min(self.lamb_pen, self.lambda_max)
-        self.history_.clear()
-
-        # Use the custom objective
+    def fit(self, X, y):
+        self.y_mean_ = float(np.mean(y))
         self.model.set_params(objective=self.fobj)
-
-        callbacks = [self._make_lambda_callback(eval_set=eval_set)]
-
-        if eval_set is None:
-            self.model.fit(X, y, callbacks=callbacks)
-        else:
-            self.model.fit(X, y, eval_set=eval_set, callbacks=callbacks)
-
+        self.model.fit(X, y)
         return self
 
     def predict(self, X):
         return self.model.predict(X)
 
-    def __str__(self):
-        return f"FairGBMCustomObjective(tau={self.tau:.6})" # lambda={self.lamb_pen:.6g}, 
-
-    # ----------------------- core math -----------------------
-    def _safe_y(self, y: np.ndarray) -> np.ndarray:
-        y = np.asarray(y, dtype=float)
-        # preserve sign (not that it matters once squared), avoid exact 0
-        return np.where(np.abs(y) < self.y_eps, np.sign(y) * self.y_eps + (y == 0) * self.y_eps, y)
-
-    def _cov_surr(self, y_true: np.ndarray, y_pred: np.ndarray, y_mean: float | None = None) -> np.ndarray:
-        # cov_surr_i = ((ŷ/y)-1)^2 * (y - mean(y))^2 = ((ŷ-y)^2 / y^2) * (y-μ)^2
-        y_true = np.asarray(y_true, dtype=float).reshape(-1)
-        y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
-        y_safe = self._safe_y(y_true)
-        mu = self._y_mean if y_mean is None else float(y_mean)
-        zc = y_true - mu
-        return ((y_pred - y_true) ** 2) * (zc**2) / (y_safe**2)
-
-    # LightGBM custom objective signature: fobj(y_true, y_pred) -> (grad, hess)
     def fobj(self, y_true, y_pred):
-        y_true = np.asarray(y_true, dtype=float).reshape(-1)
-        y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
+        y_true = np.asarray(y_true)
+        y_pred = np.asarray(y_pred)
 
-        # Base loss: MSE
-        # IMPORTANT: do NOT divide by n; LightGBM expects per-sample grad/hess scales
-        grad_loss = 2.0 * (y_pred - y_true)
-        hess_loss = 2.0 * np.ones_like(y_pred)
+        z = y_true
+        zc = (y_true - self.y_mean_)
+        denom = np.maximum(np.abs(z), self.eps_y)
 
-        # Penalty: λ * cov_surr
-        y_safe = self._safe_y(y_true)
-        zc = y_true - (self._y_mean if self._y_mean is not None else float(np.mean(y_true)))
-        w = (zc / y_safe) ** 2
+        # losses
+        mse_value = (y_true - y_pred) ** 2
+        cov_surr_value = ((y_pred / denom) - 1.0) ** 2 * (zc ** 2)
+        loss_value = mse_value + self.rho * cov_surr_value
 
-        grad_pen = 2.0 * self.lamb_pen * (y_pred - y_true) * w
+        # print (kept close to yours)
+        model_name = self.__str__()
+        r = y_pred / denom
+        try:
+            corr = float(np.corrcoef(r, y_true)[0, 1])
+        except Exception:
+            corr = float('nan')
+        print(
+            f"[{model_name.split('(')[0]}] "
+            f"Loss value: {np.mean(loss_value):.6f} "
+            f"| MSE value: {np.mean(mse_value):.6f} "
+            f"| CovSurr value: {np.mean(cov_surr_value):.6f} "
+            f"| Corr(r,y): {corr:.6f} "
+        )
 
-        if self.use_penalty_hessian:
-            hess_pen = 2.0 * self.lamb_pen * w
-        else:
-            hess_pen = 0.0
+        # base gradients/hessians for (pred-y)^2
+        grad_base = 2.0 * (y_pred - y_true)
+        hess_base = 2.0 * np.ones_like(y_pred)
 
-        grad = grad_loss + grad_pen
-        hess = hess_loss + hess_pen
-        hess = np.maximum(hess, self.hess_floor)
+        # penalty gradients/hessians (separable)
+        # cov_surr_i = ((pred/z)-1)^2 * zc^2 = (pred-z)^2 * (zc/z)^2
+        scale = (zc / denom) ** 2
+        grad_pen = 2.0 * (y_pred - z) * scale
+        hess_pen = 2.0 * scale
+
+        grad = grad_base + self.rho * grad_pen
+        hess = hess_base + self.rho * hess_pen
+
+        # zero tol
+        grad[np.abs(grad) < self.zero_grad_tol] = self.zero_grad_tol
+        hess[hess < self.zero_grad_tol] = self.zero_grad_tol
+
         return grad, hess
 
-    # ----------------------- λ update callback -----------------------
-    def _make_lambda_callback(self, eval_set=None):
-        # Choose the dataset used for λ updates
-        if self.update_on == "valid" and eval_set is not None and len(eval_set) > 0:
-            X_lam, y_lam = eval_set[0]
-            y_lam = np.asarray(y_lam, dtype=float).reshape(-1)
-            y_mean = float(np.mean(y_lam))
+    def __str__(self):
+        return f"LGBSmoothPenalty({self.rho})"
+
+
+# ==========================================================
+# 2) Improved primal-dual: mirror ascent adversary + KL projection onto capped simplex
+# ==========================================================
+
+class LGBPrimalDualImproved:
+    """Primal-dual robust boosting with a *principled* dual step on the capped simplex.
+
+    Objective (overall):  min_F max_{w in Delta_K} sum_i w_i [mse_i + rho*surr_i]
+    Objective (individual): min_F max_p sum_i p_i mse_i + rho max_q sum_i q_i surr_i
+
+    Dual update options:
+      - dual_update="topk": exact best-response (uniform on worst-K)
+      - dual_update="mirror": exponentiated-gradient + KL projection onto capped simplex
+
+    Notes vs your current code:
+      - Uses a KL/Bregman projection consistent with exponentiated-gradient:
+            w = min(cap, u / Z) with Z chosen so sum w = 1
+        (found by bisection on Z).
+      - Adds eps_y to avoid division blow-ups.
+      - Keeps everything else close to your original structure.
+    """
+
+    def __init__(
+        self,
+        rho=1e-3,
+        keep=0.7,
+        adversary_type="overall",
+        dual_update="mirror",  # "mirror" or "topk"
+        eta_adv=0.1,
+        zero_grad_tol=1e-6,
+        eps_y=1e-12,
+        lgbm_params=None,
+    ):
+        self.rho = rho
+        self.keep = keep
+        self.adversary_type = adversary_type
+        self.dual_update = dual_update
+        self.eta_adv = eta_adv
+        self.zero_grad_tol = zero_grad_tol
+        self.eps_y = eps_y
+        self.model = lgb.LGBMRegressor(**(lgbm_params or {}))
+
+    def fit(self, X, y):
+        # cache for the callback
+        self.X_ = X
+        self.y_ = np.asarray(y)
+        self.y_mean_ = float(np.mean(self.y_))
+        self.n_ = int(self.y_.size)
+
+        # cached ensemble predictions (match boost_from_average=True for regression)
+        self.y_hat_ = np.ones(self.n_) * self.y_mean_
+
+        # CVaR/top-k cap: w_i <= 1/K, with K = keep*n
+        self.K_ = max(1, int(self.keep * self.n_))
+        self.cap_ = 1.0 / float(self.K_)
+
+        w0 = np.ones(self.n_) / float(self.n_)
+        if self.adversary_type == "overall":
+            self.w_ = w0
+        elif self.adversary_type == "individual":
+            self.p_ = w0.copy()
+            self.q_ = w0.copy()
         else:
-            X_lam, y_lam = self._X_train, self._y_train
-            y_mean = float(self._y_mean)
+            raise ValueError(f"No adversary_type called: {self.adversary_type}")
 
-        prev_pred = {"y_hat": None}
+        self.model.set_params(objective=self.fobj)
+        self.model.fit(X, y, callbacks=[self._adv_callback])
+        return self
 
-        def _cb(env):
-            it = int(env.iteration) + 1
-            y_hat = env.model.predict(X_lam, num_iteration=it)
-            y_hat = np.asarray(y_hat, dtype=float).reshape(-1)
+    def predict(self, X):
+        return self.model.predict(X)
 
-            cov_surr = self._cov_surr(y_lam, y_hat, y_mean=y_mean)
-            mean_cov = float(np.mean(cov_surr))
-            viol = float(mean_cov - self.tau)
+    # ---------- Dual helpers ----------
 
-            # Projected gradient ascent on λ
-            self.lamb_pen = max(0.0, self.lamb_pen + self.step_size_lamb * viol)
-            if self.lambda_max is not None:
-                self.lamb_pen = min(self.lamb_pen, self.lambda_max)
+    def _project_capped_simplex_kl(self, u):
+        """KL/Bregman projection of u onto {w>=0, sum w=1, w_i<=cap_}.
 
-            rmse = float(np.sqrt(np.mean((y_hat - y_lam) ** 2)))
+        The solution has the form w_i = min(cap, u_i / Z) with Z>0 chosen so sum w = 1.
+        """
+        u = np.asarray(u, dtype=float)
+        u = np.maximum(u, 0.0) + 1e-300
+        cap = float(self.cap_)
 
-            pred_delta = None
-            if prev_pred["y_hat"] is not None:
-                pred_delta = float(np.mean(np.abs(y_hat - prev_pred["y_hat"])))
-            prev_pred["y_hat"] = y_hat
+        # If already feasible after normalization and capping, quick exit
+        # (not strictly necessary, but cheap)
+        Z_hi = float(np.sum(u))
+        if not np.isfinite(Z_hi) or Z_hi <= 0:
+            return np.ones_like(u) / u.size
 
-            rec = {
-                "iter": it,
-                "lambda": float(self.lamb_pen),
-                "violation": viol,
-                "mean_cov_surr": mean_cov,
-                "rmse": rmse,
-                "mean_abs_pred_delta": pred_delta,
-                "corr(r, y)":np.corrcoef(y_hat/y_lam, y_lam)[0,1],
-            }
-            self.history_.append(rec)
+        def s(Z):
+            return float(np.sum(np.minimum(cap, u / Z)))
 
-            if self.verbose:
-                msg = (
-                    f"Iter {it:4d} | λ={rec['lambda']:.4g} | "
-                    f"E[cov_surr]={rec['mean_cov_surr']:.4g} | "
-                    f"viol={rec['violation']:.4g} | rmse={rec['rmse']:.4g} |"
-                    f"corr(r, y)={rec['corr(r, y)']:.4g}"
-                )
-                if pred_delta is not None and self.pred_delta_tol > 0:
-                    msg += f" | Δpred={pred_delta:.3g}"
-                print(msg)
+        # We want s(Z)=1. s is decreasing in Z.
+        Z_lo = 1e-300
+        # Ensure s(Z_lo) >= 1 (should hold if cap*n >= 1)
+        if s(Z_lo) < 1.0 - 1e-12:
+            # fallback to top-k feasible point
+            w = np.zeros_like(u)
+            idx = np.argpartition(u, -self.K_)[-self.K_:]
+            w[idx] = 1.0 / float(self.K_)
+            return w
 
-                # If you set pred_delta_tol>0, this helps you *see* stagnation.
-                # We don't hard-stop training here to keep the wrapper simple.
+        # Z_hi gives s(Z_hi) <= 1
+        if s(Z_hi) > 1.0 + 1e-12:
+            # expand hi until it is above the root
+            for _ in range(60):
+                Z_hi *= 2.0
+                if s(Z_hi) <= 1.0 + 1e-12:
+                    break
 
-        _cb.order = 50
-        return _cb
+        # bisection
+        for _ in range(80):
+            Z_mid = 0.5 * (Z_lo + Z_hi)
+            sm = s(Z_mid)
+            if abs(sm - 1.0) <= 1e-12:
+                Z_lo = Z_hi = Z_mid
+                break
+            if sm > 1.0:
+                Z_lo = Z_mid
+            else:
+                Z_hi = Z_mid
+
+        Z_star = 0.5 * (Z_lo + Z_hi)
+        w = np.minimum(cap, u / Z_star)
+        w_sum = float(np.sum(w))
+        if not np.isfinite(w_sum) or w_sum <= 0:
+            w = np.ones_like(u) / u.size
+        else:
+            w /= w_sum
+        return w
+
+    def _dual_step(self, w, v):
+        """Update weights for max_{w in capped simplex} <w, v>."""
+        if self.dual_update == "topk":
+            # exact best response: uniform mass on worst-K v_i
+            idx = np.argpartition(v, -self.K_)[-self.K_:]
+            w_new = np.zeros_like(w)
+            w_new[idx] = 1.0 / float(self.K_)
+            return w_new
+
+        # mirror ascent (exponentiated-gradient) + KL projection
+        z = self.eta_adv * (v - np.max(v))
+        z = np.clip(z, -50.0, 50.0)
+        u = w * np.exp(z)
+        return self._project_capped_simplex_kl(u)
+
+    # ---------- Callback (dual update) ----------
+
+    def _adv_callback(self, env):
+        it = int(env.iteration) + 1
+
+        # Incremental prediction update: add only the latest tree contribution
+        delta = env.model.predict(self.X_, start_iteration=it - 1, num_iteration=1)
+        self.y_hat_ = self.y_hat_ + delta
+        y_hat = self.y_hat_
+
+        denom = np.maximum(np.abs(self.y_), self.eps_y)
+        mse_value = (self.y_ - y_hat) ** 2
+        cov_surr_value = ((y_hat / denom) - 1.0) ** 2 * (self.y_ - self.y_mean_) ** 2
+
+        if self.adversary_type == "overall":
+            v = mse_value + self.rho * cov_surr_value
+            self.w_ = self._dual_step(self.w_, v)
+        else:
+            self.p_ = self._dual_step(self.p_, mse_value)
+            self.q_ = self._dual_step(self.q_, cov_surr_value)
+
+    # ---------- Objective ----------
+
+    def fobj(self, y_true, y_pred):
+        y_true = np.asarray(y_true)
+        y_pred = np.asarray(y_pred)
+
+        # stable pieces
+        z = y_true
+        zc = (y_true - self.y_mean_)
+        denom = np.maximum(np.abs(z), self.eps_y)
+
+        # per-sample values (for prints)
+        mse_value = (y_true - y_pred) ** 2
+        cov_surr_value = ((y_pred / denom) - 1.0) ** 2 * (zc ** 2)
+        loss_value = mse_value + self.rho * cov_surr_value
+
+        model_name = self.__str__()
+        r = y_pred / denom
+        try:
+            corr = float(np.corrcoef(r, y_true)[0, 1])
+        except Exception:
+            corr = float('nan')
+        print(
+            f"[{model_name.split('(')[0]}] "
+            f"Loss value: {np.mean(loss_value):.6f} "
+            f"| MSE value: {np.mean(mse_value):.6f} "
+            f"| CovSurr value: {np.mean(cov_surr_value):.6f} "
+            f"| Corr(r,y): {corr:.6f} "
+        )
+
+        # base gradients/hessians
+        grad_base = 2.0 * (y_pred - y_true)
+        hess_base = 2.0 * np.ones_like(y_pred)
+
+        # surrogate grads/hess (separable)
+        scale = (zc / denom) ** 2
+        grad_pen = 2.0 * (y_pred - z) * scale
+        hess_pen = 2.0 * scale
+
+        n = y_pred.size
+        if self.adversary_type == "overall":
+            w_eff = float(n) * self.w_
+            grad = w_eff * (grad_base + self.rho * grad_pen)
+            hess = w_eff * (hess_base + self.rho * hess_pen)
+        else:
+            p_eff = float(n) * self.p_
+            q_eff = float(n) * self.q_
+            grad = p_eff * grad_base + self.rho * q_eff * grad_pen
+            hess = p_eff * hess_base + self.rho * q_eff * hess_pen
+
+        # tolerances
+        grad[np.abs(grad) < self.zero_grad_tol] = self.zero_grad_tol
+        hess[hess < self.zero_grad_tol] = self.zero_grad_tol
+
+        return grad, hess
+
+    def __str__(self):
+        return f"LGBPrimalDualImproved({self.rho}, {self.adversary_type}, {self.dual_update}, {self.eta_adv})"
+
+
+# ==========================================================
+# 3) Direct covariance penalty (non-separable but usable in LightGBM via global stats)
+# ==========================================================
+
+class LGBCovPenalty:
+    """LightGBM objective: MSE + rho * (Cov(r, y))^2 with r = y_pred / y_true.
+
+    This is a *direct* covariance penalty to compare against the separable proxy.
+
+    Important:
+      - Cov(r,y) uses global statistics, so the Hessian is dense in principle.
+      - LightGBM expects a per-sample Hessian vector; we use a diagonal approximation.
+
+    We scale the penalty as: 0.5 * rho * n * cov^2
+    so that gradients have O(1) magnitude (otherwise they can be ~1/n).
+
+    cov = (1/n) * sum_i r_i * (y_i - y_mean)
+    dc/dy_pred_i = (1/n) * (y_i - y_mean) / y_i
+
+    grad_pen_i = rho * n * cov * dc/dy_pred_i
+    hess_pen_i (diag approx) = rho * n * (dc/dy_pred_i)^2
+    """
+
+    def __init__(self, rho=1e-3, zero_grad_tol=1e-6, eps_y=1e-12, lgbm_params=None):
+        self.rho = rho
+        self.zero_grad_tol = zero_grad_tol
+        self.eps_y = eps_y
+        self.model = lgb.LGBMRegressor(**(lgbm_params or {}))
+
+    def fit(self, X, y):
+        self.y_mean_ = float(np.mean(y))
+        self.model.set_params(objective=self.fobj)
+        self.model.fit(X, y)
+        return self
+
+    def predict(self, X):
+        return self.model.predict(X)
+
+    def fobj(self, y_true, y_pred):
+        y_true = np.asarray(y_true)
+        y_pred = np.asarray(y_pred)
+        n = y_pred.size
+
+        denom = np.maximum(np.abs(y_true), self.eps_y)
+        r = y_pred / denom
+        yc = (y_true - self.y_mean_)
+
+        # covariance (note: E[yc]=0)
+        cov = float(np.mean(r * yc))
+
+        # objective pieces (for prints)
+        mse_value = (y_true - y_pred) ** 2
+        pen_value = 0.5 * self.rho * n * (cov ** 2)
+
+        try:
+            corr = float(np.corrcoef(r, y_true)[0, 1])
+        except Exception:
+            corr = float('nan')
+
+        model_name = self.__str__()
+        print(
+            f"[{model_name.split('(')[0]}] "
+            f"MSE: {np.mean(mse_value):.6f} | Cov: {cov:.6e} | Pen: {pen_value:.6f} | Corr(r,y): {corr:.6f}"
+        )
+
+        # base MSE grads/hess
+        grad_base = 2.0 * (y_pred - y_true)
+        hess_base = 2.0 * np.ones_like(y_pred)
+
+        # cov penalty grads/hess (diag approx)
+        a = (yc / denom) / float(n)  # dc/dy_pred_i
+        # penalty = 0.5*rho*n*cov^2
+        grad_pen = self.rho * float(n) * cov * a
+        hess_pen = self.rho * float(n) * (a ** 2)
+
+        grad = grad_base + grad_pen
+        hess = hess_base + hess_pen
+
+        grad[np.abs(grad) < self.zero_grad_tol] = self.zero_grad_tol
+        hess[hess < self.zero_grad_tol] = self.zero_grad_tol
+
+        return grad, hess
+
+    def __str__(self):
+        return f"LGBCovPenalty({self.rho})"
+
+
+# ==========================================================
+# 4) Direct K-moments penalty (non-separable but usable in LightGBM via global stats ???)
+# ==========================================================
+
+
+class LGBMomentPenalty:
+    r"""LightGBM custom objective: MSE + (moment-adversary penalty).
+
+    Motivation (moment adversary, primal form)
+    ----------------------------------------
+    Let r_i = y_pred_i / y_true_i be the assessment ratio (or any multiplicative error proxy),
+    and define u_i = r_i - 1 (ratio error). Regressivity shows up as *dependence* between u and y.
+
+    Pick K basis functions φ_k(y) (e.g., low-order polynomials in standardized log(y)), and define
+    the K "moment violations":
+        m_k(F) = (1/n) * Σ_i u_i(F) * φ_k(y_i)
+
+    If u is independent of y, then E[u φ(y)] = 0 for a rich class of φ; we approximate that
+    infinite set with K moments.
+
+    Consider the min-max objective:
+        min_F  (1/n) Σ_i (y_i - y_pred_i)^2  +  max_{||λ||_* ≤ ρ}  λ^T m(F)
+
+    Using the dual-norm identity:
+        max_{||λ||_* ≤ ρ} λ^T m = ρ * ||m||,
+    where ||·|| is the norm dual to ||·||_*.
+
+    Therefore we implement the *primal* objective:
+        MSE + ρ * ||m(F)||
+
+    Norm choices (λ-norm -> primal penalty)
+    --------------------------------------
+    - lambda_norm="l2"   : constraint ||λ||_2  ≤ ρ  -> penalty ρ ||m||_2
+    - lambda_norm="linf" : constraint ||λ||_∞  ≤ ρ  -> penalty ρ ||m||_1
+    - lambda_norm="l1"   : constraint ||λ||_1  ≤ ρ  -> penalty ρ ||m||_∞
+
+    Smoothness and LightGBM Hessian
+    -------------------------------
+    m(F) couples all samples => the true Hessian is dense. LightGBM expects a per-sample
+    Hessian vector, so we use a diagonal approximation derived from the penalty's curvature
+    in moment-space and the chain rule.
+
+    Scaling
+    -------
+    Because m_k is an average (1/n), gradients can be small. We optionally multiply the penalty
+    by `n` (scale_by_n=True) to keep gradients O(1). This is equivalent to reparameterizing ρ.
+
+    Notes / Practical guidance
+    --------------------------
+    - Keep K small (e.g., 1..10). Larger K can chase noise.
+    - Prefer basis on standardized log(y) to reduce scale issues.
+    - For lambda_norm="l1" (∞-norm penalty), we use a smooth "softmax" approximation.
+    """
+
+    def __init__(
+        self,
+        rho=1e-3,
+        K=3,
+        basis="poly_log",               # "poly_log" or "poly_y"
+        include_intercept_moment=True,  # include φ0(y)=1 as the first moment
+        lambda_norm="l2",              # "l2", "linf", "l1" (norm on λ)
+        scale_by_n=True,
+
+        # smoothing / numerical stability
+        eps_y=1e-12,                   # for y_true division
+        eps_norm=1e-12,                # for smoothing norms
+        softmax_beta=20.0,             # for smooth ||m||_inf approx when lambda_norm="l1"
+
+        # lightgbm interface safety
+        zero_grad_tol=1e-6,
+        lgbm_params=None,
+        verbose=True,
+    ):
+        self.rho = float(rho)
+        self.K = int(K)
+        self.basis = str(basis)
+        self.include_intercept_moment = bool(include_intercept_moment)
+        self.lambda_norm = str(lambda_norm).lower()
+        self.scale_by_n = bool(scale_by_n)
+
+        self.eps_y = float(eps_y)
+        self.eps_norm = float(eps_norm)
+        self.softmax_beta = float(softmax_beta)
+
+        self.zero_grad_tol = float(zero_grad_tol)
+        self.verbose = bool(verbose)
+
+        self.model = lgb.LGBMRegressor(**(lgbm_params or {}))
+
+        # cached at fit
+        self.Phi_ = None        # (n, K_eff) basis matrix
+        self.y_true_ = None
+        self.y_mean_ = None
+        self.logy_mean_ = None
+        self.logy_std_ = None
+
+    # -----------------------
+    # Basis construction
+    # -----------------------
+    def _make_basis(self, y_true):
+        y_true = np.asarray(y_true, dtype=float)
+        n = y_true.size
+
+        # Effective number of moments (columns)
+        K_eff = self.K + (1 if self.include_intercept_moment else 0)
+
+        Phi = np.empty((n, K_eff), dtype=float)
+        col = 0
+
+        if self.include_intercept_moment:
+            Phi[:, 0] = 1.0
+            col = 1
+
+        if self.basis == "poly_log":
+            # Use standardized log(y) for stability / interpretability
+            y_safe = np.maximum(np.abs(y_true), self.eps_y)
+            t = np.log(y_safe)
+            self.logy_mean_ = float(np.mean(t))
+            self.logy_std_ = float(np.std(t)) if float(np.std(t)) > 0 else 1.0
+            s = (t - self.logy_mean_) / self.logy_std_
+            # powers: s^1, s^2, ..., s^(K_eff-col)
+            for k in range(1, K_eff - col + 1):
+                Phi[:, col + (k - 1)] = s ** k
+
+        elif self.basis == "poly_y":
+            # Use centered/scaled y (less recommended when y is heavy-tailed)
+            self.y_mean_ = float(np.mean(y_true))
+            y_std = float(np.std(y_true)) if float(np.std(y_true)) > 0 else 1.0
+            s = (y_true - self.y_mean_) / y_std
+            for k in range(1, K_eff - col + 1):
+                Phi[:, col + (k - 1)] = s ** k
+
+        else:
+            raise ValueError(f"Unknown basis='{self.basis}'. Use 'poly_log' or 'poly_y'.")
+
+        # Optional: normalize columns (except intercept) to unit RMS to stabilize moment scales
+        for j in range(K_eff):
+            if self.include_intercept_moment and j == 0:
+                continue
+            rms = np.sqrt(np.mean(Phi[:, j] ** 2))
+            if np.isfinite(rms) and rms > 1e-12:
+                Phi[:, j] /= rms
+
+        return Phi
+
+    # -----------------------
+    # Norm penalty utilities
+    # -----------------------
+    def _penalty_and_derivs(self, m):
+        """
+        Given moments m (shape K_eff,), return:
+          pen      : scalar penalty (excluding any scale_by_n factor and excluding rho)
+          dpen_dm  : gradient wrt m, shape K_eff
+          diag_Hm  : diagonal of Hessian wrt m (PSD approx), shape K_eff
+        """
+        m = np.asarray(m, dtype=float)
+
+        if self.lambda_norm == "l2":
+            # penalty = ||m||_2 (smoothed)
+            q = float(np.sum(m * m) + self.eps_norm)
+            s = float(np.sqrt(q))
+            pen = s
+            dpen_dm = m / s
+            # diag Hessian for ||m||_2:
+            # H = I/s - (m m^T)/s^3  => diag = 1/s - m_k^2/s^3
+            diag_Hm = (1.0 / s) - (m * m) / (s ** 3)
+            diag_Hm = np.maximum(diag_Hm, 0.0)
+            return pen, dpen_dm, diag_Hm
+
+        if self.lambda_norm == "linf":
+            # lambda-norm = inf  => primal penalty = ||m||_1
+            # Use smooth abs: |x| ≈ sqrt(x^2 + eps)
+            a = np.sqrt(m * m + self.eps_norm)
+            pen = float(np.sum(a))
+            dpen_dm = m / a
+            # second derivative of sqrt(m^2+eps): eps / (m^2+eps)^(3/2)
+            diag_Hm = self.eps_norm / (a ** 3)
+            return pen, dpen_dm, diag_Hm
+
+        if self.lambda_norm == "l1":
+            # lambda-norm = 1  => primal penalty = ||m||_inf
+            # Use smooth max on |m_k|:
+            #   max_k |m_k| ≈ (1/beta) log Σ exp(beta * |m_k|)
+            beta = max(self.softmax_beta, 1.0)
+            a = np.sqrt(m * m + self.eps_norm)        # smooth |m|
+            z = beta * (a - np.max(a))                # stabilized
+            w = np.exp(z)
+            Z = float(np.sum(w) + 1e-30)
+            soft = w / Z
+            pen = float((np.log(Z) + beta * np.max(a)) / beta)
+
+            # d pen / d a_k = soft_k
+            # d a_k / d m_k = m_k / a_k
+            dpen_dm = soft * (m / a)
+
+            # crude PSD diagonal curvature:
+            # treat soft weights fixed (ignore coupling), keep abs curvature
+            # d/dm (m/a) has diag eps/(a^3)
+            diag_Hm = soft * (self.eps_norm / (a ** 3))
+            return pen, dpen_dm, diag_Hm
+
+        raise ValueError(f"Unknown lambda_norm='{self.lambda_norm}'. Use 'l2', 'linf', or 'l1'.")
+
+    # -----------------------
+    # LightGBM wrapper
+    # -----------------------
+    def fit(self, X, y):
+        y = np.asarray(y, dtype=float)
+        self.y_true_ = y
+        self.y_mean_ = float(np.mean(y))
+
+        # precompute basis matrix Φ(y)
+        self.Phi_ = self._make_basis(y)
+
+        # set custom objective and fit
+        self.model.set_params(objective=self.fobj)
+        self.model.fit(X, y)
+        return self
+
+    def predict(self, X):
+        return self.model.predict(X)
+
+    def fobj(self, y_true, y_pred):
+        y_true = np.asarray(y_true, dtype=float)
+        y_pred = np.asarray(y_pred, dtype=float)
+        n = y_pred.size
+
+        # ratio error u_i = r_i - 1
+        denom = np.maximum(np.abs(y_true), self.eps_y)
+        r = y_pred / denom
+        u = r - 1.0
+
+        # moments m_k = (1/n) Σ u_i φ_k(y_i)
+        Phi = self.Phi_
+        if Phi is None or Phi.shape[0] != n:
+            # fallback (should not happen if fit() used)
+            Phi = self._make_basis(y_true)
+            self.Phi_ = Phi
+
+        m = (u[:, None] * Phi).mean(axis=0)  # shape (K_eff,)
+
+        # penalty from dual-norm identity: ρ * ||m||
+        pen_norm, dnorm_dm, diag_Hm = self._penalty_and_derivs(m)
+
+        # optional scaling by n (keeps gradients ~ O(1))
+        scale = float(n) if self.scale_by_n else 1.0
+        pen_value = self.rho * scale * pen_norm
+
+        # base MSE objective parts (for prints)
+        mse_value = (y_true - y_pred) ** 2
+
+        if self.verbose:
+            try:
+                corr = float(np.corrcoef(r, y_true)[0, 1])
+            except Exception:
+                corr = float("nan")
+            model_name = self.__str__()
+            print(
+                f"[{model_name.split('(')[0]}] "
+                f"MSE: {np.mean(mse_value):.6f} | "
+                f"||m||: {pen_norm:.6e} | Pen: {pen_value:.6f} | "
+                f"Corr(r,y): {corr:.6f}"
+            )
+
+        # base grads/hess for MSE
+        grad_base = 2.0 * (y_pred - y_true)
+        hess_base = 2.0 * np.ones_like(y_pred)
+
+        # Chain rule for penalty:
+        # dm_k/dy_pred_i = (1/n) * φ_k(y_i) / y_i
+        # grad_pen_i = ρ*scale * Σ_k (d||m||/dm_k) * dm_k/dy_pred_i
+        #           = ρ*scale * (1/n) * (Φ_i · dnorm_dm) / denom_i
+        v = Phi @ dnorm_dm  # shape (n,)
+        grad_pen = self.rho * scale * (v / (float(n) * denom))
+
+        # Diagonal Hessian approximation:
+        # hess_pen_i ≈ ρ*scale * a_i^T H_m a_i
+        # where a_i,k = (1/n) * φ_k(y_i)/denom_i and we use diag(H_m)
+        # => Σ_k diag_Hm_k * a_i,k^2
+        a = Phi / (float(n) * denom[:, None])  # shape (n, K_eff)
+        hess_pen = self.rho * scale * np.sum((a * a) * diag_Hm[None, :], axis=1)
+
+        grad = grad_base + grad_pen
+        hess = hess_base + hess_pen
+
+        # safety floors (LightGBM dislikes zeros)
+        grad[np.abs(grad) < self.zero_grad_tol] = self.zero_grad_tol
+        hess[hess < self.zero_grad_tol] = self.zero_grad_tol
+
+        return grad, hess
+
+    def __str__(self):
+        return f"LGBMomentPenalty({self.rho}, K={self.K}, l_norm={self.lambda_norm})"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# # Single lambda. Weird behavior
+# class FairGBMCustomObjective:
+#     """Simple primal–dual wrapper around LightGBM.
+
+#     Trains with a custom objective:
+#         L(ŷ) = MSE(y, ŷ) + λ * cov_surr(y, ŷ)
+
+#     and updates a single nonnegative multiplier once per boosting iteration:
+#         λ <- max(0, λ + η * (E[cov_surr] - τ))
+
+#     IMPORTANT implementation detail:
+#     - Do NOT scale grad/hess by 1/n. LightGBM has constraints like
+#       min_sum_hessian_in_leaf; scaling by 1/n can make Hessians tiny and
+#       prevent any split (you'll see "best gain: -inf").
+
+#     This is *not* the full FairGBM paper algorithm; it is the minimal primal–dual
+#     scheme for your single surrogate constraint.
+#     """
+
+#     def __init__(
+#         self,
+#         tau: float = 10.0,
+#         keep: float = 1.0,
+#         step_size_lamb: float = 1e-3,
+#         max_iter: int = 100,
+#         lambda_init: float = 0.0,
+#         lambda_max: float | None = None,
+#         y_eps: float = 1e-8,
+#         hess_floor: float = 1e-12,
+#         use_penalty_hessian: bool = True,
+#         lgbm_params: dict | None = None,
+#         verbose: int = 1,
+#         update_on: str = "train",  # "train" or "valid"
+#         pred_delta_tol: float = 0.0,  # set e.g. 1e-10 to monitor stagnation
+#     ):
+#         self.tau = float(tau) * keep
+#         self.keep = keep
+#         self.step_size_lamb = float(step_size_lamb)
+#         self.max_iter = int(max_iter)
+#         self.lambda_init = float(lambda_init)
+#         self.lambda_max = lambda_max if lambda_max is None else float(lambda_max)
+#         self.y_eps = float(y_eps)
+#         self.hess_floor = float(hess_floor)
+#         self.use_penalty_hessian = bool(use_penalty_hessian)
+#         self.verbose = int(verbose)
+#         self.update_on = str(update_on)
+#         self.pred_delta_tol = float(pred_delta_tol)
+
+#         self.lgbm_params = dict(lgbm_params) if lgbm_params is not None else {}
+#         self.lgbm_params.setdefault("n_estimators", self.max_iter)
+#         self.model = lgb.LGBMRegressor(**self.lgbm_params)
+
+#         self.lamb_pen: float = max(0.0, self.lambda_init)
+#         self.history_: list[dict] = []
+
+#         self._X_train = None
+#         self._y_train = None
+#         self._y_mean = None
+
+#     # ----------------------- public API -----------------------
+#     def fit(self, X, y, eval_set=None):
+#         y = np.asarray(y, dtype=float).reshape(-1)
+#         self._X_train = X
+#         self._y_train = y
+#         self._y_mean = float(np.mean(y))
+
+#         # reset state
+#         self.lamb_pen = max(0.0, self.lambda_init)
+#         if self.lambda_max is not None:
+#             self.lamb_pen = min(self.lamb_pen, self.lambda_max)
+#         self.history_.clear()
+
+#         # Use the custom objective
+#         self.model.set_params(objective=self.fobj)
+
+#         callbacks = [self._make_lambda_callback(eval_set=eval_set)]
+
+#         if eval_set is None:
+#             self.model.fit(X, y, callbacks=callbacks)
+#         else:
+#             self.model.fit(X, y, eval_set=eval_set, callbacks=callbacks)
+
+#         return self
+
+#     def predict(self, X):
+#         return self.model.predict(X)
+
+#     def __str__(self):
+#         return f"FairGBMCustomObjective(tau={self.tau:.6})" # lambda={self.lamb_pen:.6g}, 
+
+#     # ----------------------- core math -----------------------
+#     def _safe_y(self, y: np.ndarray) -> np.ndarray:
+#         y = np.asarray(y, dtype=float)
+#         # preserve sign (not that it matters once squared), avoid exact 0
+#         return np.where(np.abs(y) < self.y_eps, np.sign(y) * self.y_eps + (y == 0) * self.y_eps, y)
+
+#     def _cov_surr(self, y_true: np.ndarray, y_pred: np.ndarray, y_mean: float | None = None) -> np.ndarray:
+#         # cov_surr_i = ((ŷ/y)-1)^2 * (y - mean(y))^2 = ((ŷ-y)^2 / y^2) * (y-μ)^2
+#         y_true = np.asarray(y_true, dtype=float).reshape(-1)
+#         y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
+#         y_safe = self._safe_y(y_true)
+#         mu = self._y_mean if y_mean is None else float(y_mean)
+#         zc = y_true - mu
+#         return ((y_pred - y_true) ** 2) * (zc**2) / (y_safe**2)
+
+#     # LightGBM custom objective signature: fobj(y_true, y_pred) -> (grad, hess)
+#     def fobj(self, y_true, y_pred):
+#         y_true = np.asarray(y_true, dtype=float).reshape(-1)
+#         y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
+
+#         # Base loss: MSE
+#         # IMPORTANT: do NOT divide by n; LightGBM expects per-sample grad/hess scales
+#         grad_loss = 2.0 * (y_pred - y_true)
+#         hess_loss = 2.0 * np.ones_like(y_pred)
+
+#         # Penalty: λ * cov_surr
+#         y_safe = self._safe_y(y_true)
+#         zc = y_true - (self._y_mean if self._y_mean is not None else float(np.mean(y_true)))
+#         w = (zc / y_safe) ** 2
+
+#         grad_pen = 2.0 * self.lamb_pen * (y_pred - y_true) * w
+
+#         if self.use_penalty_hessian:
+#             hess_pen = 2.0 * self.lamb_pen * w
+#         else:
+#             hess_pen = 0.0
+
+#         grad = grad_loss + grad_pen
+#         hess = hess_loss + hess_pen
+#         hess = np.maximum(hess, self.hess_floor)
+#         return grad, hess
+
+#     # ----------------------- λ update callback -----------------------
+#     def _make_lambda_callback(self, eval_set=None):
+#         # Choose the dataset used for λ updates
+#         if self.update_on == "valid" and eval_set is not None and len(eval_set) > 0:
+#             X_lam, y_lam = eval_set[0]
+#             y_lam = np.asarray(y_lam, dtype=float).reshape(-1)
+#             y_mean = float(np.mean(y_lam))
+#         else:
+#             X_lam, y_lam = self._X_train, self._y_train
+#             y_mean = float(self._y_mean)
+
+#         prev_pred = {"y_hat": None}
+
+#         def _cb(env):
+#             it = int(env.iteration) + 1
+#             y_hat = env.model.predict(X_lam, num_iteration=it)
+#             y_hat = np.asarray(y_hat, dtype=float).reshape(-1)
+
+#             cov_surr = self._cov_surr(y_lam, y_hat, y_mean=y_mean)
+#             mean_cov = float(np.mean(cov_surr))
+#             viol = float(mean_cov - self.tau)
+
+#             # Projected gradient ascent on λ
+#             self.lamb_pen = max(0.0, self.lamb_pen + self.step_size_lamb * viol)
+#             if self.lambda_max is not None:
+#                 self.lamb_pen = min(self.lamb_pen, self.lambda_max)
+
+#             rmse = float(np.sqrt(np.mean((y_hat - y_lam) ** 2)))
+
+#             pred_delta = None
+#             if prev_pred["y_hat"] is not None:
+#                 pred_delta = float(np.mean(np.abs(y_hat - prev_pred["y_hat"])))
+#             prev_pred["y_hat"] = y_hat
+
+#             rec = {
+#                 "iter": it,
+#                 "lambda": float(self.lamb_pen),
+#                 "violation": viol,
+#                 "mean_cov_surr": mean_cov,
+#                 "rmse": rmse,
+#                 "mean_abs_pred_delta": pred_delta,
+#                 "corr(r, y)":np.corrcoef(y_hat/y_lam, y_lam)[0,1],
+#             }
+#             self.history_.append(rec)
+
+#             if self.verbose:
+#                 msg = (
+#                     f"Iter {it:4d} | λ={rec['lambda']:.4g} | "
+#                     f"E[cov_surr]={rec['mean_cov_surr']:.4g} | "
+#                     f"viol={rec['violation']:.4g} | rmse={rec['rmse']:.4g} |"
+#                     f"corr(r, y)={rec['corr(r, y)']:.4g}"
+#                 )
+#                 if pred_delta is not None and self.pred_delta_tol > 0:
+#                     msg += f" | Δpred={pred_delta:.3g}"
+#                 print(msg)
+
+#                 # If you set pred_delta_tol>0, this helps you *see* stagnation.
+#                 # We don't hard-stop training here to keep the wrapper simple.
+
+#         _cb.order = 50
+#         return _cb
 
 
 
