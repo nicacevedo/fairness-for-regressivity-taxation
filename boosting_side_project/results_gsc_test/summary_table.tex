@@ -1,62 +1,62 @@
-\begin{tabular}{lllrrrrrrr}
-\toprule
-Dataset & Task & Model & n & fail & div & loss & std & time & |m| & clip\\
+egin{tabular}{lllrrrrrrrrrr}
+	oprule
+Dataset & Task & Model & n & fail & div & divS & divD & loss & std & time & |m| & clip\
 \midrule
-gamma_smooth & gamma & GSC-gamma-M1 & 5 & 0 & 0 & 1.161 & 0.01323 & 0.0481 & 3.143 & 0 \\
-gamma_smooth & gamma & GSC-gamma-M1-mu0 & 5 & 0 & 0 & 1.161 & 0.01321 & 0.04851 & 3.154 & 0 \\
-gamma_smooth & gamma & GSC-gamma-M2 & 5 & 0 & 0 & 1.157 & 0.01308 & 0.04842 & 3.114 & 0 \\
-gamma_smooth & gamma & GSC-gamma-M2-mu0 & 5 & 0 & 0 & 1.157 & 0.01287 & 0.04834 & 3.116 & 0 \\
-gamma_smooth & gamma & XGB-gamma-fast & 5 & 0 & 0 & 1.167 & 0.01342 & 0.03031 & 3.205 & 0 \\
-gamma_smooth & gamma & XGB-gamma-max_delta & 5 & 0 & 0 & 1.171 & 0.0134 & 0.03043 & 3.289 & 0 \\
-gamma_smooth & gamma & XGB-gamma-safe & 5 & 0 & 0 & 1.152 & 0.01107 & 0.03156 & 2.979 & 0 \\
-gamma_step & gamma & GSC-gamma-M1 & 5 & 0 & 0 & 2.675 & 0.08579 & 0.0497 & 7.889 & 0 \\
-gamma_step & gamma & GSC-gamma-M1-mu0 & 5 & 0 & 0 & 2.676 & 0.08748 & 0.04948 & 7.89 & 0 \\
-gamma_step & gamma & GSC-gamma-M2 & 5 & 0 & 0 & 2.667 & 0.09097 & 0.04944 & 7.507 & 0 \\
-gamma_step & gamma & GSC-gamma-M2-mu0 & 5 & 0 & 0 & 2.667 & 0.09128 & 0.04973 & 7.507 & 0 \\
-gamma_step & gamma & XGB-gamma-fast & 5 & 0 & 1 &  &  &  &  &  \\
-gamma_step & gamma & XGB-gamma-max_delta & 5 & 0 & 0 & 2.73 & 0.09381 & 0.0335 & 8.932 & 0 \\
-gamma_step & gamma & XGB-gamma-safe & 5 & 0 & 0 & 14.63 & 12.69 & 0.03078 & 8.227 & 0 \\
-gaussian_smooth & gaussian & GSC-gaussian-M1 & 5 & 0 & 1 &  &  &  &  &  \\
-gaussian_smooth & gaussian & GSC-gaussian-M1-mu0 & 5 & 0 & 1 &  &  &  &  &  \\
-gaussian_smooth & gaussian & GSC-gaussian-M2 & 5 & 0 & 1 &  &  &  &  &  \\
-gaussian_smooth & gaussian & GSC-gaussian-M2-mu0 & 5 & 0 & 1 &  &  &  &  &  \\
-gaussian_smooth & gaussian & XGB-gaussian-fast & 5 & 0 & 1 &  &  &  &  &  \\
-gaussian_smooth & gaussian & XGB-gaussian-max_delta & 5 & 0 & 1 &  &  &  &  &  \\
-gaussian_smooth & gaussian & XGB-gaussian-safe & 5 & 0 & 1 &  &  &  &  &  \\
-gaussian_step & gaussian & GSC-gaussian-M1 & 5 & 0 & 1 &  &  &  &  &  \\
-gaussian_step & gaussian & GSC-gaussian-M1-mu0 & 5 & 0 & 1 &  &  &  &  &  \\
-gaussian_step & gaussian & GSC-gaussian-M2 & 5 & 0 & 1 &  &  &  &  &  \\
-gaussian_step & gaussian & GSC-gaussian-M2-mu0 & 5 & 0 & 1 &  &  &  &  &  \\
-gaussian_step & gaussian & XGB-gaussian-fast & 5 & 0 & 1 &  &  &  &  &  \\
-gaussian_step & gaussian & XGB-gaussian-max_delta & 5 & 0 & 1 &  &  &  &  &  \\
-gaussian_step & gaussian & XGB-gaussian-safe & 5 & 0 & 1 &  &  &  &  &  \\
-logistic_smooth & logistic & GSC-logistic-M1 & 5 & 0 & 0 & 0.224 & 0.01296 & 0.04664 & 5.774 & 0 \\
-logistic_smooth & logistic & GSC-logistic-M1-mu0 & 5 & 0 & 0 & 0.224 & 0.01296 & 0.04724 & 5.774 & 0 \\
-logistic_smooth & logistic & GSC-logistic-M2 & 5 & 0 & 0 & 0.2229 & 0.0129 & 0.04674 & 5.774 & 0 \\
-logistic_smooth & logistic & GSC-logistic-M2-mu0 & 5 & 0 & 0 & 0.2229 & 0.0129 & 0.04662 & 5.774 & 0 \\
-logistic_smooth & logistic & XGB-logistic-fast & 5 & 1 &  &  &  &  &  &  \\
-logistic_smooth & logistic & XGB-logistic-max_delta & 5 & 1 &  &  &  &  &  &  \\
-logistic_smooth & logistic & XGB-logistic-safe & 5 & 1 &  &  &  &  &  &  \\
-logistic_step & logistic & GSC-logistic-M1 & 5 & 0 & 0 & 0.2295 & 0.01482 & 0.04655 & 4.662 & 0 \\
-logistic_step & logistic & GSC-logistic-M1-mu0 & 5 & 0 & 0 & 0.2295 & 0.01482 & 0.04658 & 4.662 & 0 \\
-logistic_step & logistic & GSC-logistic-M2 & 5 & 0 & 0 & 0.228 & 0.01447 & 0.04651 & 4.604 & 0 \\
-logistic_step & logistic & GSC-logistic-M2-mu0 & 5 & 0 & 0 & 0.228 & 0.01447 & 0.04644 & 4.604 & 0 \\
-logistic_step & logistic & XGB-logistic-fast & 5 & 1 &  &  &  &  &  &  \\
-logistic_step & logistic & XGB-logistic-max_delta & 5 & 1 &  &  &  &  &  &  \\
-logistic_step & logistic & XGB-logistic-safe & 5 & 1 &  &  &  &  &  &  \\
-poisson_cancel & poisson & GSC-poisson-M1 & 5 & 0 & 1 &  &  &  &  &  \\
-poisson_cancel & poisson & GSC-poisson-M1-mu0 & 5 & 0 & 1 &  &  &  &  &  \\
-poisson_cancel & poisson & GSC-poisson-M2 & 5 & 0 & 1 &  &  &  &  &  \\
-poisson_cancel & poisson & GSC-poisson-M2-mu0 & 5 & 0 & 1 &  &  &  &  &  \\
-poisson_cancel & poisson & XGB-poisson-fast & 5 & 0 & 1 &  &  &  &  &  \\
-poisson_cancel & poisson & XGB-poisson-max_delta & 5 & 0 & 1 &  &  &  &  &  \\
-poisson_cancel & poisson & XGB-poisson-safe & 5 & 0 & 1 &  &  &  &  &  \\
-poisson_step & poisson & GSC-poisson-M1 & 5 & 0 & 0 & 19.32 & 6.729 & 0.05709 & 6.329 & 0 \\
-poisson_step & poisson & GSC-poisson-M1-mu0 & 5 & 0 & 0 & 19.32 & 6.729 & 0.05696 & 6.329 & 0 \\
-poisson_step & poisson & GSC-poisson-M2 & 5 & 0 & 0 & 56.5 & 8.907 & 0.05631 & 5.743 & 0 \\
-poisson_step & poisson & GSC-poisson-M2-mu0 & 5 & 0 & 0 & 56.5 & 8.908 & 0.05621 & 5.743 & 0 \\
-poisson_step & poisson & XGB-poisson-fast & 5 & 0 & 0 & 21.34 & 5.75 & 0.05045 & 6.713 & 0 \\
-poisson_step & poisson & XGB-poisson-max_delta & 5 & 0 & 0 & 21.24 & 5.813 & 0.05051 & 6.706 & 0 \\
-poisson_step & poisson & XGB-poisson-safe & 5 & 0 & 0 & 30.82 & 7.002 & 0.04824 & 6.475 & 0 \\
-\bottomrule
+gamma_smooth & gamma & GSC-gamma-M1 & 5 & 0 & 0 & -inf & -inf & 1.171 & 0.01466 & 0.09359 & 3.25 & 0 \
+gamma_smooth & gamma & GSC-gamma-M1-mu0 & 5 & 0 & 0 & -inf & -inf & 1.171 & 0.01453 & 0.09304 & 3.248 & 0 \
+gamma_smooth & gamma & GSC-gamma-M2 & 5 & 0 & 0 & -inf & -inf & 1.165 & 0.01448 & 0.09383 & 3.228 & 0 \
+gamma_smooth & gamma & GSC-gamma-M2-mu0 & 5 & 0 & 0 & -inf & -inf & 1.165 & 0.0137 & 0.09385 & 3.229 & 0 \
+gamma_smooth & gamma & XGB-gamma-fast & 5 & 0 & 0 & -inf & -inf & 1.181 & 0.01458 & 0.05878 & 3.314 & 0 \
+gamma_smooth & gamma & XGB-gamma-max_delta & 5 & 0 & 0 & -inf & -inf & 1.183 & 0.01444 & 0.05864 & 3.34 & 0 \
+gamma_smooth & gamma & XGB-gamma-safe & 5 & 0 & 0 & -inf & -inf & 1.156 & 0.01211 & 0.05931 & 3.076 & 0 \
+gamma_step & gamma & GSC-gamma-M1 & 5 & 0 & 0 & 0 & 0 & 2.712 & 0.09041 & 0.09814 & 8.817 & 0 \
+gamma_step & gamma & GSC-gamma-M1-mu0 & 5 & 0 & 0 & 0 & 0 & 2.715 & 0.09348 & 0.09725 & 8.793 & 0 \
+gamma_step & gamma & GSC-gamma-M2 & 5 & 0 & 0 & 0 & 0 & 2.686 & 0.08599 & 0.09737 & 7.964 & 0 \
+gamma_step & gamma & GSC-gamma-M2-mu0 & 5 & 0 & 0 & 0 & 0 & 2.686 & 0.08631 & 0.09731 & 7.965 & 0 \
+gamma_step & gamma & XGB-gamma-fast & 5 & 0 & 1 & 1 & 0 & -inf & -inf & -inf & -inf & -inf \
+gamma_step & gamma & XGB-gamma-max_delta & 5 & 0 & 0 & 0 & 0 & 2.775 & 0.1025 & 0.06569 & 9.046 & 0 \
+gamma_step & gamma & XGB-gamma-safe & 5 & 0 & 0 & 0 & 0 & 2.672 & 0.07929 & 0.06315 & 8.624 & 0 \
+gaussian_smooth & gaussian & GSC-gaussian-M1 & 5 & 0 & 1 & -inf & -inf & -inf & -inf & -inf & -inf & -inf \
+gaussian_smooth & gaussian & GSC-gaussian-M1-mu0 & 5 & 0 & 1 & -inf & -inf & -inf & -inf & -inf & -inf & -inf \
+gaussian_smooth & gaussian & GSC-gaussian-M2 & 5 & 0 & 1 & -inf & -inf & -inf & -inf & -inf & -inf & -inf \
+gaussian_smooth & gaussian & GSC-gaussian-M2-mu0 & 5 & 0 & 1 & -inf & -inf & -inf & -inf & -inf & -inf & -inf \
+gaussian_smooth & gaussian & XGB-gaussian-fast & 5 & 0 & 1 & -inf & -inf & -inf & -inf & -inf & -inf & -inf \
+gaussian_smooth & gaussian & XGB-gaussian-max_delta & 5 & 0 & 1 & -inf & -inf & -inf & -inf & -inf & -inf & -inf \
+gaussian_smooth & gaussian & XGB-gaussian-safe & 5 & 0 & 1 & -inf & -inf & -inf & -inf & -inf & -inf & -inf \
+gaussian_step & gaussian & GSC-gaussian-M1 & 5 & 0 & 1 & 0 & 1 & -inf & -inf & -inf & -inf & -inf \
+gaussian_step & gaussian & GSC-gaussian-M1-mu0 & 5 & 0 & 1 & 0 & 1 & -inf & -inf & -inf & -inf & -inf \
+gaussian_step & gaussian & GSC-gaussian-M2 & 5 & 0 & 1 & 0 & 1 & -inf & -inf & -inf & -inf & -inf \
+gaussian_step & gaussian & GSC-gaussian-M2-mu0 & 5 & 0 & 1 & 0 & 1 & -inf & -inf & -inf & -inf & -inf \
+gaussian_step & gaussian & XGB-gaussian-fast & 5 & 0 & 1 & 0 & 1 & -inf & -inf & -inf & -inf & -inf \
+gaussian_step & gaussian & XGB-gaussian-max_delta & 5 & 0 & 1 & 0 & 1 & -inf & -inf & -inf & -inf & -inf \
+gaussian_step & gaussian & XGB-gaussian-safe & 5 & 0 & 1 & 0 & 1 & -inf & -inf & -inf & -inf & -inf \
+logistic_smooth & logistic & GSC-logistic-M1 & 5 & 0 & 0 & -inf & -inf & 0.2277 & 0.01396 & 0.09168 & 6.322 & 0 \
+logistic_smooth & logistic & GSC-logistic-M1-mu0 & 5 & 0 & 0 & -inf & -inf & 0.2277 & 0.01396 & 0.09071 & 6.322 & 0 \
+logistic_smooth & logistic & GSC-logistic-M2 & 5 & 0 & 0 & -inf & -inf & 0.2265 & 0.01382 & 0.09075 & 6.184 & 0 \
+logistic_smooth & logistic & GSC-logistic-M2-mu0 & 5 & 0 & 0 & -inf & -inf & 0.2265 & 0.01382 & 0.09061 & 6.184 & 0 \
+logistic_smooth & logistic & XGB-logistic-fast & 5 & 1 & -inf & -inf & -inf & -inf & -inf & -inf & -inf & -inf \
+logistic_smooth & logistic & XGB-logistic-max_delta & 5 & 1 & -inf & -inf & -inf & -inf & -inf & -inf & -inf & -inf \
+logistic_smooth & logistic & XGB-logistic-safe & 5 & 1 & -inf & -inf & -inf & -inf & -inf & -inf & -inf & -inf \
+logistic_step & logistic & GSC-logistic-M1 & 5 & 0 & 0 & 0 & 0 & 0.235 & 0.01653 & 0.09197 & 5.099 & 0 \
+logistic_step & logistic & GSC-logistic-M1-mu0 & 5 & 0 & 0 & 0 & 0 & 0.235 & 0.01653 & 0.09179 & 5.099 & 0 \
+logistic_step & logistic & GSC-logistic-M2 & 5 & 0 & 0 & 0 & 0 & 0.2338 & 0.01577 & 0.0918 & 4.951 & 0 \
+logistic_step & logistic & GSC-logistic-M2-mu0 & 5 & 0 & 0 & 0 & 0 & 0.2338 & 0.01577 & 0.09159 & 4.951 & 0 \
+logistic_step & logistic & XGB-logistic-fast & 5 & 1 & -inf & -inf & -inf & -inf & -inf & -inf & -inf & -inf \
+logistic_step & logistic & XGB-logistic-max_delta & 5 & 1 & -inf & -inf & -inf & -inf & -inf & -inf & -inf & -inf \
+logistic_step & logistic & XGB-logistic-safe & 5 & 1 & -inf & -inf & -inf & -inf & -inf & -inf & -inf & -inf \
+poisson_cancel & poisson & GSC-poisson-M1 & 5 & 0 & 1 & -inf & -inf & -inf & -inf & -inf & -inf & -inf \
+poisson_cancel & poisson & GSC-poisson-M1-mu0 & 5 & 0 & 1 & -inf & -inf & -inf & -inf & -inf & -inf & -inf \
+poisson_cancel & poisson & GSC-poisson-M2 & 5 & 0 & 1 & -inf & -inf & -inf & -inf & -inf & -inf & -inf \
+poisson_cancel & poisson & GSC-poisson-M2-mu0 & 5 & 0 & 1 & -inf & -inf & -inf & -inf & -inf & -inf & -inf \
+poisson_cancel & poisson & XGB-poisson-fast & 5 & 0 & 1 & -inf & -inf & -inf & -inf & -inf & -inf & -inf \
+poisson_cancel & poisson & XGB-poisson-max_delta & 5 & 0 & 1 & -inf & -inf & -inf & -inf & -inf & -inf & -inf \
+poisson_cancel & poisson & XGB-poisson-safe & 5 & 0 & 1 & -inf & -inf & -inf & -inf & -inf & -inf & -inf \
+poisson_step & poisson & GSC-poisson-M1 & 5 & 0 & 0 & 0 & 0 & 20.33 & 6.278 & 0.1147 & 6.604 & 0 \
+poisson_step & poisson & GSC-poisson-M1-mu0 & 5 & 0 & 0 & 0 & 0 & 20.33 & 6.278 & 0.1132 & 6.604 & 0 \
+poisson_step & poisson & GSC-poisson-M2 & 5 & 0 & 0 & 0 & 0 & 19.33 & 6.68 & 0.1114 & 6.354 & 0 \
+poisson_step & poisson & GSC-poisson-M2-mu0 & 5 & 0 & 0 & 0 & 0 & 19.33 & 6.68 & 0.1117 & 6.354 & 0 \
+poisson_step & poisson & XGB-poisson-fast & 5 & 0 & 0 & 0 & 0 & 21.4 & 5.689 & 0.09988 & 6.718 & 0 \
+poisson_step & poisson & XGB-poisson-max_delta & 5 & 0 & 0 & 0 & 0 & 21.38 & 5.714 & 0.09925 & 6.716 & 0 \
+poisson_step & poisson & XGB-poisson-safe & 5 & 0 & 0 & 0 & 0 & 20.69 & 6.344 & 0.09771 & 6.629 & 0 \
+ottomrule
 \end{tabular}

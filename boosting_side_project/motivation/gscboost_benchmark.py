@@ -983,6 +983,7 @@ def summarize(per_run: pd.DataFrame) -> pd.DataFrame:
 
     - fail_rate: fraction of runs that raised a Python exception (failed=True)
     - diverge_rate: fraction of completed runs that diverged numerically (diverged=True)
+    - zone-wise divergence rates: attribute divergence to safe/danger using final zone losses (when available)
     - metrics averaged over completed & non-diverged runs only
     """
     if "failed" not in per_run.columns:
@@ -999,6 +1000,7 @@ def summarize(per_run: pd.DataFrame) -> pd.DataFrame:
             return float("nan")
         return float(np.mean(v))
 
+    # "ok" = completed and non-diverged (used for averaging metrics)
     ok = completed[~completed["diverged"].astype(bool)].copy() if "diverged" in completed.columns else completed
 
     base = per_run.groupby(["dataset", "task", "model"], as_index=False).agg(
@@ -1006,6 +1008,54 @@ def summarize(per_run: pd.DataFrame) -> pd.DataFrame:
         fail_rate=("failed", "mean"),
         diverge_rate=("diverged", _div_rate),
     )
+
+    # Zone-wise divergence attribution (ONLY meaningful when zone losses exist)
+    def _zone_div_rates(g: pd.DataFrame) -> pd.Series:
+        # If the group never had zone losses logged, keep NaN (e.g., smooth datasets).
+        has_zone = (np.isfinite(pd.to_numeric(g.get("final_loss_safe", np.nan), errors="coerce")).any()
+                    or np.isfinite(pd.to_numeric(g.get("final_loss_danger", np.nan), errors="coerce")).any())
+        if not has_zone:
+            return pd.Series({"diverge_rate_safe": np.nan, "diverge_rate_danger": np.nan, "diverge_rate_unknown": np.nan})
+
+        if "diverged" not in g.columns:
+            return pd.Series({"diverge_rate_safe": np.nan, "diverge_rate_danger": np.nan, "diverge_rate_unknown": np.nan})
+
+        div = g["diverged"].astype(bool)
+        if div.sum() == 0:
+            return pd.Series({"diverge_rate_safe": 0.0, "diverge_rate_danger": 0.0, "diverge_rate_unknown": 0.0})
+
+        ls = pd.to_numeric(g.loc[div, "final_loss_safe"], errors="coerce").to_numpy()
+        ld = pd.to_numeric(g.loc[div, "final_loss_danger"], errors="coerce").to_numpy()
+
+        s_ct = d_ct = u_ct = 0
+        for a, b in zip(ls, ld):
+            a_fin = np.isfinite(a)
+            b_fin = np.isfinite(b)
+            if a_fin and b_fin:
+                # Attribute to the worse zone at the divergence round
+                if b >= a:
+                    d_ct += 1
+                else:
+                    s_ct += 1
+            elif a_fin and not b_fin:
+                d_ct += 1
+            elif (not a_fin) and b_fin:
+                s_ct += 1
+            else:
+                u_ct += 1
+
+        denom = float(len(g))  # normalize by completed runs (matches diverge_rate semantics)
+        return pd.Series({
+            "diverge_rate_safe": s_ct / denom,
+            "diverge_rate_danger": d_ct / denom,
+            "diverge_rate_unknown": u_ct / denom,
+        })
+
+    zone = completed.groupby(["dataset", "task", "model"], as_index=False).apply(_zone_div_rates)
+    # pandas returns MultiIndex in older versions; normalize
+    if isinstance(zone.index, pd.MultiIndex):
+        zone = zone.reset_index(drop=True)
+    base = base.merge(zone, on=["dataset", "task", "model"], how="left")
 
     met = ok.groupby(["dataset", "task", "model"], as_index=False).agg(
         loss_mean=("final_loss_overall", "mean"),
@@ -1020,8 +1070,6 @@ def summarize(per_run: pd.DataFrame) -> pd.DataFrame:
 
     agg = base.merge(met, on=["dataset", "task", "model"], how="left")
     return agg
-
-
 def _style_for_model(model: str) -> Dict[str, Any]:
     """Matplotlib style kwargs for a model name (marker/linestyle only)."""
     if model.startswith("XGB-"):
@@ -1048,48 +1096,99 @@ def plot_curves(
     band_k: float,
     band_alpha: float,
 ) -> None:
-    """Plots: loss curve (with optional std bands), max_abs_margin, clip_rate."""
+    """Plots: loss curve (with optional std + IQR bands), max_abs_margin, clip_rate.
+
+    Notes:
+    - Bands are computed across seeds (requires seeds > 1).
+    - To avoid overly-dense figures, each curve is downsampled to at most `max_points` x-axis points.
+    """
     os.makedirs(out_dir, exist_ok=True)
+
+    # Downsample curves for plotting only (keeps CSV intact)
+    max_points = 60
+
+    def q(p: float):
+        return lambda s: float(s.quantile(p))
 
     # Aggregate per round across seeds
     grp = per_round.groupby(["dataset", "task", "model", "round"], as_index=False)
     agg = grp.agg(
         loss_mean=("loss_overall", "mean"),
         loss_std=("loss_overall", "std"),
+        loss_q25=("loss_overall", q(0.25)),
+        loss_q75=("loss_overall", q(0.75)),
         margin_mean=("max_abs_margin", "mean"),
         margin_std=("max_abs_margin", "std"),
+        margin_q25=("max_abs_margin", q(0.25)),
+        margin_q75=("max_abs_margin", q(0.75)),
         clip_mean=("clip_rate", "mean"),
         clip_std=("clip_rate", "std"),
+        clip_q25=("clip_rate", q(0.25)),
+        clip_q75=("clip_rate", q(0.75)),
         n=("seed", "count"),
     )
 
     for (ds_name, task), sub in agg.groupby(["dataset", "task"]):
         metric = metric_name(task)
 
-        def _plot_one(y_mean: str, y_std: str, title: str, fname: str) -> None:
+        def _downsample(x, *ys):
+            if x.size <= max_points:
+                return (x, *ys)
+            idx = np.unique(np.round(np.linspace(0, x.size - 1, max_points)).astype(int))
+            out = [x[idx]]
+            for arr in ys:
+                out.append(arr[idx])
+            return tuple(out)
+
+        def _plot_one(y_mean: str, y_std: str, y_q25: str, y_q75: str, title: str, fname: str) -> None:
             plt.figure()
             for model, mdf in sub.groupby("model"):
                 mdf = mdf.sort_values("round")
                 x = mdf["round"].to_numpy()
                 y = mdf[y_mean].to_numpy()
                 st = mdf[y_std].to_numpy()
+                q25 = mdf[y_q25].to_numpy()
+                q75 = mdf[y_q75].to_numpy()
+
+                x, y, st, q25, q75 = _downsample(x, y, st, q25, q75)
+
                 style = _style_for_model(model)
-                plt.plot(x, y, label=model, **{k: v for k, v in style.items() if v is not None})
-                if plot_band and np.any(np.isfinite(st)):
-                    lo = y - band_k * np.nan_to_num(st, nan=0.0)
-                    hi = y + band_k * np.nan_to_num(st, nan=0.0)
-                    plt.fill_between(x, lo, hi, alpha=band_alpha)
+                line = plt.plot(x, y, label=model, **{k: v for k, v in style.items() if v is not None})[0]
+                c = line.get_color()
+
+                if plot_band:
+                    # IQR band (more robust) + std band (mean ± k·std)
+                    if np.any(np.isfinite(q25)) and np.any(np.isfinite(q75)):
+                        plt.fill_between(x, q25, q75, alpha=min(0.12, band_alpha * 0.8), color=c)
+                    if np.any(np.isfinite(st)):
+                        st2 = np.nan_to_num(st, nan=0.0)
+                        lo = y - band_k * st2
+                        hi = y + band_k * st2
+                        plt.fill_between(x, lo, hi, alpha=band_alpha, color=c)
+
             plt.xlabel("round")
             plt.ylabel(title)
             plt.title(f"{ds_name} ({task})")
             plt.legend(fontsize=8)
             plt.tight_layout()
-            plt.savefig(os.path.join(out_dir, fname), dpi=180)
+            plt.savefig(os.path.join(out_dir, fname), dpi=150)
             plt.close()
 
-        _plot_one("loss_mean", "loss_std", metric, f"{ds_name}_{metric}.png")
-        _plot_one("margin_mean", "margin_std", "max_abs_margin", f"{ds_name}_max_abs_margin.png")
-        _plot_one("clip_mean", "clip_std", "clip_rate", f"{ds_name}_clip_rate.png")
+        # Loss curve
+        _plot_one(
+            y_mean="loss_mean", y_std="loss_std", y_q25="loss_q25", y_q75="loss_q75",
+            title=metric, fname=f"{ds_name}_{task}_{metric}.png",
+        )
+        # Max abs margin
+        _plot_one(
+            y_mean="margin_mean", y_std="margin_std", y_q25="margin_q25", y_q75="margin_q75",
+            title="max_abs_margin", fname=f"{ds_name}_{task}_max_abs_margin.png",
+        )
+        # Clip rate
+        _plot_one(
+            y_mean="clip_mean", y_std="clip_std", y_q25="clip_q25", y_q75="clip_q75",
+            title="clip_rate", fname=f"{ds_name}_{task}_clip_rate.png",
+        )
 
 
 def write_latex_table(summary: pd.DataFrame, out_path: str) -> None:
@@ -1098,6 +1197,7 @@ def write_latex_table(summary: pd.DataFrame, out_path: str) -> None:
     cols = [
         "dataset", "task", "model",
         "n_runs", "fail_rate", "diverge_rate",
+        "diverge_rate_safe", "diverge_rate_danger",
         "loss_mean", "loss_std", "time_mean", "max_margin_mean", "clip_rate_mean",
     ]
     s = summary.copy()
@@ -1106,36 +1206,40 @@ def write_latex_table(summary: pd.DataFrame, out_path: str) -> None:
             s[c] = np.nan
     s = s[cols].sort_values(["dataset", "task", "model"])
 
-    # Simple formatting
     def f(x: Any) -> str:
-        if x is None or (isinstance(x, float) and not np.isfinite(x)):
+        if x is None:
             return ""
+        if isinstance(x, (float, np.floating)):
+            if not np.isfinite(float(x)):
+                return "inf" if float(x) > 0 else "-inf"
+            return f"{float(x):.4g}"
         if isinstance(x, (int, np.integer)):
             return str(int(x))
-        if isinstance(x, (float, np.floating)):
-            return f"{float(x):.4g}"
         return str(x)
 
-    lines = []
-    lines.append("\\begin{tabular}{lllrrrrrrr}")
-    lines.append("\\toprule")
-    lines.append("Dataset & Task & Model & n & fail & div & loss & std & time & |m| & clip\\\\")
-    lines.append("\\midrule")
+    lines: List[str] = []
+    # Column spec: 3 text cols + 10 numeric cols = 13 total
+    lines.append("\begin{tabular}{lllrrrrrrrrrr}")
+    lines.append("\toprule")
+    lines.append("Dataset & Task & Model & n & fail & div & divS & divD & loss & std & time & |m| & clip\\")
+    lines.append("\midrule")
     for _, r in s.iterrows():
         lines.append(
             f"{f(r['dataset'])} & {f(r['task'])} & {f(r['model'])} & "
             f"{f(r['n_runs'])} & {f(r['fail_rate'])} & {f(r['diverge_rate'])} & "
+            f"{f(r['diverge_rate_safe'])} & {f(r['diverge_rate_danger'])} & "
             f"{f(r['loss_mean'])} & {f(r['loss_std'])} & {f(r['time_mean'])} & "
-            f"{f(r['max_margin_mean'])} & {f(r['clip_rate_mean'])} \\\\"
+            f"{f(r['max_margin_mean'])} & {f(r['clip_rate_mean'])} \\"
         )
-    lines.append("\\bottomrule")
-    lines.append("\\end{tabular}")
+    lines.append("\bottomrule")
+    lines.append("\end{tabular}")
 
     with open(out_path, "w", encoding="utf-8") as fobj:
         fobj.write("\n".join(lines))
 
 
 # -----------------------
+# Main# -----------------------
 # Main
 # -----------------------
 
