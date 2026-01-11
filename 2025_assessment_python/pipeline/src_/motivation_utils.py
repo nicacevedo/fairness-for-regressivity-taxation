@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_score, mean_absolute_percentage_error
+from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_score, mean_absolute_percentage_error, median_absolute_error
 import os
 from typing import Union, List
 
@@ -343,7 +343,9 @@ def compute_taxation_metrics(y_real, y_pred, scale="log"):
         metrics["R2 (log)"] = r2_score(y_real_log, y_pred_log)
         metrics["RMSE"] = root_mean_squared_error(y_real, y_pred)
         metrics["MAE"] = mean_absolute_error(y_real, y_pred)
+        metrics["MdAE"] = median_absolute_error(y_real, y_pred)
         metrics["MAPE"] = mean_absolute_percentage_error(y_real, y_pred)
+        metrics["MdAPE"] = 100*median_absolute_error(y_real/y_pred, y_pred/y_pred)
 
         # # 1.5 Loss function
         # metrics["Loss"] = 

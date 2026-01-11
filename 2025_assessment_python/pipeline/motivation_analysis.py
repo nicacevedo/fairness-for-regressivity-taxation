@@ -4,6 +4,7 @@ import pandas as pd
 from typing import Union, List
 import matplotlib.pyplot as plt
 from scipy.stats import kurtosis, skew
+import scipy.sparse as sp
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.linear_model import LinearRegression, ElasticNet
@@ -17,6 +18,7 @@ from sklearn.metrics import root_mean_squared_error, r2_score, mean_absolute_err
 # from sklearn.datasets import make_blobs
 # from sklearn.cluster import KMeans
 # from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans, MiniBatchKMeans
 
 
 # New imports
@@ -41,13 +43,14 @@ from recipes.recipes_pipelined import build_model_pipeline, build_model_pipeline
 from src_.motivation_utils import analyze_fairness_by_value, calculate_detailed_statistics, plot_tradeoff_analysis, compute_taxation_metrics
 from fairness_models.linear_fairness_models import LeastAbsoluteDeviationRegression, MaxDeviationConstrainedLinearRegression, LeastMaxDeviationRegression, GroupDeviationConstrainedLinearRegression, StableRegression, LeastProportionalDeviationRegression#LeastMSEConstrainedRegression, LeastProportionalDeviationRegression
 from fairness_models.linear_fairness_models import MyGLMRegression, GroupDeviationConstrainedLogisticRegression, RobustStableLADPRDCODRegressor, StableAdversarialSurrogateRegressor, StableAdversarialSurrogateRegressor2
+from fairness_models.mixture_boosting_fairness_models import MoELGBSmoothPenalty
 
 # My boosting models
 import lightgbm as lgb
 # from fairness_models.boosting_fairness_models import custom_objective, custom_eval
 # from fairness_models.boosting_fairness_models import make_constrained_mse_objective, make_covariance_metric
 from fairness_models.boosting_fairness_models import LGBCustomObjective,  LGBPrimalDual#, FairGBMCustomObjective
-from fairness_models.boosting_fairness_models import LGBSmoothPenalty, LGBPrimalDualImproved, LGBCovPenalty, LGBMomentPenalty # post primal-dual methods
+from fairness_models.boosting_fairness_models import LGBSmoothPenalty, LGBPrimalDualImproved, LGBCovPenalty, LGBMomentPenalty, LGBCovTweediePenalty, LGBCorrTweediePenalty # post primal-dual methods
 
 
 # UC Irvine data
@@ -249,7 +252,7 @@ df_test = df.iloc[int(train_prop*n):,:]
 # Random sample of train
 sample_size = 100000 # 10k samples for Abalon (?)# 1000 samples for Adult (?)
 if sample_size < df_train.shape[0]:
-    print("working with a sample (10k)")
+    print(f"working with a sample ({sample_size//1000}k)")
     df_train = df_train.sample(min(sample_size, df_train.shape[0]), random_state=seed, replace=False)
 
     # if source == "ucirvine":
@@ -331,6 +334,7 @@ else:
     y_test_scaled = y_test
 
 
+
 ################################################################################
 # Experiments on Stable Regression and Covariance Constrained Models 
 ################################################################################
@@ -350,7 +354,7 @@ epsilons_cov = [2.25e-2, 1e-2, 8.75e-3, 7.5e-3]#, 5e-3] # Cov 2.25e-2,
 # epsilons_var = [1e-1, 7.5e-2, 5e-2, 2.5e-2] # Var: Not doing anything
 rhos_cov = [1e-1, 1, 5, 10]#, 1.5] # Cov
 # rhos_var = [0] #[0, 1e-1, 1, 5, 10, 20]#, 10] # Var: Not doing anything
-keep_percentages = np.linspace(0.01, 1, 2)
+keep_percentages = np.linspace(0.1, 1, 2)
 
 
 models = [
@@ -445,10 +449,12 @@ lgbm_params = {
     # "verbosity_eval":False,
 }
 
-rhos = [1e2, 5e2, 1e3, 5e3, 1e4]#[5e2, 1e3, 5e3, 1e4] #[5e2, 1e3, 5e3, 1e4] # Last ones: 5e2,5e3,
+# rhos = [5e2, 1e3, 5e3, 1e4]#[5e2, 1e3, 5e3, 1e4] #[5e2, 1e3, 5e3, 1e4] # Last ones: 5e2,5e3,
+rhos = np.linspace(1e3, 1e4, 10)
+rhos = [int(rho) for rho in rhos]
 adversary_types = ["overall"]#$, "individual"]
 zero_tols = [0] # 1e-8, 1e-6
-eta_advs = [lr*1e-2, lr*1e-1, lr]
+eta_advs = [lr]#[lr*1e-2, lr*1e-1, lr]
 # eta_adv
 # for rho in rhos:
 #     for adversary_type in adversary_types:
@@ -502,29 +508,68 @@ for rho in rhos:
         )
     # not adversarial?
 
-rhos = [5e0, 1e1, 15]
-# 9. Direct K-moments penalty
-for l_norm in ["l1", "l2", "linf"]:
-    for rho in rhos:
-        for zero_tol in zero_tols:
-            models.append(
-                LGBMomentPenalty(
-                    rho=rho, 
-                    K=4, # number of moments
-                    basis="poly_log",               # "poly_log" or "poly_y"
-                    include_intercept_moment=False,  # include φ0(y)=1 as the first moment
-                    lambda_norm=l_norm,              # "l2", "linf", "l1" (norm on λ)
-                    scale_by_n=True, # maintain gradients O(1)?
+# rhos = [5e0, 1e1, 15]
+# # 9. Direct K-moments penalty
+# for l_norm in ["l1"]:#, "l2", "linf"]:
+#     for K_moments in [2, 4, 6]:
+#         for rho in rhos:
+#             for zero_tol in zero_tols:
+#                 models.append(
+#                     LGBMomentPenalty(
+#                         rho=rho, 
+#                         K=K_moments, # number of moments
+#                         basis="poly_log",               # "poly_log" or "poly_y"
+#                         include_intercept_moment=False,  # include φ0(y)=1 as the first moment
+#                         lambda_norm=l_norm,              # "l2", "linf", "l1" (norm on λ)
+#                         scale_by_n=True, # maintain gradients O(1)?
 
-                    eps_y=1e-12,                   # for y_true division
-                    eps_norm=1e-12,                # for smoothing norms
-                    softmax_beta=20.0,             # for smooth ||m||_inf approx when lambda_norm="l1"
-                    zero_grad_tol=zero_tol,
-        
-                    verbose=True,
-                    lgbm_params=lgbm_params
-                )
-            )
+#                         eps_y=1e-12,                   # for y_true division
+#                         eps_norm=1e-12,                # for smoothing norms
+#                         softmax_beta=20.0,             # for smooth ||m||_inf approx when lambda_norm="l1"
+#                         zero_grad_tol=zero_tol,
+            
+#                         verbose=True,
+#                         lgbm_params=lgbm_params
+#                     )
+#                 )
+
+# # 9. Tweeadie (mix of Poisson/Gamma) with their loss. Not really workign well
+# for gsc_mode in ["upper", "taylor"]: # "lower", 
+#     for p_value in [1.7]:#[1.1, 1.2, 1.3, 1.5, 1.9]:
+#         for rho in rhos:
+#             for zero_tol in zero_tols:
+#                 models.append(
+#                     LGBCorrTweediePenalty(
+#                         rho=rho, 
+#                         tweedie_p=p_value, 
+#                         # target_is_log=False, 
+#                         zero_grad_tol=zero_tol, 
+#                         eps_y=1e-12, 
+#                         eps_var=1e-12,
+#                         clip_score=50.0, # 20-50 for stability
+#                         gsc_mode=gsc_mode,        # "taylor", "upper", "lower"
+#                         gsc_apply_to="grad",      # "grad" or "hess"
+#                         gsc_M=max(2-p_value,p_value-1),
+#                         gsc_M_mult=1.0,
+#                         use_corr=True, 
+#                         verbose_print=True,
+#                         lgbm_params=lgbm_params,
+#                     )
+#                 )
+#                 # models.append(
+#                 #     LGBCovTweediePenalty(
+#                 #         rho = float(rho),
+#                 #         tweedie_p= p_value,
+#                 #         target_is_log = False,
+#                 #         zero_grad_tol = zero_tol,
+#                 #         eps_y = 1e-12,
+#                 #         clip_score = 15,
+#                 #         gsc_mode = gsc_mode,
+#                 #         gsc_apply_to = "grad",
+#                 #         gsc_M = max(2-p_value,p_value-1),
+#                 #         # verbose_print = bool(verbose_print)
+#                 #     )
+#                 # )
 
         
 run_in_parallel = True
@@ -561,26 +606,37 @@ if run_in_parallel == False:
             if model_name not in baseline_models:
                 model.keep = r_per # update the percentage
             print("Fitting model: ", model_name)
-            model.fit(X_train, y_train_log)
+            if "LGBCorrTweediePenalty" in str(model_name) or "LGBCovTweediePenalty" in str(model_name):
+                print("AAAAAAAAAAAAAAAAAAAAAAAAAA")
+                model.fit(X_train, y_train)   
+            else: 
+                model.fit(X_train, y_train_log)
 
             # Prediction
             y_pred_log = model.predict(X_train)
-            metrics_train = compute_taxation_metrics(y_train_log, y_pred_log, scale="log")
+            if "LGBCorrTweediePenalty" in str(model_name) or "LGBCovTweediePenalty" in str(model_name):
+                metrics_train = compute_taxation_metrics(y_train, y_pred_log, scale="price")
+            else:
+                metrics_train = compute_taxation_metrics(y_train_log, y_pred_log, scale="log")
             results_train[model_name].append(metrics_train)
 
             # Out of sample Prediction
             y_pred_log = model.predict(X_val)
-            metrics_val = compute_taxation_metrics(y_val_log, y_pred_log, scale="log")
+            if "LGBCorrTweediePenalty" in str(model_name) or "LGBCovTweediePenalty" in str(model_name):
+                metrics_val = compute_taxation_metrics(y_val, y_pred_log, scale="price")
+            else:
+                metrics_val = compute_taxation_metrics(y_val_log, y_pred_log, scale="log")
             results_val[model_name].append(metrics_val)
 
     print(results_to_dataframe(results_train, r_values=r_list, source="train"))
     print(results_to_dataframe(results_val, r_values=r_list, source="val"))
 
-    print("Saving results...")
+    print("Generating plots for each metric...")
 
     plotting_dict_of_models_results(results_train, r_list=r_list, source="train")
     plotting_dict_of_models_results(results_val, r_list=r_list, source="val")
 
+    print("Saved plots!!")
 
 else: 
 
@@ -613,20 +669,28 @@ else:
         
         if not is_baseline:
             model.keep = r_per 
-            print("="*100)
-            print("\n\n UPDATED THE MODEL: ", model, " \n\n")
-            print("="*100)
         
         # Note: Some models might trigger an internal copy if they require a specific 
         # memory layout (e.g., C-contiguous vs Fortran-contiguous). 
         # Standard sklearn models are usually efficient with read-only mmaps.
-        model.fit(X_train, y_train_log)
+        if "LGBCorrTweediePenalty" in str(model_name) or "LGBCovTweediePenalty" in str(model_name):
+            print("AAAAAAAAAAAAAAAAAAAAAAAAAA")
+            model.fit(X_train, y_train)   
+        else: 
+            model.fit(X_train, y_train_log)
+
 
         y_pred_log_train = model.predict(X_train)
-        metrics_train = compute_taxation_metrics(y_train_log, y_pred_log_train, scale="log")
+        if "LGBCorrTweediePenalty" in str(model_name) or "LGBCovTweediePenalty" in str(model_name):
+            metrics_train = compute_taxation_metrics(y_train, y_pred_log_train, scale="price")
+        else:
+            metrics_train = compute_taxation_metrics(y_train_log, y_pred_log_train, scale="log")
 
         y_pred_log_val = model.predict(X_val)
-        metrics_val = compute_taxation_metrics(y_val_log, y_pred_log_val, scale="log")
+        if "LGBCorrTweediePenalty" in str(model_name) or "LGBCovTweediePenalty" in str(model_name):
+            metrics_val = compute_taxation_metrics(y_val, y_pred_log_val, scale="price")
+        else:
+            metrics_val = compute_taxation_metrics(y_val_log, y_pred_log_val, scale="log")
         
         return model_name, metrics_train, metrics_val
 
@@ -706,10 +770,11 @@ else:
     print(results_to_dataframe(results_train, r_values=keep_percentages, source="train"))
     print(results_to_dataframe(results_val, r_values=keep_percentages, source="val"))
 
-    print("Saving results...")
+    print("Generating plots for each metric...")
+    plotting_dict_of_models_results(results_train, r_list=keep_percentages, source="train", n_jobs=N_JOBS)
+    plotting_dict_of_models_results(results_val, r_list=keep_percentages, source="val", n_jobs=N_JOBS)
 
-    plotting_dict_of_models_results(results_train, r_list=keep_percentages, source="train")
-    plotting_dict_of_models_results(results_val, r_list=keep_percentages, source="val")
+    print("Saved plots!!")
 
 exit()
 

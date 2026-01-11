@@ -952,8 +952,459 @@ class LGBMomentPenalty:
         return f"LGBMomentPenalty({self.rho}, K={self.K}, l_norm={self.lambda_norm})"
 
 
+###
+# 5) Teaddier( Gamma-Poisson like loss) verison with cov penalty for using in prices rather than log-prices
+##
+
+class LGBCorrTweediePenalty:
+    """
+    LightGBM custom objective (raw score = s = log(mu)):
+
+        Tweedie NLL (log-link)  +  0.5 * rho * n * Corr(r, y)^2
+
+    where:
+        mu = exp(s)                                (mean on price scale)
+        r  = mu / y                                (ratio on price scale)
+        Corr(r,y) uses y-centered y and r-centered r (scale-free, avoids $-units blowups)
+
+    Why correlation (not covariance)?
+      - Cov(r,y) has units of dollars and can be huge even when Corr is small.
+      - Corr(r,y) is dimensionless and typically O(1), so the penalty magnitude is controlled.
+
+    Tweedie base derivatives (LightGBM-style in terms of score s=log(mu)):
+        grad_base = -y * exp((1-p)*s) + exp((2-p)*s)
+        hess_base = -y*(1-p)*exp((1-p)*s) + (2-p)*exp((2-p)*s)
+      with p in [1, 2).  (Commonly p ~ 1.1-1.95 for positive, skewed targets.)
+
+    Correlation penalty (global statistic, dense Hessian in principle):
+      We use a diagonal approximation for hess_pen:
+          hess_pen_i ≈ rho * n * (d corr / d s_i)^2
+
+    Optional GSC v=2-style "upper bound damping" (heuristic):
+      - Compute per-sample 1D Newton step: step_i = -g_i/h_i
+      - beta_i = M * |step_i|
+      - tau_i = log(1+beta_i)/beta_i   ("upper" damping)
+      - apply_to="grad": g_i <- tau_i * g_i
+        apply_to="hess": h_i <- h_i / tau_i
+      This shrinks the Newton step in exp-family losses to improve stability.
+    """
+
+    def __init__(
+        self,
+        rho=1e-3,
+        tweedie_p=1.5,
+        zero_grad_tol=1e-12,
+        eps_y=1e-12,
+        eps_var=1e-12,
+        clip_score=20.0,
+        # GSC damping (optional)
+        gsc_mode="taylor",          # "taylor" or "upper" (recommended). "lower" omitted for safety.
+        gsc_apply_to="grad",        # "grad" or "hess"
+        gsc_M=None,                 # if None: max(2-p, p-1)
+        gsc_M_mult=1.0,             # multiplies default M
+        # penalty options
+        use_corr=True,              # keep True; here mainly for clarity/compat
+        verbose_print=True,
+        lgbm_params=None,
+    ):
+        self.rho = float(rho)
+        self.p = float(tweedie_p)
+        self.zero_grad_tol = float(zero_grad_tol)
+        self.eps_y = float(eps_y)
+        self.eps_var = float(eps_var)
+        self.clip_score = float(clip_score)
+
+        self.gsc_mode = gsc_mode
+        self.gsc_apply_to = gsc_apply_to
+        self.gsc_M = gsc_M
+        self.gsc_M_mult = float(gsc_M_mult)
+
+        self.use_corr = bool(use_corr)
+        self.verbose_print = bool(verbose_print)
+
+        self.model = lgb.LGBMRegressor(**(lgbm_params or {}))
+
+        # cached from fit()
+        self.y_mean_ = None
+        self.y_std_ = None
+        self.n_ = None
+        self.gsc_M_ = None
+
+    def fit(self, X, y):
+        y = np.asarray(y, dtype=float)
+
+        if np.any(y <= 0):
+            raise ValueError("Tweedie with log-link requires y > 0 (prices must be positive).")
+
+        if not (1.0 <= self.p < 2.0):
+            raise ValueError("For LightGBM Tweedie, use tweedie_p in [1, 2).")
+
+        self.y_mean_ = float(np.mean(y))
+        self.y_std_ = float(np.std(y))
+        self.y_std_ = max(self.y_std_, self.eps_var)
+        self.n_ = int(y.size)
+
+        # Default 1D exp-family constant for the composed Tweedie exp terms
+        if self.gsc_M is None:
+            base_M = max(2.0 - self.p, self.p - 1.0, 1e-12)
+            self.gsc_M_ = float(self.gsc_M_mult * base_M)
+        else:
+            self.gsc_M_ = float(self.gsc_M)
+
+        self.model.set_params(objective=self.fobj)
+        self.model.fit(X, y)
+        return self
+
+    def predict_score(self, X):
+        """Return raw score s = log(mu)."""
+        return self.model.predict(X)
+
+    def predict(self, X):
+        """Return mean prediction mu on the price scale."""
+        s = self.model.predict(X)
+        s = np.clip(s, -self.clip_score, self.clip_score)
+        return np.exp(s)
+
+    # ---- GSC helper ----
+    def _tau_upper(self, beta):
+        beta = np.asarray(beta, dtype=float)
+        out = np.ones_like(beta)
+        m = beta > 1e-12
+        out[m] = np.log1p(beta[m]) / beta[m]
+        return out
+
+    # ---- custom objective ----
+    def fobj(self, y_true, y_score):
+        y = np.asarray(y_true, dtype=float)
+        s = np.asarray(y_score, dtype=float)
+        n = float(s.size)
+
+        # safety for exp()
+        s = np.clip(s, -self.clip_score, self.clip_score)
+
+        p = self.p
+
+        # ========== Tweedie base gradients/hessians (in score space) ==========
+        exp_1 = np.exp((1.0 - p) * s)   # mu^(1-p)
+        exp_2 = np.exp((2.0 - p) * s)   # mu^(2-p)
+
+        grad_base = (-y * exp_1) + exp_2
+        hess_base = (-y * (1.0 - p) * exp_1) + ((2.0 - p) * exp_2)
+        hess_base = np.maximum(hess_base, self.zero_grad_tol)
+
+        # ========== Optional GSC "upper" damping (recommended for stability) ==========
+        if self.gsc_mode is not None and self.gsc_mode != "taylor":
+            if self.gsc_mode != "upper":
+                raise ValueError("Use gsc_mode='taylor' or 'upper' (lower is intentionally omitted).")
+
+            step_1d = -grad_base / (hess_base + self.zero_grad_tol)
+            beta = self.gsc_M_ * np.abs(step_1d)
+            tau = self._tau_upper(beta)
+            tau = np.maximum(tau, 1e-12)
+
+            if self.gsc_apply_to == "grad":
+                grad_base = tau * grad_base
+            elif self.gsc_apply_to == "hess":
+                hess_base = hess_base / tau
+            else:
+                raise ValueError("gsc_apply_to must be 'grad' or 'hess'.")
+
+            hess_base = np.maximum(hess_base, self.zero_grad_tol)
+
+        # ========== Correlation penalty on r = mu/y (price-scale ratio) ==========
+        mu = np.exp(s)
+        denom = np.maximum(y, self.eps_y)
+        r = mu / denom
+
+        yc = y - self.y_mean_
+        sy = self.y_std_  # constant from fit()
+
+        # stats of r
+        c = float(np.mean(r * yc))          # mean(r * (y-mean_y))
+        m1 = float(np.mean(r))
+        m2 = float(np.mean(r * r))
+        var_r = max(m2 - m1 * m1, self.eps_var)
+        sr = np.sqrt(var_r)
+
+        # corr = c / (sr * sy)
+        corr = c / (sr * sy)
+
+        # derivatives wrt score s
+        # dr/ds = r
+        dc_ds = (yc * r) / n
+        dm1_ds = r / n
+        dm2_ds = (2.0 * r * r) / n
+        dvar_ds = dm2_ds - 2.0 * m1 * dm1_ds
+        dsr_ds = 0.5 * dvar_ds / sr
+
+        # dcorr/ds = ( (dc/sr) - c*(dsr/sr^2) ) / sy
+        dcorr_ds = (dc_ds / sr - c * dsr_ds / (sr * sr)) / sy
+
+        # penalty = 0.5 * rho * n * corr^2
+        # grad_pen = rho * n * corr * dcorr_ds
+        # hess_pen (diag approx) = rho * n * (dcorr_ds)^2
+        grad_pen = self.rho * n * corr * dcorr_ds
+        hess_pen = self.rho * n * (dcorr_ds ** 2)
+
+        grad = grad_base + grad_pen
+        hess = hess_base + hess_pen
+
+        # numerical cleanup
+        grad = np.where(np.isfinite(grad), grad, 0.0)
+        hess = np.where(np.isfinite(hess), hess, self.zero_grad_tol)
+        hess = np.maximum(hess, self.zero_grad_tol)
+
+        if self.verbose_print:
+            # Tweedie loss (up to constants) for monitoring
+            if abs(1.0 - p) > 1e-12 and abs(2.0 - p) > 1e-12:
+                tweedie_loss = (-y * exp_1) / (1.0 - p) + (exp_2) / (2.0 - p)
+                base_mean = float(np.mean(tweedie_loss))
+            else:
+                base_mean = float("nan")
+
+            pen_value = 0.5 * self.rho * n * (corr ** 2)
+
+            print(
+                f"[LGBCorrTweediePenalty] "
+                f"Base(Tweedie): {base_mean:.6f} | "
+                f"Corr(r,y): {corr:.6f} | Pen: {pen_value:.6f} | "
+                f"p={self.p:.3f} gsc={self.gsc_mode}/{self.gsc_apply_to}"
+            )
+
+        return grad, hess
+
+    def __str__(self):
+        return f"LGBCorrTweediePenalty(rho={self.rho}, p={self.p}, mode={self.gsc_mode})"
 
 
+
+import numpy as np
+import lightgbm as lgb
+
+
+class LGBCovTweediePenalty:
+    """
+    LightGBM objective: Tweedie NLL (log-link) + 0.5 * rho * n * (Cov(r, y))^2
+    where:
+        score = y_pred is the raw margin
+        mu    = exp(score)  (log-link)
+        r_i   = mu_i / y_i   (ratio in ORIGINAL price space)
+        Cov(r,y) = (1/n) * sum_i r_i * (y_i - y_mean)
+
+    Tweedie (variance power p in (1,2) typical):
+      Using score = log(mu), LightGBM’s built-in objective uses:
+        grad_base = -y * exp((1-p)*score) + exp((2-p)*score)
+        hess_base = -y*(1-p)*exp((1-p)*score) + (2-p)*exp((2-p)*score)
+      (this corresponds to the Tweedie NLL written in terms of mu, composed with mu=exp(score)).
+      See discussion of metric-vs-objective in LightGBM Tweedie. :contentReference[oaicite:1]{index=1}
+
+    Cov penalty (direct, like your LGBCovPenalty but with mu=exp(score)):
+      cov = mean(r * yc), yc = y - y_mean
+      r   = mu / y
+      d r / d score = r
+      d cov / d score_i = (1/n) * yc_i * r_i
+
+      penalty = 0.5 * rho * n * cov^2
+      grad_pen_i = rho * n * cov * d cov/d score_i = rho * cov * yc_i * r_i
+      hess_pen_i (diag approx) = rho * n * (d cov/d score_i)^2
+                               = rho * (yc_i^2 * r_i^2) / n
+
+    Optional "GSC v=2 upper-bound damping" (heuristic inside LightGBM):
+      - Compute the 1D Newton step per sample: step_i = -grad_base / hess_base
+      - beta_i = M * |step_i|
+      - tau_i  = log(1+beta_i)/beta_i   (upper-bound damped Newton factor)
+      - Then either:
+          apply_to="grad": grad_base <- tau_i * grad_base   (shrinks step)
+          apply_to="hess": hess_base <- hess_base / tau_i   (also shrinks step)
+      NOTE: because LightGBM aggregates grads/hessians per leaf, this is only an approximation,
+            but it often stabilizes “exp-family” losses.
+
+    Parameters
+    ----------
+    rho : float
+        Penalty weight for covariance term.
+    tweedie_p : float
+        Tweedie variance power p (LightGBM calls this tweedie_variance_power).
+        Commonly p in (1,2) for compound Poisson-Gamma style severity.
+    target_is_log : bool
+        If True, y passed to fit() is log(price). The Tweedie loss still expects y in original space,
+        so we internally map y_price = exp(y_log). (This is mainly to match your current pipeline.)
+    gsc_mode : {"taylor","upper","lower"}
+        Damping choice. "taylor" = no damping. "upper" = log(1+beta)/beta. "lower" is optional
+        and requires beta < 1 (otherwise we fall back to upper).
+    gsc_apply_to : {"grad","hess"}
+        Where to apply tau (see above).
+    gsc_M : float or None
+        If None, we use max(2-p, p-1) as a simple 1D “exp-mixture” bound constant for Tweedie.
+    """
+
+    def __init__(
+        self,
+        rho=1e-3,
+        tweedie_p=1.5,
+        target_is_log=False,
+        zero_grad_tol=1e-12,
+        eps_y=1e-12,
+        clip_score=50.0,
+        gsc_mode="taylor",        # "taylor", "upper", "lower"
+        gsc_apply_to="grad",      # "grad" or "hess"
+        gsc_M=None,
+        lgbm_params=None,
+        verbose_print=True,
+    ):
+        self.rho = float(rho)
+        self.p = float(tweedie_p)
+        self.target_is_log = bool(target_is_log)
+        self.zero_grad_tol = float(zero_grad_tol)
+        self.eps_y = float(eps_y)
+        self.clip_score = float(clip_score)
+        self.gsc_mode = gsc_mode
+        self.gsc_apply_to = gsc_apply_to
+        self.gsc_M = gsc_M
+        self.verbose_print = bool(verbose_print)
+
+        self.model = lgb.LGBMRegressor(**(lgbm_params or {}))
+
+    def fit(self, X, y):
+        y = np.asarray(y, dtype=float)
+        if self.target_is_log:
+            self.y_price_ = np.exp(np.clip(y, -self.clip_score, self.clip_score))
+        else:
+            self.y_price_ = y
+
+        self.y_mean_ = float(np.mean(self.y_price_))
+        self.n_ = int(self.y_price_.size)
+
+        # default M if not provided
+        if self.gsc_M is None:
+            # simple safe-ish constant for Tweedie exp terms
+            self.gsc_M_ = float(max(2.0 - self.p, self.p - 1.0, 1e-12))
+        else:
+            self.gsc_M_ = float(self.gsc_M)
+
+        self.model.set_params(objective=self.fobj)
+        self.model.fit(X, y)
+        return self
+
+    def predict(self, X):
+        # LightGBM will output "score" for our custom objective;
+        # if you want mu (price-scale mean), do exp(score).
+        score = self.model.predict(X)
+        return score
+
+    def _tau_upper(self, beta):
+        beta = np.asarray(beta, dtype=float)
+        out = np.ones_like(beta)
+        m = beta > 1e-12
+        out[m] = np.log1p(beta[m]) / beta[m]
+        return out
+
+    def _tau_lower(self, beta):
+        # lower: -log(1-beta)/beta, requires beta<1; fallback to upper if not
+        beta = np.asarray(beta, dtype=float)
+        out = self._tau_upper(beta)
+        m = beta < (1.0 - 1e-12)
+        out[m] = (-np.log1p(-beta[m])) / beta[m]
+        return out
+
+    def fobj(self, y_true, y_score):
+        y_true = np.asarray(y_true, dtype=float)
+        y_score = np.asarray(y_score, dtype=float)
+        n = y_score.size
+
+        # price-space labels for Tweedie + cov penalty
+        if self.target_is_log:
+            y_price = np.exp(np.clip(y_true, -self.clip_score, self.clip_score))
+        else:
+            y_price = y_true
+
+        # raw score is log(mu)
+        s = np.clip(y_score, -self.clip_score, self.clip_score)
+
+        # ===== Tweedie base grads/hess (LightGBM-style: in terms of score=log(mu)) =====
+        p = self.p
+        exp_1 = np.exp((1.0 - p) * s)  # = mu^(1-p)
+        exp_2 = np.exp((2.0 - p) * s)  # = mu^(2-p)
+
+        grad_base = (-y_price * exp_1) + exp_2
+        hess_base = (-y_price * (1.0 - p) * exp_1) + ((2.0 - p) * exp_2)
+
+        # keep Hessian positive (LightGBM expects this)
+        hess_base = np.maximum(hess_base, self.zero_grad_tol)
+
+        # ===== Optional GSC-style damped-Newton heuristic for exp-family curvature =====
+        if self.gsc_mode and self.gsc_mode != "taylor":
+            step_1d = -grad_base / (hess_base + self.zero_grad_tol)
+            beta = self.gsc_M_ * np.abs(step_1d)
+
+            if self.gsc_mode == "upper":
+                tau = self._tau_upper(beta)
+            elif self.gsc_mode == "lower":
+                tau = self._tau_lower(beta)
+            else:
+                raise ValueError(f"Unknown gsc_mode={self.gsc_mode}")
+
+            tau = np.maximum(tau, 1e-12)
+
+            if self.gsc_apply_to == "grad":
+                grad_base = tau * grad_base
+            elif self.gsc_apply_to == "hess":
+                hess_base = hess_base / tau
+            else:
+                raise ValueError(f"Unknown gsc_apply_to={self.gsc_apply_to}")
+
+            hess_base = np.maximum(hess_base, self.zero_grad_tol)
+
+        # ===== Cov penalty in price space, using mu=exp(score) =====
+        mu = np.exp(s)
+        denom = np.maximum(np.abs(y_price), self.eps_y)
+        r = mu / denom
+        yc = (y_price - self.y_mean_)
+
+        cov = float(np.mean(r * yc))  # E[yc]=0 by definition, so this is covariance up to scaling
+
+        # penalty gradients/hessians (diag approx)
+        # d cov / d s_i = (1/n) * yc_i * r_i
+        a = (yc * r) / float(n)
+        grad_pen = self.rho * float(n) * cov * a
+        hess_pen = self.rho * float(n) * (a ** 2)
+
+        grad = grad_base + grad_pen
+        hess = hess_base + hess_pen
+
+        # numerical safety
+        grad = np.where(np.isfinite(grad), grad, 0.0)
+        hess = np.where(np.isfinite(hess), hess, self.zero_grad_tol)
+        hess = np.maximum(hess, self.zero_grad_tol)
+
+        if self.verbose_print:
+            try:
+                corr = float(np.corrcoef(r, y_price)[0, 1])
+            except Exception:
+                corr = float("nan")
+
+            # Tweedie NLL piece (up to constants)
+            # L = - y * mu^(1-p)/(1-p) + mu^(2-p)/(2-p)
+            # using exp_1, exp_2: mu^(1-p)=exp_1, mu^(2-p)=exp_2
+            if abs(1.0 - p) > 1e-12 and abs(2.0 - p) > 1e-12:
+                tweedie_loss = (-y_price * exp_1) / (1.0 - p) + (exp_2) / (2.0 - p)
+                base_mean = float(np.mean(tweedie_loss))
+            else:
+                base_mean = float("nan")
+
+            pen_value = 0.5 * self.rho * float(n) * (cov ** 2)
+
+            print(
+                f"[LGBCovTweediePenalty] "
+                f"Base(Tweedie): {base_mean:.6f} | "
+                f"Cov: {cov:.3e} | Pen: {pen_value:.6f} | Corr(r,y): {corr:.6f} | "
+                f"p={self.p:.3f} gsc={self.gsc_mode}/{self.gsc_apply_to}"
+            )
+
+        return grad, hess
+
+    def __str__(self):
+        return f"LGBCovTweediePenalty(rho={self.rho}, p={self.p}, mode={self.gsc_mode})"
 
 
 
