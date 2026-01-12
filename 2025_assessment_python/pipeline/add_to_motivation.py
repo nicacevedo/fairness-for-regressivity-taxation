@@ -1,8 +1,10 @@
+# DELTE
+
 
 # Basic clustering for exploratory plots (train on X_train, assign to X_val)
 n_clusters = 3
 cluster_seed = seed
-split_by_cluster = True
+split_by_cluster = False
 if sp.issparse(X_train):
     cluster_scaler = StandardScaler(with_mean=False)
     X_train_cluster = cluster_scaler.fit_transform(X_train)
@@ -143,6 +145,8 @@ def _run_clustered_model_diagnostics(
         print(y_val.describe())
         print(y_pred_val.describe())
 
+        metrics_ = compute_taxation_metrics(log_y_val, log_y_pred_val, scale="log")
+
         plt.figure(figsize=(15,6))
         y_pred_val.hist(bins=500)
         plt.savefig(f"./temp/plots/histograms/test_pred_{model_tag}.png", dpi=600)
@@ -173,6 +177,7 @@ def _run_clustered_model_diagnostics(
         _plot_trend_lines(plt.gca(), x, y_, cluster_labels_val, n_clusters, cluster_cmap)
         plt.ylim([-1, 7])
         plt.legend()
+        plt.title(f"R2:{metrics_['R2']:.4f} | MAPE:{metrics_['MAPE']:.4f} | PRD:{metrics_['PRD']:.4f} | PRB:{metrics_['PRB']:.4f} | COD:{metrics_['COD']:.4f} |")
         plt.savefig(f"./temp/plots/real_vs_pred/ratio_{model_tag}.png", dpi=600)
         plt.close()
 
@@ -196,6 +201,7 @@ def _run_clustered_model_diagnostics(
         _plot_trend_lines(plt.gca(), x, y_, cluster_labels_val, n_clusters, cluster_cmap)
         # plt.xscale("log")
         plt.ylim([.8, 1.2])
+        plt.title(f"R2:{metrics_['R2']:.4f} | MAPE:{metrics_['MAPE']:.4f} | PRD:{metrics_['PRD']:.4f} | PRB:{metrics_['PRB']:.4f} | COD:{metrics_['COD']:.4f} |")
         plt.legend()
         plt.savefig(f"./temp/plots/real_vs_pred/log_ratio_{model_tag}.png", dpi=600)
         plt.close()
@@ -220,6 +226,7 @@ def _run_clustered_model_diagnostics(
         _plot_trend_lines(plt.gca(), x, y_, cluster_labels_val, n_clusters, cluster_cmap)
         # plt.ylim([.8, 1.2])
         plt.legend()
+        plt.title(f"R2:{metrics_['R2']:.4f} | MAPE:{metrics_['MAPE']:.4f} | PRD:{metrics_['PRD']:.4f} | PRB:{metrics_['PRB']:.4f} | COD:{metrics_['COD']:.4f} |")
         plt.savefig(f"./temp/plots/real_vs_pred/residuals_pred_{model_tag}.png", dpi=600)
         plt.close()
 
@@ -242,16 +249,45 @@ def _run_clustered_model_diagnostics(
         cbar.set_ticklabels([f"C{k}" for k in range(n_clusters)])
         _plot_trend_lines(plt.gca(), x, y_, cluster_labels_val, n_clusters, cluster_cmap)
         # plt.ylim([.8, 1.2])
+        plt.title(f"R2:{metrics_['R2']:.4f} | MAPE:{metrics_['MAPE']:.4f} | PRD:{metrics_['PRD']:.4f} | PRB:{metrics_['PRB']:.4f} | COD:{metrics_['COD']:.4f} |")
         plt.legend()
         plt.savefig(f"./temp/plots/real_vs_pred/log_residuals_pred_{model_tag}.png", dpi=600)
         plt.close()
 
 # DELETE
+rho_ = 1e3
 models_ = [
-    LGBCovPenalty(rho=12000, zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params),
-    LGBSmoothPenalty(rho=6000, zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params),
+    LGBCovDispPenalty(rho_cov=rho_*np.std(y_val_log), rho_disp=0, cov_mode="cov", disp_mode="l2", zero_grad_tol=zero_tol, eps_y=1e-12, eps_std=1e-12, lgbm_params=lgbm_params),
+    LGBCovPenalty(rho=rho_, zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params),
+    # LGBSmoothPenalty(rho=rho_, zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params),
     lgb.LGBMRegressor(**lgbm_params),
 ]
+
+# for kind_ in ["regime"]:
+
+#     cfg = PipelineConfig(
+#         base=LGBPenaltyConfig(
+#             penalty='smooth_surr',# "mse", "smooth_surr", "cov", "prb_slope",   # example: base uses PRB-style penalty too
+#             rho=rho_,
+#             ratio_mode="div",#"diff",
+#             lgbm_params=lgbm_params,
+#         ),
+#         use_calibration=True,
+#         calib=CalibratorALMConfig(
+#             kind=kind_, # "1d", "regime",
+#             regime_mode="kmeans",
+#             n_regimes=n_clusters,
+#             fairness_metric="prb_slope",# "cov", "prb_slope",
+#             ratio_mode="div",#"diff",
+#             strata_mode="regimes",#"none", "labels", "pred_quantiles", "regimes"   # recommended if you have exogenous strata labels
+#             n_strata=n_clusters,
+#             # ALM opt (2nd stage)
+#             max_abs_correction=0.20,
+#             stop_tol=1e-4,
+#         ),
+#     )
+#     models_.append(RegressivityConstrainedLogModel(cfg))
+
 _run_clustered_model_diagnostics(
     models_,
     X_train,
@@ -266,3 +302,6 @@ _run_clustered_model_diagnostics(
 )
 
 exit()
+
+
+# DELTE

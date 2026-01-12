@@ -43,14 +43,14 @@ from recipes.recipes_pipelined import build_model_pipeline, build_model_pipeline
 from src_.motivation_utils import analyze_fairness_by_value, calculate_detailed_statistics, plot_tradeoff_analysis, compute_taxation_metrics
 from fairness_models.linear_fairness_models import LeastAbsoluteDeviationRegression, MaxDeviationConstrainedLinearRegression, LeastMaxDeviationRegression, GroupDeviationConstrainedLinearRegression, StableRegression, LeastProportionalDeviationRegression#LeastMSEConstrainedRegression, LeastProportionalDeviationRegression
 from fairness_models.linear_fairness_models import MyGLMRegression, GroupDeviationConstrainedLogisticRegression, RobustStableLADPRDCODRegressor, StableAdversarialSurrogateRegressor, StableAdversarialSurrogateRegressor2
-from fairness_models.mixture_boosting_fairness_models import MoELGBSmoothPenalty
+from fairness_models.mixture_boosting_fairness_models import * #MoELGBSmoothPenalty
 
 # My boosting models
 import lightgbm as lgb
 # from fairness_models.boosting_fairness_models import custom_objective, custom_eval
 # from fairness_models.boosting_fairness_models import make_constrained_mse_objective, make_covariance_metric
 from fairness_models.boosting_fairness_models import LGBCustomObjective,  LGBPrimalDual#, FairGBMCustomObjective
-from fairness_models.boosting_fairness_models import LGBSmoothPenalty, LGBPrimalDualImproved, LGBCovPenalty, LGBMomentPenalty, LGBCovTweediePenalty, LGBCorrTweediePenalty # post primal-dual methods
+from fairness_models.boosting_fairness_models import LGBSmoothPenalty, LGBPrimalDualImproved, LGBCovPenalty, LGBMomentPenalty, LGBCovDispPenalty#, LGBCovTweediePenalty, LGBCorrTweediePenalty # post primal-dual methods
 
 
 # UC Irvine data
@@ -360,7 +360,7 @@ keep_percentages = np.linspace(0.1, 1, 2)
 models = [
     LinearRegression(fit_intercept=fit_intercept, n_jobs=n_jobs),
     # LeastAbsoluteDeviationRegression(fit_intercept=fit_intercept, solver="MOSEK"),
-    ElasticNet(fit_intercept=fit_intercept, l1_ratio=l1/(l1 + l2), alpha=(l1 + l2), selection="random", random_state=random_state, warm_start=True),
+    # ElasticNet(fit_intercept=fit_intercept, l1_ratio=l1/(l1 + l2), alpha=(l1 + l2), selection="random", random_state=random_state, warm_start=True),
     # RandomForestRegressor(n_estimators=n_jobs, criterion='squared_error', max_depth=max_depth, min_samples_split=50, min_samples_leaf=30, bootstrap=True, n_jobs=n_jobs, random_state=random_state, warm_start=True, ccp_alpha=1e-3),
     # GradientBoostingRegressor(loss='squared_error', learning_rate=1e-3, n_estimators=100, subsample=0.8, criterion='friedman_mse', min_samples_split=50, min_samples_leaf=20, max_depth=3, random_state=random_state, alpha=0.9, warm_start=True, validation_fraction=0.1, tol=1e-4, ccp_alpha=1e-3)
     # HistGradientBoostingRegressor(loss='squared_error', learning_rate=lr, max_iter=max_iter, max_leaf_nodes=31, max_depth=max_depth, min_samples_leaf=30, l2_regularization=l2, max_bins=255, 
@@ -431,6 +431,7 @@ lgbm_params = {
     "boosting_type": "gbdt",
     "num_leaves": 31,
     "max_depth": max_depth,
+    # "num_leaves":  2**(max_depth)//8, # must be at most 2^max_depth 
     "learning_rate": lr,
     "n_estimators": max_iter,
     "subsample_for_bin": 200000,
@@ -450,7 +451,7 @@ lgbm_params = {
 }
 
 # rhos = [5e2, 1e3, 5e3, 1e4]#[5e2, 1e3, 5e3, 1e4] #[5e2, 1e3, 5e3, 1e4] # Last ones: 5e2,5e3,
-rhos = np.linspace(1e3, 1e4, 10)
+rhos = [1e2, 5e2, 1e3, 5e3, 1e4] #np.linspace(1e2, 1e4, 3)
 rhos = [int(rho) for rho in rhos]
 adversary_types = ["overall"]#$, "individual"]
 zero_tols = [0] # 1e-8, 1e-6
@@ -500,13 +501,24 @@ for rho in rhos:
 #         # dual_update="mirror",  # "mirror" or "topk"
 
 
-# 8. Direct cov penalty (?)
-for rho in rhos:
-    for zero_tol in zero_tols:
-        models.append(
-            LGBCovPenalty(rho=rho, zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params)
-        )
-    # not adversarial?
+# # 8. Direct cov penalty (?)
+# for rho in rhos:
+#     for zero_tol in zero_tols:
+#         models.append(
+#             LGBCovPenalty(rho=rho, zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params)
+#         )
+#     # not adversarial?
+
+# 8.5 Direct cov penalty + var penalty: var(r)
+rhos_disp = [1e1, 1e2, 1e3]
+for rho_disp in rhos_disp:
+    for rho in rhos:
+        for zero_tol in zero_tols:
+            models.append(
+                LGBCovDispPenalty(rho_cov=rho*np.std(y_val_log), rho_disp=rho_disp, cov_mode="cov", disp_mode="l2", zero_grad_tol=zero_tol, eps_y=1e-12, eps_std=1e-12, lgbm_params=lgbm_params)
+            )
+        # not adversarial?
+
 
 # rhos = [5e0, 1e1, 15]
 # # 9. Direct K-moments penalty
@@ -572,8 +584,40 @@ for rho in rhos:
 #                 # )
 
         
-run_in_parallel = True
+# 10. 2-stage correction of clusters
+for rho in rhos:
+    # for zero_tol in zero_tols:
+    cfg = PipelineConfig(
+        base=LGBPenaltyConfig(
+            penalty='cov',#"prb_slope",   # example: base uses PRB-style penalty too
+            rho=rho,
+            ratio_mode="div",#"diff",
+            lgbm_params=lgbm_params,
+        ),
+        use_calibration=True,
+        calib=CalibratorALMConfig(
+            kind="regime", # "1d", "regime",
+            regime_mode="kmeans",
+            n_regimes=3,
+            fairness_metric="cov",#"prb_slope",
+            ratio_mode="div",#"diff",
+            strata_mode="regimes",#"labels",   # recommended if you have exogenous strata labels
+            n_strata=3,
+            max_abs_correction=0.20,
+            stop_tol=1e-4,
+        ),
+        # calibration_cv_folds=5
+    )
 
+    # Z_train / Z_test: regime features (NOT y), shape (n, q)
+    model = RegressivityConstrainedLogModel(cfg)#.fit(X_train, y_train) #, regime_features=Z_train)
+    models.append(model)
+
+
+
+
+
+run_in_parallel = True
 
 if run_in_parallel == False:
 
@@ -771,8 +815,44 @@ else:
     print(results_to_dataframe(results_val, r_values=keep_percentages, source="val"))
 
     print("Generating plots for each metric...")
-    plotting_dict_of_models_results(results_train, r_list=keep_percentages, source="train", n_jobs=N_JOBS)
-    plotting_dict_of_models_results(results_val, r_list=keep_percentages, source="val", n_jobs=N_JOBS)
+    n_clusters = 3
+    split_by_cluster = False
+    plotting_dict_of_models_results(results_train, r_list=keep_percentages, source="train", n_jobs=N_JOBS,
+                                    # scatter_config={
+                                    #         "models":models,
+                                    #         "model_names":model_names,
+                                    #         "X_train":X_train,
+                                    #         "y_train":y_train,
+                                    #         "X_val":X_val,
+                                    #         "y_val":y_val,
+                                    #         "y_train_log":y_train_log,
+                                    #         "y_val_log":y_val_log,
+                                    #         "n_clusters":n_clusters,
+                                    #         "cluster_seed":seed,
+                                    #         "fit_models":True,
+                                    #         "split_by_cluster":split_by_cluster,
+                                    #         "include_clustered":True,
+                                    #         "include_overall":True,
+                                    # }
+                                    )
+    plotting_dict_of_models_results(results_val, r_list=keep_percentages, source="val", n_jobs=N_JOBS,
+                                    # scatter_config={
+                                    #         "models":models,
+                                    #         "model_names":model_names,
+                                    #         "X_train":X_train,
+                                    #         "y_train":y_train,
+                                    #         "X_val":X_val,
+                                    #         "y_val":y_val,
+                                    #         "y_train_log":y_train_log,
+                                    #         "y_val_log":y_val_log,
+                                    #         "n_clusters":n_clusters,
+                                    #         "cluster_seed":seed,
+                                    #         "fit_models":True,
+                                    #         "split_by_cluster":split_by_cluster,
+                                    #         "include_clustered":True,
+                                    #         "include_overall":True,
+                                    # }
+                                    )
 
     print("Saved plots!!")
 
