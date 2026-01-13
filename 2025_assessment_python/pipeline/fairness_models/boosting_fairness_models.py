@@ -632,7 +632,7 @@ class LGBCovPenalty:
         model_name = self.__str__()
         print(
             f"[{model_name.split('(')[0]}] "
-            f"MSE: {np.mean(mse_value):.6f} | Cov: {cov:.6e} | Pen: {pen_value:.6f} | Corr(r,y): {corr:.6f}"
+            f"Loss: {(np.mean(mse_value)+pen_value):.6f} | MSE: {np.mean(mse_value):.6f} | Cov: {cov:.6e} | Pen: {pen_value:.6f} | Corr(r,y): {corr:.6f}"
         )
 
         # base MSE grads/hess
@@ -1478,7 +1478,7 @@ class LGBBinIndepSurrogatePenalty:
         return self.model.predict(X)
 
     def __str__(self):
-        return f"LGBBinIndepSurrogatePenalty(rho={self.rho}, mode={self.ratio_mode}, bins={self._n_bins()})"
+        return f"LGBBinIndepSurrogatePenalty(rho={self.rho}, mode={self.ratio_mode}, bins={self.bins})" #self._n_bins()})"
 
     # ----------------------------
     # Custom objective for LightGBM
