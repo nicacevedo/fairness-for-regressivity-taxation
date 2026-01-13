@@ -343,16 +343,38 @@ def compute_taxation_metrics(y_real, y_pred, scale="log"):
         metrics["R2 (log)"] = r2_score(y_real_log, y_pred_log)
         metrics["RMSE"] = root_mean_squared_error(y_real, y_pred)
         metrics["MAE"] = mean_absolute_error(y_real, y_pred)
-        metrics["MdAE"] = median_absolute_error(y_real, y_pred)
+        # metrics["MdAE"] = median_absolute_error(y_real, y_pred)
         metrics["MAPE"] = mean_absolute_percentage_error(y_real, y_pred)
-        metrics["MdAPE"] = 100*median_absolute_error(y_real/y_pred, y_pred/y_pred)
+        # metrics["MdAPE"] = 100*median_absolute_error(y_real/y_pred, y_pred/y_pred)
 
         # # 1.5 Loss function
         # metrics["Loss"] = 
 
         # 2. My metrics of interest
+        import dcor # distance correlation 
+        from sklearn.feature_selection import mutual_info_regression
         ratios = y_pred / y_real
-        metrics["Corr ratio_y"] = np.corrcoef(ratios, y_real)[0,1]
+        metrics["Corr(r,y)"] = np.corrcoef(ratios, y_real)[0,1]
+        # metrics["Spearman"] = stats.spearmanr(ratios, y_real).statistic
+        # metrics["Kendall"] = stats.kendalltau(ratios, y_real).statistic
+        try:
+            metrics["MI"] = mutual_info_regression(ratios.reshape(-1, 1), y_real)[0]
+        except Exception:
+            ratios = ratios.to_numpy()
+            y_real = y_real.to_numpy()
+            metrics["MI"] = mutual_info_regression(ratios.reshape(-1, 1), y_real)[0]
+        # metrics["MIC"] = simplified_mic(ratios, y_real)
+        # print("Computed MIC!")
+        # metrics["RDC"] = rdc(ratios, y_real) # Randomized Dependence Coefficient
+        # print("Computed RDC!")
+        # d_corr, n_trials = 0, 10
+        # for _ in range(n_trials):
+        #     r_sub, y_sub = np.random.choice(ratios, replace=False, size=1000), np.random.choice(y_real, replace=False, size=1000)
+        #     d_corr += dcor.distance_correlation(r_sub, y_sub)
+        # metrics["dCorr(r,y)"] = d_corr/n_trials
+        metrics["dCorr(r,y)"] =  dcor.u_distance_correlation_sqr(ratios, y_real)
+        print("Computed dCorr!")
+        # metrics["cos(r,y)"] = (ratios @ y_real) / (np.linalg.norm(ratios) * np.linalg.norm(y_real))
         metrics["Var ratio"] = np.var(ratios)
         metrics["Median ratio"] = np.median(ratios)
         metrics["Mean ratio"] = np.mean(ratios)
@@ -376,63 +398,133 @@ def compute_taxation_metrics(y_real, y_pred, scale="log"):
         return metrics
 
 
-# # MKI helpers
-# def _to_1d_float_array(x):
-#     """Convert array-like to a 1D float numpy array."""
-#     a = np.asarray(x, dtype=float).reshape(-1)
-#     return a
+# relationship metrics (extra to kendall/pearson/corr)
+from scipy.stats import rankdata
+def rdc(x, y, k=20, s=1/6.0, n=1, regularizer=1e-5):
+    """
+    Computes the Randomized Dependence Coefficient with Regularization.
+    
+    Args:
+        x, y: 1D or 2D numpy arrays.
+        k: Number of random non-linear features.
+        s: Scale of random weights.
+        n: Number of repetitions.
+        regularizer: Ridge penalty (epsilon) to prevent overfitting on noise.
+    """
+    if n > 1:
+        values = []
+        for i in range(n):
+            values.append(rdc(x, y, k, s, 1, regularizer))
+        return np.median(values)
 
-# def _gini_like_from_ordered(values):
-#     """
-#     Gini formula applied to a *given order* (when order isn't by itself, this is a concentration-style coefficient).
-#     values must be nonnegative and not all zero.
-#     """
-#     v = _to_1d_float_array(values)
-#     if np.any(v < 0):
-#         raise ValueError("Values must be nonnegative for Gini-like computation.")
-#     n = v.size
-#     s = v.sum()
-#     if n == 0 or s <= 0:
-#         return np.nan
-#     i = np.arange(1, n + 1, dtype=float)
-#     return float((2.0 * np.dot(i, v)) / (n * s) - (n + 1.0) / n)
+    # 1. Reshape and Rank Transform (Copula)
+    if len(x.shape) == 1: x = x.reshape(-1, 1)
+    if len(y.shape) == 1: y = y.reshape(-1, 1)
+    
+    # Transform to uniform [0,1]
+    x = rankdata(x, axis=0) / x.shape[0]
+    y = rankdata(y, axis=0) / y.shape[0]
 
-# def mki(estimate, sale_price, *, dropna=True):
-#     """
-#     Modified Kakwani Index (MKI).
+    # 2. Random Non-Linear Projection
+    # W ~ Normal(0, s)
+    Rx = np.random.normal(0, s, (x.shape[1], k))
+    Ry = np.random.normal(0, s, (y.shape[1], k))
+    bx = np.random.uniform(0, 2*np.pi, k)
+    by = np.random.uniform(0, 2*np.pi, k)
 
-#     Steps (per AssessPy docs):
-#       1) order observations by sale_price ascending
-#       2) compute Gini(sale_price) in that order (this is the usual Gini)
-#       3) compute "Gini" of estimates while *remaining ordered by sale_price*
-#          (this is effectively a concentration coefficient)
-#       4) MKI = Gini_estimate / Gini_sale_price
+    X_feat = np.sin(x @ Rx + bx)
+    Y_feat = np.sin(y @ Ry + by)
 
-#     Interpretation (per docs): MKI < 1 regressive, =1 vertical equity, >1 progressive. :contentReference[oaicite:3]{index=3}
-#     """
-#     est = _to_1d_float_array(estimate)
-#     sale = _to_1d_float_array(sale_price)
+    # 3. Center the features
+    X_feat -= X_feat.mean(axis=0)
+    Y_feat -= Y_feat.mean(axis=0)
 
-#     if est.shape[0] != sale.shape[0]:
-#         raise ValueError("estimate and sale_price must have the same length.")
-#     if dropna:
-#         mask = np.isfinite(est) & np.isfinite(sale)
-#         est, sale = est[mask], sale[mask]
-#     if est.size == 0:
-#         return np.nan
-#     if np.any(sale < 0) or np.any(est < 0):
-#         raise ValueError("estimate and sale_price should be nonnegative for MKI.")
+    # 4. Regularized CCA (The Fix)
+    # Instead of raw SVD, we use the covariance matrices with a ridge penalty.
+    # Metric = Max Eigenvalue of (Cxx^-1/2 * Cxy * Cyy^-1/2)
+    
+    # Compute Covariance Matrices
+    # Note: We use N-1 normalization for unbiased estimator
+    N = X_feat.shape[0]
+    Cxx = (X_feat.T @ X_feat) / (N - 1) + regularizer * np.eye(k)
+    Cyy = (Y_feat.T @ Y_feat) / (N - 1) + regularizer * np.eye(k)
+    Cxy = (X_feat.T @ Y_feat) / (N - 1)
+    
+    # Compute Inverse Square Roots (using Cholesky or Eigendecomposition)
+    # inv(sqrt(Cxx))
+    def power_inverse(Matrix):
+        # M = U S U^T -> M^-1/2 = U S^-1/2 U^T
+        vals, vecs = np.linalg.eigh(Matrix)
+        # vals can be slightly negative due to numerics, clip at 0
+        vals = np.maximum(vals, 1e-15)
+        return vecs @ np.diag(1.0 / np.sqrt(vals)) @ vecs.T
 
-#     idx = np.argsort(sale, kind="mergesort")
-#     sale_ord = sale[idx]
-#     est_ord_by_sale = est[idx]
+    Cxx_inv_sqrt = power_inverse(Cxx)
+    Cyy_inv_sqrt = power_inverse(Cyy)
+    
+    # The Omega matrix
+    Omega = Cxx_inv_sqrt @ Cxy @ Cyy_inv_sqrt
+    
+    # Singular values of Omega are the canonical correlations
+    # The RDC is the largest one
+    correlations = np.linalg.svd(Omega, compute_uv=False)
+    
+    return correlations[0]
 
-#     g_sale = _gini_like_from_ordered(sale_ord)
-#     g_est_by_sale = _gini_like_from_ordered(est_ord_by_sale)
 
-#     if not np.isfinite(g_sale) or g_sale == 0:
-#         return np.nan
-#     return float(g_est_by_sale / g_sale)
+from sklearn.metrics import mutual_info_score
+
+def simplified_mic(x, y, alpha=0.6):
+    """
+    Computes an approximation of the Maximal Information Coefficient (MIC).
+    
+    Parameters:
+    x, y : arrays, shape (n_samples,)
+    alpha : float, exponent for max grid size (B = N^alpha)
+    """
+    n = len(x)
+    # 1. Calculate max number of cells (B) according to paper
+    B = n ** alpha
+    
+    max_score = 0.0
+    
+    # 2. Heuristic: Search grid sizes (nx, ny)
+    # We loop through different x-bin counts and y-bin counts
+    # Optimization: We limit bins to roughly sqrt(B) to keep total cells < B
+    max_bins = int(np.ceil(B**0.5))
+    
+    # Pre-sort for efficient binning logic if needed, 
+    # but for simplicity we use histogram counting here.
+    
+    for nx in range(2, max_bins + 1):
+        for ny in range(2, max_bins + 1):
+            
+            # Constraint from paper: Total cells nx * ny < B
+            if nx * ny > B:
+                continue
+                
+            # 3. Create Grids
+            # True MIC optimizes bin edges (dynamic programming). 
+            # Simplified MIC uses Equi-width or Equi-frequency bins.
+            # We use histogram2d (Equi-width) for speed/simplicity.
+            # (Ideally, you want equi-frequency, but that is slower in pure python loops)
+            
+            c_xy = np.histogram2d(x, y, bins=[nx, ny])[0]
+            
+            # 4. Compute Mutual Information on this grid
+            # mi_score calculates I(X;Y)
+            mi = mutual_info_score(None, None, contingency=c_xy)
+            
+            # 5. Normalize: MIC_norm = I(X;Y) / log(min(nx, ny))
+            denom = np.log(min(nx, ny))
+            
+            # Handle 0 division or log(1)
+            if denom > 0:
+                score = mi / denom
+                if score > max_score:
+                    max_score = score
+                    
+    return max_score
 
 
 

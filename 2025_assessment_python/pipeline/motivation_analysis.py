@@ -50,7 +50,7 @@ import lightgbm as lgb
 # from fairness_models.boosting_fairness_models import custom_objective, custom_eval
 # from fairness_models.boosting_fairness_models import make_constrained_mse_objective, make_covariance_metric
 from fairness_models.boosting_fairness_models import LGBCustomObjective,  LGBPrimalDual#, FairGBMCustomObjective
-from fairness_models.boosting_fairness_models import LGBSmoothPenalty, LGBPrimalDualImproved, LGBCovPenalty, LGBMomentPenalty, LGBCovDispPenalty#, LGBCovTweediePenalty, LGBCorrTweediePenalty # post primal-dual methods
+from fairness_models.boosting_fairness_models import LGBSmoothPenalty, LGBCovPenalty, LGBCovDispPenalty, LGBBinIndepSurrogatePenalty#, LGBCovTweediePenalty, LGBCorrTweediePenalty # post primal-dual methods , LGBPrimalDualImproved,LGBMomentPenalty,
 
 
 # UC Irvine data
@@ -451,7 +451,7 @@ lgbm_params = {
 }
 
 # rhos = [5e2, 1e3, 5e3, 1e4]#[5e2, 1e3, 5e3, 1e4] #[5e2, 1e3, 5e3, 1e4] # Last ones: 5e2,5e3,
-rhos = [1e2, 5e2, 1e3, 5e3, 1e4] #np.linspace(1e2, 1e4, 3)
+rhos = [1e2, 5e2, 1e3, 5e3, 1e4]#[1e2, 5e2, 1e3, 5e3, 1e4] #np.linspace(1e2, 1e4, 3)
 rhos = [int(rho) for rho in rhos]
 adversary_types = ["overall"]#$, "individual"]
 zero_tols = [0] # 1e-8, 1e-6
@@ -510,7 +510,7 @@ for rho in rhos:
 #     # not adversarial?
 
 # 8.5 Direct cov penalty + var penalty: var(r)
-rhos_disp = [1e1, 1e2, 1e3]
+rhos_disp = [0, 1e1]#, 1e2, 1e3]
 for rho_disp in rhos_disp:
     for rho in rhos:
         for zero_tol in zero_tols:
@@ -518,6 +518,27 @@ for rho_disp in rhos_disp:
                 LGBCovDispPenalty(rho_cov=rho*np.std(y_val_log), rho_disp=rho_disp, cov_mode="cov", disp_mode="l2", zero_grad_tol=zero_tol, eps_y=1e-12, eps_std=1e-12, lgbm_params=lgbm_params)
             )
         # not adversarial?
+
+# 8.5.5 Add a fully-distributional independence regularizer (surr of the big ones)
+# Example:
+#   - y is log-price
+#   - enforce bin-wise mean(log-residual) ~= 0 across y-bins (good proxy for ratio invariance on price scale)
+for bins_ in [5, 10, 20]:
+    for rho in rhos:
+        for zero_tol in zero_tols:
+            models.append(
+                LGBBinIndepSurrogatePenalty(
+                    rho=rho,
+                    bins=bins_,                 # quantile bins
+                    ratio_mode="div",#"diff",       # r = y_pred - y_true
+                    anchor_mode="target",    # each bin mean -> target
+                    target_value=0.0,
+                    weight_mode="proportional",
+                    lgbm_params=lgbm_params,
+                    eps_y=1e-12,
+                    verbose=True,
+                )
+            ) 
 
 
 # rhos = [5e0, 1e1, 15]
@@ -584,34 +605,34 @@ for rho_disp in rhos_disp:
 #                 # )
 
         
-# 10. 2-stage correction of clusters
-for rho in rhos:
-    # for zero_tol in zero_tols:
-    cfg = PipelineConfig(
-        base=LGBPenaltyConfig(
-            penalty='cov',#"prb_slope",   # example: base uses PRB-style penalty too
-            rho=rho,
-            ratio_mode="div",#"diff",
-            lgbm_params=lgbm_params,
-        ),
-        use_calibration=True,
-        calib=CalibratorALMConfig(
-            kind="regime", # "1d", "regime",
-            regime_mode="kmeans",
-            n_regimes=3,
-            fairness_metric="cov",#"prb_slope",
-            ratio_mode="div",#"diff",
-            strata_mode="regimes",#"labels",   # recommended if you have exogenous strata labels
-            n_strata=3,
-            max_abs_correction=0.20,
-            stop_tol=1e-4,
-        ),
-        # calibration_cv_folds=5
-    )
+# # 10. 2-stage correction of clusters
+# for rho in rhos:
+#     # for zero_tol in zero_tols:
+#     cfg = PipelineConfig(
+#         base=LGBPenaltyConfig(
+#             penalty='cov',#"prb_slope",   # example: base uses PRB-style penalty too
+#             rho=rho,
+#             ratio_mode="div",#"diff",
+#             lgbm_params=lgbm_params,
+#         ),
+#         use_calibration=True,
+#         calib=CalibratorALMConfig(
+#             kind="regime", # "1d", "regime",
+#             regime_mode="kmeans",
+#             n_regimes=3,
+#             fairness_metric="cov",#"prb_slope",
+#             ratio_mode="div",#"diff",
+#             strata_mode="regimes",#"labels",   # recommended if you have exogenous strata labels
+#             n_strata=3,
+#             max_abs_correction=0.20,
+#             stop_tol=1e-4,
+#         ),
+#         # calibration_cv_folds=5
+#     )
 
-    # Z_train / Z_test: regime features (NOT y), shape (n, q)
-    model = RegressivityConstrainedLogModel(cfg)#.fit(X_train, y_train) #, regime_features=Z_train)
-    models.append(model)
+#     # Z_train / Z_test: regime features (NOT y), shape (n, q)
+#     model = RegressivityConstrainedLogModel(cfg)#.fit(X_train, y_train) #, regime_features=Z_train)
+#     models.append(model)
 
 
 
