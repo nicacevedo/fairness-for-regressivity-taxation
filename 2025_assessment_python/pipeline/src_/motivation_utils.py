@@ -363,6 +363,7 @@ def compute_taxation_metrics(y_real, y_pred, scale="log"):
             ratios = ratios.to_numpy()
             y_real = y_real.to_numpy()
             metrics["MI"] = mutual_info_regression(ratios.reshape(-1, 1), y_real)[0]
+        print("Computed MI!!")
         # metrics["MIC"] = simplified_mic(ratios, y_real)
         # print("Computed MIC!")
         # metrics["RDC"] = rdc(ratios, y_real) # Randomized Dependence Coefficient
@@ -372,8 +373,8 @@ def compute_taxation_metrics(y_real, y_pred, scale="log"):
         #     r_sub, y_sub = np.random.choice(ratios, replace=False, size=1000), np.random.choice(y_real, replace=False, size=1000)
         #     d_corr += dcor.distance_correlation(r_sub, y_sub)
         # metrics["dCorr(r,y)"] = d_corr/n_trials
-        metrics["dCorr(r,y)"] =  dcor.u_distance_correlation_sqr(ratios, y_real)
-        print("Computed dCorr!")
+        # metrics["dCorr(r,y)"] =  dcor.u_distance_correlation_sqr(ratios, y_real)
+        # print("Computed dCorr!")
         # metrics["cos(r,y)"] = (ratios @ y_real) / (np.linalg.norm(ratios) * np.linalg.norm(y_real))
         metrics["Var ratio"] = np.var(ratios)
         metrics["Median ratio"] = np.median(ratios)

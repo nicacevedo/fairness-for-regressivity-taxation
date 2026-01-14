@@ -268,19 +268,46 @@ class LGBPrimalDual:
 # 1) Plain (no dual/adversary): minimize MSE + rho * surrogate
 # ==========================================================
 
+# V2: with diff/div inputs
 class LGBSmoothPenalty:
     """LightGBM custom objective: per-sample MSE + rho * separable surrogate.
 
-    This is the same objective structure as your current code, but WITHOUT
-    any CVaR/top-k adversary / dual weights.
+    Default behavior (unchanged):
+      ratio_mode="div": surrogate = ((y_pred / denom) - 1)^2 * (y_true - y_mean)^2
 
-    Surrogate (separable): ((y_pred / y_true) - 1)^2 * (y_true - y_mean)^2
+    Added minimal option:
+      ratio_mode="diff": surrogate = ((y_pred - y_true) - 0)^2 * (y_true - y_mean)^2
+
+    Optional minimal target:
+      - If ratio_mode="div": target_value defaults to 1.0
+      - If ratio_mode="diff": target_value defaults to 0.0
+      surrogate = (r - target_value)^2 * zc^2
+    where:
+      - r = y_pred / denom   (div)
+      - r = y_pred - y_true  (diff)
+
+    Notes:
+      - This remains separable (per-sample), so grad/hess are exact and diagonal.
+      - This does *not* exactly penalize covariance; it penalizes "ratio/residual magnitude"
+        weighted by (y - mean(y))^2 (your original structure).
     """
 
-    def __init__(self, rho=1e-3, zero_grad_tol=1e-6, eps_y=1e-12, lgbm_params=None):
-        self.rho = rho
-        self.zero_grad_tol = zero_grad_tol
-        self.eps_y = eps_y
+    def __init__(
+        self,
+        rho=1e-3,
+        ratio_mode="div",        # "div" (default) or "diff"
+        target_value=None,       # default: 1.0 for div, 0.0 for diff
+        zero_grad_tol=1e-6,
+        eps_y=1e-12,
+        lgbm_params=None,
+        verbose=True,
+    ):
+        self.rho = float(rho)
+        self.ratio_mode = ratio_mode
+        self.target_value = target_value
+        self.zero_grad_tol = float(zero_grad_tol)
+        self.eps_y = float(eps_y)
+        self.verbose = bool(verbose)
         self.model = lgb.LGBMRegressor(**(lgbm_params or {}))
 
     def fit(self, X, y):
@@ -300,35 +327,49 @@ class LGBSmoothPenalty:
         zc = (y_true - self.y_mean_)
         denom = np.maximum(np.abs(z), self.eps_y)
 
+        # choose r, dr/dy_pred, and default target
+        if self.ratio_mode == "div":
+            r = y_pred / denom
+            dr = 1.0 / denom
+            t = 1.0 if self.target_value is None else float(self.target_value)
+        elif self.ratio_mode == "diff":
+            r = y_pred - z
+            dr = np.ones_like(y_pred)
+            t = 0.0 if self.target_value is None else float(self.target_value)
+        else:
+            raise ValueError("ratio_mode must be 'div' or 'diff'.")
+
         # losses
         mse_value = (y_true - y_pred) ** 2
-        cov_surr_value = ((y_pred / denom) - 1.0) ** 2 * (zc ** 2)
+        cov_surr_value = (r - t) ** 2 * (zc ** 2)
         loss_value = mse_value + self.rho * cov_surr_value
 
         # print (kept close to yours)
-        model_name = self.__str__()
-        r = y_pred / denom
-        try:
-            corr = float(np.corrcoef(r, y_true)[0, 1])
-        except Exception:
-            corr = float('nan')
-        print(
-            f"[{model_name.split('(')[0]}] "
-            f"Loss value: {np.mean(loss_value):.6f} "
-            f"| MSE value: {np.mean(mse_value):.6f} "
-            f"| CovSurr value: {np.mean(cov_surr_value):.6f} "
-            f"| Corr(r,y): {corr:.6f} "
-        )
+        if self.verbose:
+            model_name = self.__str__()
+            try:
+                corr = float(np.corrcoef(r, y_true)[0, 1])
+            except Exception:
+                corr = float("nan")
+            print(
+                f"[{model_name.split('(')[0]}] "
+                f"Loss value: {np.mean(loss_value):.6f} "
+                f"| MSE value: {np.mean(mse_value):.6f} "
+                f"| CovSurr value: {np.mean(cov_surr_value):.6f} "
+                f"| Corr(r,y): {corr:.6f} "
+                f"| mode: {self.ratio_mode} | target: {t:.6f}"
+            )
 
         # base gradients/hessians for (pred-y)^2
         grad_base = 2.0 * (y_pred - y_true)
         hess_base = 2.0 * np.ones_like(y_pred)
 
-        # penalty gradients/hessians (separable)
-        # cov_surr_i = ((pred/z)-1)^2 * zc^2 = (pred-z)^2 * (zc/z)^2
-        scale = (zc / denom) ** 2
-        grad_pen = 2.0 * (y_pred - z) * scale
-        hess_pen = 2.0 * scale
+        # penalty gradients/hessians (separable, exact)
+        # pen_i = (r_i - t)^2 * zc_i^2
+        # d pen_i / d pred_i = 2 * (r_i - t) * dr_i * zc_i^2
+        scale = (zc ** 2)
+        grad_pen = 2.0 * (r - t) * dr * scale
+        hess_pen = 2.0 * (dr ** 2) * scale
 
         grad = grad_base + self.rho * grad_pen
         hess = hess_base + self.rho * hess_pen
@@ -340,7 +381,7 @@ class LGBSmoothPenalty:
         return grad, hess
 
     def __str__(self):
-        return f"LGBSmoothPenalty({self.rho})"
+        return f"LGBSmoothPenalty(rho={self.rho}, mode={self.ratio_mode})"
 
 
 # ==========================================================
@@ -574,29 +615,48 @@ class LGBSmoothPenalty:
 # 3) Direct covariance penalty (non-separable but usable in LightGBM via global stats)
 # ==========================================================
 
+# V2: with diff/div inputs
 class LGBCovPenalty:
-    """LightGBM objective: MSE + rho * (Cov(r, y))^2 with r = y_pred / y_true.
+    """LightGBM objective: MSE + rho * (Cov(r, y))^2
 
-    This is a *direct* covariance penalty to compare against the separable proxy.
+    r is chosen by ratio_mode:
+      - "div"  : r = y_pred / max(|y_true|, eps_y)    (DEFAULT, preserves old behavior)
+      - "diff" : r = y_pred - y_true                 (useful when y is log-price -> log-residual)
 
-    Important:
-      - Cov(r,y) uses global statistics, so the Hessian is dense in principle.
-      - LightGBM expects a per-sample Hessian vector; we use a diagonal approximation.
+    Cov is computed as: cov = mean( r_eff * (y_true - y_mean_) ),
+    where r_eff may optionally be shifted by an "anchor" (see below).
 
-    We scale the penalty as: 0.5 * rho * n * cov^2
-    so that gradients have O(1) magnitude (otherwise they can be ~1/n).
+    Anchor note (important):
+      Because yc = (y_true - y_mean_) is mean-centered, subtracting any *constant* anchor
+      from r does not change cov (up to floating error). Therefore anchor_mode/target_value
+      are effectively no-ops for this specific cov definition. Included only for API symmetry.
 
-    cov = (1/n) * sum_i r_i * (y_i - y_mean)
-    dc/dy_pred_i = (1/n) * (y_i - y_mean) / y_i
-
-    grad_pen_i = rho * n * cov * dc/dy_pred_i
-    hess_pen_i (diag approx) = rho * n * (dc/dy_pred_i)^2
+    Diagonal Hessian approximation (as before):
+      cov = (1/n) * sum_i r_i * yc_i
+      dc/dy_pred_i = (1/n) * yc_i * d r_i / d y_pred_i
+      penalty = 0.5 * rho * n * cov^2
+      grad_pen_i = rho * n * cov * dc/dy_pred_i
+      hess_pen_i = rho * n * (dc/dy_pred_i)^2
     """
 
-    def __init__(self, rho=1e-3, zero_grad_tol=1e-6, eps_y=1e-12, lgbm_params=None):
-        self.rho = rho
-        self.zero_grad_tol = zero_grad_tol
-        self.eps_y = eps_y
+    def __init__(
+        self,
+        rho=1e-3,
+        ratio_mode="div",          # "div" or "diff"
+        anchor_mode="none",        # "none" | "target" | "iter_mean"  (no-op here; see note)
+        target_value=None,         # if anchor_mode="target": default 1.0 (div) or 0.0 (diff)
+        zero_grad_tol=1e-6,
+        eps_y=1e-12,
+        lgbm_params=None,
+        verbose=True,
+    ):
+        self.rho = float(rho)
+        self.ratio_mode = ratio_mode
+        self.anchor_mode = anchor_mode
+        self.target_value = target_value
+        self.zero_grad_tol = float(zero_grad_tol)
+        self.eps_y = float(eps_y)
+        self.verbose = bool(verbose)
         self.model = lgb.LGBMRegressor(**(lgbm_params or {}))
 
     def fit(self, X, y):
@@ -613,35 +673,64 @@ class LGBCovPenalty:
         y_pred = np.asarray(y_pred)
         n = y_pred.size
 
-        denom = np.maximum(np.abs(y_true), self.eps_y)
-        r = y_pred / denom
-        yc = (y_true - self.y_mean_)
+        yc = (y_true - self.y_mean_)  # centered y (note: mean(yc)≈0 on training data)
 
-        # covariance (note: E[yc]=0)
-        cov = float(np.mean(r * yc))
+        # ---- choose r and dr/dy_pred ----
+        if self.ratio_mode == "div":
+            denom = np.maximum(np.abs(y_true), self.eps_y)
+            r = y_pred / denom
+            dr = 1.0 / denom
+        elif self.ratio_mode == "diff":
+            r = y_pred - y_true
+            dr = np.ones_like(y_pred)
+        else:
+            raise ValueError("ratio_mode must be 'div' or 'diff'.")
 
-        # objective pieces (for prints)
-        mse_value = (y_true - y_pred) ** 2
-        pen_value = 0.5 * self.rho * n * (cov ** 2)
+        # ---- optional anchor (no-op for centered yc; kept for API symmetry) ----
+        anchor = 0.0
+        if self.anchor_mode == "none":
+            anchor = 0.0
+        elif self.anchor_mode == "iter_mean":
+            anchor = float(np.mean(r))
+        elif self.anchor_mode == "target":
+            if self.target_value is None:
+                anchor = 1.0 if self.ratio_mode == "div" else 0.0
+            else:
+                anchor = float(self.target_value)
+        else:
+            raise ValueError("anchor_mode must be 'none', 'iter_mean', or 'target'.")
+
+        r_eff = r - anchor  # (effectively no change to cov because mean(yc)=0)
+
+        # ---- covariance (note: E[yc]=0 on training set) ----
+        cov = float(np.mean(r_eff * yc))
+
+        # ---- objective pieces (for prints) ----
+        mse_vec = (y_true - y_pred) ** 2
+        mse_mean = float(np.mean(mse_vec))
+        pen_value = 0.5 * self.rho * float(n) * (cov ** 2)
 
         try:
             corr = float(np.corrcoef(r, y_true)[0, 1])
         except Exception:
-            corr = float('nan')
+            corr = float("nan")
 
-        model_name = self.__str__()
-        print(
-            f"[{model_name.split('(')[0]}] "
-            f"Loss: {(np.mean(mse_value)+pen_value):.6f} | MSE: {np.mean(mse_value):.6f} | Cov: {cov:.6e} | Pen: {pen_value:.6f} | Corr(r,y): {corr:.6f}"
-        )
+        if self.verbose:
+            model_name = self.__str__().split("(")[0]
+            print(
+                f"[{model_name}] "
+                f"Loss: {(mse_mean + pen_value):.6f} | MSE: {mse_mean:.6f} | "
+                f"Cov: {cov:.6e} | Pen: {pen_value:.6f} | Corr(r,y): {corr:.6f}"
+            )
 
-        # base MSE grads/hess
+        # ---- base MSE grads/hess ----
         grad_base = 2.0 * (y_pred - y_true)
         hess_base = 2.0 * np.ones_like(y_pred)
 
-        # cov penalty grads/hess (diag approx)
-        a = (yc / denom) / float(n)  # dc/dy_pred_i
-        # penalty = 0.5*rho*n*cov^2
+        # ---- cov penalty grads/hess (diag approx) ----
+        # dc/dy_pred_i = (1/n) * yc_i * dr_i
+        a = (yc * dr) / float(n)
+
         grad_pen = self.rho * float(n) * cov * a
         hess_pen = self.rho * float(n) * (a ** 2)
 
@@ -654,7 +743,7 @@ class LGBCovPenalty:
         return grad, hess
 
     def __str__(self):
-        return f"LGBCovPenalty({self.rho})"
+        return f"LGBCovPenalty(rho={self.rho}, ratio_mode={self.ratio_mode})" #, anchor_mode={self.anchor_mode})"
 
 
 # ==========================================================

@@ -250,7 +250,7 @@ df_train = df.iloc[:int(train_prop*n),:]
 df_test = df.iloc[int(train_prop*n):,:]
 
 # Random sample of train
-sample_size = 10000#0 # 10k samples for Abalon (?)# 1000 samples for Adult (?)
+sample_size = 100000 # 10k samples for Abalon (?)# 1000 samples for Adult (?)
 if sample_size < df_train.shape[0]:
     print(f"working with a sample ({sample_size//1000}k)")
     df_train = df_train.sample(min(sample_size, df_train.shape[0]), random_state=seed, replace=False)
@@ -482,12 +482,14 @@ eta_advs = [lr]#[lr*1e-2, lr*1e-1, lr]
 #                         LGBPrimalDual(rho=rho, keep=1, adversary_type=adversary_type, eta_adv=eta_adv, zero_grad_tol=zero_tol, lgbm_params=lgbm_params)
 #                     )
 
-# # 6. Non-adversarial LGB (same obj as previous but no weights)
-# for rho in rhos:
-#     for zero_tol in zero_tols:
-#         models.append(
-#             LGBSmoothPenalty(rho=rho, zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params)
-#         )
+# 6. Non-adversarial LGB (same obj as previous but no weights)
+for ratio_mode in ["div", "diff"]:
+    for rho in rhos:
+        rho_ = rho if ratio_mode == "div" else rho/1e2 # diff and div are not equally penalized
+        for zero_tol in zero_tols:
+            models.append(
+                LGBSmoothPenalty(rho=rho_/10, ratio_mode=ratio_mode, zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params)
+            )
 
 
 # # 7. Improved version of primal-dual (?)
@@ -502,48 +504,50 @@ eta_advs = [lr]#[lr*1e-2, lr*1e-1, lr]
 
 
 # # 8. Direct cov penalty (?)
-# for rho in rhos:
-#     for zero_tol in zero_tols:
-#         models.append(
-#             LGBCovPenalty(rho=rho, zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params)
-#         )
-#     # not adversarial?
+for ratio_mode in ["div", "diff"]:
+    for rho in rhos:
+        rho_ = rho if ratio_mode == "div" else rho/1e2 # diff and div are not equally penalized
+        for zero_tol in zero_tols:
+            models.append(
+                LGBCovPenalty(rho=rho_/10, ratio_mode=ratio_mode, zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params)
+            )
+    # not adversarial?
 
-# # 8.5 Direct cov penalty + var penalty: var(r)
-# rhos_disp = [0, 1e1]#, 1e2, 1e3]
-# for rho_disp in rhos_disp:
-#     for rho in rhos:
-#         for zero_tol in zero_tols:
-#             models.append(
-#                 LGBCovDispPenalty(rho_cov=rho*np.std(y_val_log), rho_disp=rho_disp, cov_mode="cov", disp_mode="l2", zero_grad_tol=zero_tol, eps_y=1e-12, eps_std=1e-12, lgbm_params=lgbm_params)
-#             )
-#         # not adversarial?
+# 8.5 Direct cov penalty + var penalty: var(r)
+rhos_disp = [1e1, 1e2, 1e3]
+for rho_disp in rhos_disp:
+    for rho in rhos:
+        for zero_tol in zero_tols:
+            models.append(
+                LGBCovDispPenalty(rho_cov=rho*np.std(y_val_log), rho_disp=rho_disp, cov_mode="cov", disp_mode="l2", zero_grad_tol=zero_tol, eps_y=1e-12, eps_std=1e-12, lgbm_params=lgbm_params)
+            )
+        # not adversarial?
 
-# 8.5.5 Add a fully-distributional independence regularizer (surr of the big ones)
-# Example:
-#   - y is log-price
-#   - enforce bin-wise mean(log-residual) ~= 0 across y-bins (good proxy for ratio invariance on price scale)
-for ratio_mode in ["diff"]:
-    for bins_ in [3, 5, 10]:
-        for rho in rhos:
-            if ratio_mode == "diff":
-                rho_ = rho/1e2
-            else:
-                rho_ = rho
-            for zero_tol in zero_tols:
-                models.append(
-                    LGBBinIndepSurrogatePenalty(
-                        rho=rho_/5,
-                        bins=bins_,                 # quantile bins
-                        ratio_mode=ratio_mode,#"diff",       # r = y_pred - y_true
-                        anchor_mode="target",    # each bin mean -> target
-                        # target_value=1.0, # objective for ratios (?)
-                        weight_mode="proportional",
-                        lgbm_params=lgbm_params,
-                        eps_y=1e-12,
-                        verbose=True,
-                    )
-                ) 
+# # 8.5.5 Add a fully-distributional independence regularizer (surr of the big ones)
+# # Example:
+# #   - y is log-price
+# #   - enforce bin-wise mean(log-residual) ~= 0 across y-bins (good proxy for ratio invariance on price scale)
+# for ratio_mode in ["diff"]:
+#     for bins_ in [3, 5, 10]:
+#         for rho in rhos:
+#             if ratio_mode == "diff":
+#                 rho_ = rho/1e2
+#             else:
+#                 rho_ = rho
+#             for zero_tol in zero_tols:
+#                 models.append(
+#                     LGBBinIndepSurrogatePenalty(
+#                         rho=rho_/5,
+#                         bins=bins_,                 # quantile bins
+#                         ratio_mode=ratio_mode,#"diff",       # r = y_pred - y_true
+#                         anchor_mode="target",    # each bin mean -> target
+#                         # target_value=1.0, # objective for ratios (?)
+#                         weight_mode="proportional",
+#                         lgbm_params=lgbm_params,
+#                         eps_y=1e-12,
+#                         verbose=True,
+#                     )
+#                 ) 
 
 
 # rhos = [5e0, 1e1, 15]

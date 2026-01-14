@@ -677,27 +677,34 @@ def _process_metric_vs_rho(args):
         y_values = [res[metric] for res in data_list]
         
         # MINE: get name of the rho and extract its value
-        if "(" in str(model):
+        rho = None
+        if "rho=" in str(model):
             try:
-                rho = str(model).split("(")[1].split(",")[0].replace(")", "") # ModelClassName(rho, ...)
-                rho = float(rho)
-            except:
+                # Extract rho from "rho=value" format
+                rho_part = str(model).split("rho=")[1].split(",")[0].split(")")[0].strip()
+                rho = float(rho_part)
+            except (ValueError, IndexError):
                 rho = None
-        else:
-            rho = None
-        x_values = [rho for _ in range(len(r_list))]
+        
+        if rho is None:
+            # Skip plotting if rho cannot be extracted
+            print(f"Warning: Could not parse rho from model: {model}")
+            continue
+        
+        x_values = [rho for _ in range(len(data_list))]
         
         if len(data_list) == 1:
-            # BASELINE
+            # BASELINE: constant horizontal line
             constant_value = y_values[0]
-            plt.plot(x_values, [constant_value] * len(r_list), 
+            plt.axhline(y=constant_value, 
                     label=f"{model} (Baseline)",
                     color=c, linestyle='--', linewidth=2, alpha=0.7)
         else:
-            # EXPERIMENTAL
-            plt.plot(x_values, y_values, 
+            # EXPERIMENTAL: scatter plot (rho on x, metric values on y)
+            # Each model contributes multiple points (one per r value)
+            plt.scatter(x_values, y_values, 
                     label=model,
-                    color=c, marker=marker, linestyle=linestyle, linewidth=2)
+                    color=c, s=50, alpha=0.6, edgecolors='black', linewidth=0.5)
     
     plt.title(f'Comparison of {metric} vs. Penalization (rho) [{source}]', fontsize=14)
     plt.xlabel(r'$\rho$ (Penalization)', fontsize=12)
