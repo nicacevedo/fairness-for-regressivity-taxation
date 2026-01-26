@@ -1,0 +1,79 @@
+{
+  "best_model": "lgbm",
+  "best_params": {
+    "bagging_fraction": 0.7804845579575543,
+    "bagging_freq": 2,
+    "boosting_type": "gbdt",
+    "feature_fraction": 0.693160014832441,
+    "force_col_wise": true,
+    "lambda_l1": 0.003426526864756565,
+    "lambda_l2": 0.4953229992133722,
+    "learning_rate": 0.012990280741516142,
+    "max_bin": 511,
+    "max_depth": 16,
+    "min_child_samples": 92,
+    "min_gain_to_split": 0.1019561645874949,
+    "n_estimators": 10000,
+    "n_jobs": 1,
+    "num_leaves": 1367,
+    "objective": "regression",
+    "random_state": 1682172999,
+    "subsample_for_bin": 200000,
+    "verbosity": -1
+  },
+  "cv_best": {
+    "model": "lgbm",
+    "params": "{\"bagging_fraction\": 0.7804845579575543, \"bagging_freq\": 2, \"boosting_type\": \"gbdt\", \"feature_fraction\": 0.693160014832441, \"force_col_wise\": true, \"lambda_l1\": 0.003426526864756565, \"lambda_l2\": 0.4953229992133722, \"learning_rate\": 0.012990280741516142, \"max_bin\": 511, \"max_depth\": 16, \"min_child_samples\": 92, \"min_gain_to_split\": 0.1019561645874949, \"n_estimators\": 10000, \"n_jobs\": 1, \"num_leaves\": 1367, \"objective\": \"regression\", \"random_state\": 1682172999, \"subsample_for_bin\": 200000, \"verbosity\": -1}",
+    "mae": 80971.14241123764,
+    "rmse": 139960.797700109,
+    "mae_log": 0.20679443622619292,
+    "rmse_log": 0.28939827993939493,
+    "elapsed_s": 21.40951860745748
+  },
+  "test_metrics": {
+    "mae_log": 0.20047310019726197,
+    "rmse_log": 0.2802692916707701,
+    "mae": 76372.8346950491,
+    "rmse": 132724.51059284247
+  },
+  "config": {
+    "parquet_path": "../data_county/2025/training_data.parquet",
+    "params_yaml_path": "params.yaml",
+    "target_name": "meta_sale_price",
+    "date_col": "meta_sale_date",
+    "subset_max_rows": 50000,
+    "subset_recent_years": 0,
+    "pretest_prop": 0.822871,
+    "inner_train_prop": 0.822871,
+    "n_splits": 5,
+    "min_train_fraction_of_pretest": 0.45,
+    "bootstrap_seeds": [
+      7,
+      19,
+      41
+    ],
+    "bootstrap_size": 100000,
+    "bootstrap_method": "stratified_month",
+    "parallel_jobs": 32,
+    "checkpoint_dir": "checkpoints",
+    "checkpoint_prefix": "ccao_cv",
+    "checkpoint_every_fold": true,
+    "handle_signals": true,
+    "lgbm_stage1_candidates": 30,
+    "lgbm_stage1_folds": 2,
+    "lgbm_stage1_topk": 8,
+    "lgbm_stage2_candidates": 8,
+    "lgbm_early_stopping_rounds": 200,
+    "lgbm_max_estimators": 10000,
+    "elasticnet_candidates": 24,
+    "rf_candidates": 12,
+    "gbr_candidates": 12,
+    "random_seed": 234,
+    "verbose": true
+  },
+  "paths": {
+    "pipeline": "artifacts/preprocess_pipeline_20260116_183506.joblib",
+    "model": "artifacts/best_model_lgbm_20260116_183506.txt",
+    "cv_results": "artifacts/cv_results_20260116_183506.csv"
+  }
+}

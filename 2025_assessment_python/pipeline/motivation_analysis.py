@@ -7,7 +7,7 @@ from scipy.stats import kurtosis, skew
 import scipy.sparse as sp
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
-from sklearn.linear_model import LinearRegression, ElasticNet
+from sklearn.linear_model import LinearRegression, ElasticNet, Ridge
 # from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from sklearn.ensemble import RandomForestRegressor, HistGradientBoostingRegressor
 from sklearn.metrics import root_mean_squared_error, r2_score, mean_absolute_error
@@ -41,16 +41,18 @@ from recipes.recipes_pipelined import build_model_pipeline, build_model_pipeline
 
 # My models
 from src_.motivation_utils import analyze_fairness_by_value, calculate_detailed_statistics, plot_tradeoff_analysis, compute_taxation_metrics
-from fairness_models.linear_fairness_models import LeastAbsoluteDeviationRegression, MaxDeviationConstrainedLinearRegression, LeastMaxDeviationRegression, GroupDeviationConstrainedLinearRegression, StableRegression, LeastProportionalDeviationRegression#LeastMSEConstrainedRegression, LeastProportionalDeviationRegression
-from fairness_models.linear_fairness_models import MyGLMRegression, GroupDeviationConstrainedLogisticRegression, RobustStableLADPRDCODRegressor, StableAdversarialSurrogateRegressor, StableAdversarialSurrogateRegressor2
-from fairness_models.mixture_boosting_fairness_models import * #MoELGBSmoothPenalty
+# from fairness_models.linear_fairness_models import LeastAbsoluteDeviationRegression, MaxDeviationConstrainedLinearRegression, LeastMaxDeviationRegression, GroupDeviationConstrainedLinearRegression, StableRegression, LeastProportionalDeviationRegression#LeastMSEConstrainedRegression, LeastProportionalDeviationRegression
+# from fairness_models.linear_fairness_models import MyGLMRegression, GroupDeviationConstrainedLogisticRegression, RobustStableLADPRDCODRegressor, StableAdversarialSurrogateRegressor, StableAdversarialSurrogateRegressor2
+from fairness_models.linear_fairness_models import *
 
 # My boosting models
 import lightgbm as lgb
 # from fairness_models.boosting_fairness_models import custom_objective, custom_eval
 # from fairness_models.boosting_fairness_models import make_constrained_mse_objective, make_covariance_metric
-from fairness_models.boosting_fairness_models import LGBCustomObjective,  LGBPrimalDual#, FairGBMCustomObjective
-from fairness_models.boosting_fairness_models import LGBSmoothPenalty, LGBCovPenalty, LGBCovDispPenalty, LGBBinIndepSurrogatePenalty#, LGBCovTweediePenalty, LGBCorrTweediePenalty # post primal-dual methods , LGBPrimalDualImproved,LGBMomentPenalty,
+# from fairness_models.boosting_fairness_models import LGBCustomObjective,  LGBPrimalDual#, FairGBMCustomObjective
+# from fairness_models.boosting_fairness_models import LGBSmoothPenalty, LGBCovPenalty, LGBCovDispPenalty, LGBBinIndepSurrogatePenalty#, LGBCovTweediePenalty, LGBCorrTweediePenalty # post primal-dual methods , LGBPrimalDualImproved,LGBMomentPenalty,
+from fairness_models.mixture_boosting_fairness_models import * #MoELGBSmoothPenalty
+from fairness_models.boosting_fairness_models import *
 
 
 # UC Irvine data
@@ -345,7 +347,7 @@ n_jobs =190
 max_iter=200#500 #0
 
 fit_intercept = True
-l1,l2 = 1e-3, 1e-2
+l1,l2 = 1e-2, 1e-2 # l1 = 1e-3
 max_depth = 15
 lr = 1e-1
 
@@ -354,19 +356,48 @@ epsilons_cov = [2.25e-2, 1e-2, 8.75e-3, 7.5e-3]#, 5e-3] # Cov 2.25e-2,
 # epsilons_var = [1e-1, 7.5e-2, 5e-2, 2.5e-2] # Var: Not doing anything
 rhos_cov = [1e-1, 1, 5, 10]#, 1.5] # Cov
 # rhos_var = [0] #[0, 1e-1, 1, 5, 10, 20]#, 10] # Var: Not doing anything
-keep_percentages = np.linspace(0.1, 1, 2)
+keep_percentages = np.linspace(1, 1, 1)
 
 
+from interpret.glassbox import ExplainableBoostingRegressor
 models = [
     LinearRegression(fit_intercept=fit_intercept, n_jobs=n_jobs),
-    # LeastAbsoluteDeviationRegression(fit_intercept=fit_intercept, solver="MOSEK"),
+    # Ridge(fit_intercept=fit_intercept, alpha=l2),
     # ElasticNet(fit_intercept=fit_intercept, l1_ratio=l1/(l1 + l2), alpha=(l1 + l2), selection="random", random_state=random_state, warm_start=True),
+    # LeastAbsoluteDeviationRegression(fit_intercept=fit_intercept, solver="MOSEK"),
     # RandomForestRegressor(n_estimators=n_jobs, criterion='squared_error', max_depth=max_depth, min_samples_split=50, min_samples_leaf=30, bootstrap=True, n_jobs=n_jobs, random_state=random_state, warm_start=True, ccp_alpha=1e-3),
     # GradientBoostingRegressor(loss='squared_error', learning_rate=1e-3, n_estimators=100, subsample=0.8, criterion='friedman_mse', min_samples_split=50, min_samples_leaf=20, max_depth=3, random_state=random_state, alpha=0.9, warm_start=True, validation_fraction=0.1, tol=1e-4, ccp_alpha=1e-3)
     # HistGradientBoostingRegressor(loss='squared_error', learning_rate=lr, max_iter=max_iter, max_leaf_nodes=31, max_depth=max_depth, min_samples_leaf=30, l2_regularization=l2, max_bins=255, 
     #                               warm_start=True, early_stopping='auto', scoring='loss', validation_fraction=0.2, n_iter_no_change=10, tol=1e-6, random_state=random_state),     
     lgb.LGBMRegressor(boosting_type='gbdt', num_leaves=31, max_depth=max_depth, learning_rate=lr, n_estimators=max_iter, subsample_for_bin=200000, objective="mse", 
                                 class_weight=None, min_child_samples=30, colsample_bytree=1.0, reg_alpha=l1, reg_lambda=l2, random_state=random_state, n_jobs=8, importance_type='split'),
+    # ExplainableBoostingRegressor(
+    #     # --- Direct Mappings ---
+    #     learning_rate=0.1,          # Matches lgbm_params["learning_rate"]
+    #     max_rounds=200,             # Matches lgbm_params["n_estimators"]
+    #     min_samples_leaf=30,        # Matches lgbm_params["min_child_samples"]
+    #     n_jobs=1,                   # Matches lgbm_params["n_jobs"]
+    #     random_state=42,            # Matches lgbm_params["random_state"]
+        
+    #     # --- Structural Adaptations (Crucial) ---
+    #     # LightGBM max_depth=15 implies complex logic. EBM is additive.
+    #     # To get close to LGBM performance, you MUST enable interactions.
+    #     interactions=20,            # EBM default is 0. LGBM depth 15 captures many interactions.
+    #                                 # Setting this to 10-20 allows EBM to model pairs (A & B).
+        
+    #     # --- Regularization Mappings (Approximate) ---
+    #     # EBM does not use L1/L2 (reg_alpha/lambda). 
+    #     # Instead, it uses bagging for regularization.
+    #     outer_bags=8,               # Default is 8. Acts somewhat like L2 regularization.
+    #     inner_bags=0,               # Default is 0. Increasing this slows training but smooths graphs.
+        
+    #     # --- Validation ---
+    #     # LGBM usually requires a manual eval_set for stopping. 
+    #     # EBM splits data internally (15%) to prevent overfitting automatically.
+    #     validation_size=0.15,       
+    #     early_stopping_rounds=200,  # Set to None to force exactly 200 rounds (like your LGBM setup),
+    #                                 # or keep default (50) to stop if it stops improving.
+    # )
 ]
 
 
@@ -426,7 +457,7 @@ baseline_models = [str(model).split("(")[0] for model in models] # Save baseline
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
-# # 4. Sof-penalized LGBM
+# 4. Sof-penalized LGBM
 lgbm_params = {
     "boosting_type": "gbdt",
     "num_leaves": 31,
@@ -450,26 +481,92 @@ lgbm_params = {
     # "verbosity_eval":False,
 }
 
+# NN parameters
+from fairness_models.nn_fairness_models import FeedForwardNNRegressorWithEmbeddings6
+import torch
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("device: ", device)
+
+model_emb_pipeline = build_model_pipeline_supress_onehot( # WARNING: We only changed to this to perform changes on the pipeline
+        pred_vars=params['model']['predictor']['all'],
+        cat_vars=params['model']['predictor']['categorical'],
+        id_vars=params['model']['predictor']['id']
+    )
+X_train_emb = model_emb_pipeline.fit_transform(X_train, y_train_log)
+X_val_emb = model_emb_pipeline.transform(X_val)
+X_test_emb = model_emb_pipeline.transform(X_test)
+pred_vars = [col for col in params['model']['predictor']['all'] if col in X_train_emb.columns] 
+nn_params = dict(
+    categorical_features= ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in pred_vars if c.startswith('loc_school_')],
+    coord_features= ["loc_longitude", "loc_latitude"],
+    fourier_type="basic",
+    hidden_sizes=(256, 256),
+    dropout=0.1,
+    normalization="layer_norm",
+    mlp_style="resnet",
+    batch_size=1024,
+    learning_rate=1e-4,
+    num_epochs=500,
+    patience=10,
+    validation_split=0.1,
+    use_scaler=True,
+    loss="mse",
+    alpha=0,
+    eps_y=1e-12,
+    random_state=random_state,
+    verbose=True,
+    log_every=1,
+)
+
+
 # rhos = [5e2, 1e3, 5e3, 1e4]#[5e2, 1e3, 5e3, 1e4] #[5e2, 1e3, 5e3, 1e4] # Last ones: 5e2,5e3,
-rhos = [1e2, 5e2, 1e3, 5e3, 1e4]#[1e2, 5e2, 1e3, 5e3, 1e4] #np.linspace(1e2, 1e4, 3)
+# rhos = np.linspace(1e2, 5e3, 20) # [1e2, 5e2, 1e3, 5e3, 1e4]#[1e2, 5e2, 1e3, 5e3, 1e4]#[1e2, 5e2, 1e3, 5e3, 1e4] #
+rhos = np.logspace(0, 2, 2) # [1e2, 5e2, 1e3, 5e3, 1e4]#[1e2, 5e2, 1e3, 5e3, 1e4]#[1e2, 5e2, 1e3, 5e3, 1e4] #
 rhos = [int(rho) for rho in rhos]
 adversary_types = ["overall"]#$, "individual"]
 zero_tols = [0] # 1e-8, 1e-6
 eta_advs = [lr]#[lr*1e-2, lr*1e-1, lr]
-# eta_adv
-# for rho in rhos:
-#     for adversary_type in adversary_types:
+
+
+# 
+
+
+        
+
+# NN with 
+for ratio_mode in ["div", "diff"]:
+    for rho in rhos:
+        rho_ = rho if ratio_mode == "div" else rho/1e2 # diff and div are not equally penalized
+        for zero_tol in zero_tols:
+            models.append(
+                FeedForwardNNRegressorWithEmbeddings6(rho=rho_/10, mode=ratio_mode, **nn_params)
+            )
+
+
+
+# from fairness_models.linear_fairness_models import FairnessConstrainedRidgeLog
+# # 6. Non-adversarial Ridge or Linear Regression
+# for alpha_ in [l2]:
+#     for ratio_mode in ["div", "diff"]:
+#         for rho in rhos:
+#             rho_ = rho if ratio_mode == "div" else rho/1e2 # diff and div are not equally penalized
 #             for zero_tol in zero_tols:
 #                 models.append(
-#                     LGBCustomObjective(rho=rho, keep=1, adversary_type=adversary_type, zero_grad_tol=zero_tol, lgbm_params=lgbm_params)
+#                     FairnessConstrainedRidgeLog(rho=rho_/10, rho_sep=0, alpha=alpha_, mode=ratio_mode, eps_y=1e-12)
+#                 )
+#                 print(models[-1])
+# # 6. Non-adversarial LGB (same obj as previous but no weights)
+# for alpha_ in [l2]:
+#     for ratio_mode in ["div", "diff"]:
+#         for rho in rhos:
+#             rho_ = rho if ratio_mode == "div" else rho/1e2 # diff and div are not equally penalized
+#             for zero_tol in zero_tols:
+#                 models.append(
+#                     FairnessConstrainedRidgeLog(rho=0, rho_sep=rho_/10, alpha=alpha_, mode=ratio_mode, eps_y=1e-12)
 #                 )
 
-# for rho in rhos:
-#     for adversary_type in ["individual"]:
-#             for zero_tol in zero_tols:
-#                 models.append(
-#                     LGBCustomObjective(rho=rho, keep=1, adversary_type=adversary_type, zero_grad_tol=zero_tol, lgbm_params=lgbm_params)
-#                 )
+
+
 
 
 
@@ -482,14 +579,14 @@ eta_advs = [lr]#[lr*1e-2, lr*1e-1, lr]
 #                         LGBPrimalDual(rho=rho, keep=1, adversary_type=adversary_type, eta_adv=eta_adv, zero_grad_tol=zero_tol, lgbm_params=lgbm_params)
 #                     )
 
-# 6. Non-adversarial LGB (same obj as previous but no weights)
-for ratio_mode in ["div", "diff"]:
-    for rho in rhos:
-        rho_ = rho if ratio_mode == "div" else rho/1e2 # diff and div are not equally penalized
-        for zero_tol in zero_tols:
-            models.append(
-                LGBSmoothPenalty(rho=rho_/10, ratio_mode=ratio_mode, zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params)
-            )
+# # 6. Non-adversarial LGB (same obj as previous but no weights)
+# for ratio_mode in ["div", "diff"]:
+#     for rho in rhos:
+#         rho_ = rho if ratio_mode == "div" else rho/1e2 # diff and div are not equally penalized
+#         for zero_tol in zero_tols:
+#             models.append(
+#                 LGBSmoothPenalty(rho=rho_/10, ratio_mode=ratio_mode, zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params)
+#             )
 
 
 # # 7. Improved version of primal-dual (?)
@@ -503,115 +600,76 @@ for ratio_mode in ["div", "diff"]:
 #         # dual_update="mirror",  # "mirror" or "topk"
 
 
-# # 8. Direct cov penalty (?)
-for ratio_mode in ["div", "diff"]:
-    for rho in rhos:
-        rho_ = rho if ratio_mode == "div" else rho/1e2 # diff and div are not equally penalized
-        for zero_tol in zero_tols:
-            models.append(
-                LGBCovPenalty(rho=rho_/10, ratio_mode=ratio_mode, zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params)
-            )
-    # not adversarial?
+# # Delete
+# # # 8. Direct cov penalty (?)
+# for ratio_mode in ["div", "diff"]: # div
+#     for rho in rhos:
+#         rho_ = rho if ratio_mode == "div" else rho/5e2 # diff and div are not equally penalized
+#         for zero_tol in zero_tols:
+#             models.append(
+#                 LGBCovPenalty(rho=rho_, ratio_mode=ratio_mode, zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params)
+#             )
+#     # not adversarial?
 
-# 8.5 Direct cov penalty + var penalty: var(r)
-rhos_disp = [1e1, 1e2, 1e3]
-for rho_disp in rhos_disp:
-    for rho in rhos:
-        for zero_tol in zero_tols:
-            models.append(
-                LGBCovDispPenalty(rho_cov=rho*np.std(y_val_log), rho_disp=rho_disp, cov_mode="cov", disp_mode="l2", zero_grad_tol=zero_tol, eps_y=1e-12, eps_std=1e-12, lgbm_params=lgbm_params)
-            )
-        # not adversarial?
-
-# # 8.5.5 Add a fully-distributional independence regularizer (surr of the big ones)
-# # Example:
-# #   - y is log-price
-# #   - enforce bin-wise mean(log-residual) ~= 0 across y-bins (good proxy for ratio invariance on price scale)
-# for ratio_mode in ["diff"]:
-#     for bins_ in [3, 5, 10]:
+# # New type of 8.
+# rhos_disp_ratios = [.1, .3, .5, .7, .9]
+# for n_bins_ in [3, 5, 100, 500]:
+#     for ratio_mode in ["div"]: # div
 #         for rho in rhos:
-#             if ratio_mode == "diff":
-#                 rho_ = rho/1e2
-#             else:
-#                 rho_ = rho
-#             for zero_tol in zero_tols:
-#                 models.append(
-#                     LGBBinIndepSurrogatePenalty(
-#                         rho=rho_/5,
-#                         bins=bins_,                 # quantile bins
-#                         ratio_mode=ratio_mode,#"diff",       # r = y_pred - y_true
-#                         anchor_mode="target",    # each bin mean -> target
-#                         # target_value=1.0, # objective for ratios (?)
-#                         weight_mode="proportional",
-#                         lgbm_params=lgbm_params,
-#                         eps_y=1e-12,
-#                         verbose=True,
+#             for rho_disp_ratio_ in rhos_disp_ratios:
+#                 rho_ = rho/10 if ratio_mode == "div" else rho/1e3 # diff and div are not equally penalized
+#                 rho_disp_ = rho_ * rho_disp_ratio_
+#                 rho_ = rho_ * (1-rho_disp_ratio_)
+#                 for zero_tol in zero_tols:
+#                     models.append(
+#                         LGBCondMeanVarPenalty(rho_cov=rho_, rho_disp=rho_disp_, n_bins=n_bins_, ratio_mode=ratio_mode, 
+#                                             anchor_mode="target", zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params)
 #                     )
-#                 ) 
+#         # not adversarial?
 
+# # 8.5 Direct cov penalty + var penalty: var(r)
+# rhos_disp = [1e1, 1e3]
+# # for bin_disp_ in [True, False]:
+# for weight_mode_ in ["inv_freq", "freq"]:#   or "freq" or "none"
+#     for n_bins_ in [3, 5, 100, 500]:#[100, 500, 1000, 5000]:
+#         for rho_disp in rhos_disp:
+#             for rho in rhos:
+#                 for zero_tol in zero_tols:
+                    
+#                         # models.append(
+#                         #     LGBCovDispPenalty(rho_cov=rho*np.std(y_val_log), rho_disp=rho_disp, cov_mode="cov", disp_mode="l2", zero_grad_tol=zero_tol, eps_y=1e-12, eps_std=1e-12, lgbm_params=lgbm_params)
+#                         # )
+#                         models.append(
+#                             LGBCovDispPenalty(
+#                                 rho_cov=rho,
+#                                 rho_disp=rho_disp,
+#                                 ratio_mode="div",
+#                                 cov_mode="cov",
+#                                 n_bins=n_bins_,
+#                                 binning="uniform",
+#                                 weight_mode=weight_mode_,
+#                                 bin_mse=False,
+#                                 bin_cov=False, # this is already weighted by the (y_i - mean(y_i))
+#                                 bin_disp=True,
+#                             )
+#                         )
+#                 # not adversarial?
 
-# rhos = [5e0, 1e1, 15]
-# # 9. Direct K-moments penalty
-# for l_norm in ["l1"]:#, "l2", "linf"]:
-#     for K_moments in [2, 4, 6]:
-#         for rho in rhos:
-#             for zero_tol in zero_tols:
-#                 models.append(
-#                     LGBMomentPenalty(
-#                         rho=rho, 
-#                         K=K_moments, # number of moments
-#                         basis="poly_log",               # "poly_log" or "poly_y"
-#                         include_intercept_moment=False,  # include φ0(y)=1 as the first moment
-#                         lambda_norm=l_norm,              # "l2", "linf", "l1" (norm on λ)
-#                         scale_by_n=True, # maintain gradients O(1)?
+# # 0. Simple binning MSe
+# for binning_ in ["quantile"]:
+#     for n_bins_ in [100, 500, 1000, 5000, 10000]:
+#         models.append(
+#             LGBBinnedMSEWeights(
+#                 n_bins=n_bins_,
+#                 binning=binning_,            # "quantile" or "uniform"
+#                 weight_mode="inv_freq",        # "inv_freq" or "freq" or "none"
+#                 weight_floor=1e-8,
+#                 zero_grad_tol=1e-6,
+#                 lgbm_params=lgbm_params,
+#                 verbose=True,
+#             )
+#         )
 
-#                         eps_y=1e-12,                   # for y_true division
-#                         eps_norm=1e-12,                # for smoothing norms
-#                         softmax_beta=20.0,             # for smooth ||m||_inf approx when lambda_norm="l1"
-#                         zero_grad_tol=zero_tol,
-            
-#                         verbose=True,
-#                         lgbm_params=lgbm_params
-#                     )
-#                 )
-
-# # 9. Tweeadie (mix of Poisson/Gamma) with their loss. Not really workign well
-# for gsc_mode in ["upper", "taylor"]: # "lower", 
-#     for p_value in [1.7]:#[1.1, 1.2, 1.3, 1.5, 1.9]:
-#         for rho in rhos:
-#             for zero_tol in zero_tols:
-#                 models.append(
-#                     LGBCorrTweediePenalty(
-#                         rho=rho, 
-#                         tweedie_p=p_value, 
-#                         # target_is_log=False, 
-#                         zero_grad_tol=zero_tol, 
-#                         eps_y=1e-12, 
-#                         eps_var=1e-12,
-#                         clip_score=50.0, # 20-50 for stability
-#                         gsc_mode=gsc_mode,        # "taylor", "upper", "lower"
-#                         gsc_apply_to="grad",      # "grad" or "hess"
-#                         gsc_M=max(2-p_value,p_value-1),
-#                         gsc_M_mult=1.0,
-#                         use_corr=True, 
-#                         verbose_print=True,
-#                         lgbm_params=lgbm_params,
-#                     )
-#                 )
-#                 # models.append(
-#                 #     LGBCovTweediePenalty(
-#                 #         rho = float(rho),
-#                 #         tweedie_p= p_value,
-#                 #         target_is_log = False,
-#                 #         zero_grad_tol = zero_tol,
-#                 #         eps_y = 1e-12,
-#                 #         clip_score = 15,
-#                 #         gsc_mode = gsc_mode,
-#                 #         gsc_apply_to = "grad",
-#                 #         gsc_M = max(2-p_value,p_value-1),
-#                 #         # verbose_print = bool(verbose_print)
-#                 #     )
-#                 # )
 
         
 # # 10. 2-stage correction of clusters
@@ -645,9 +703,7 @@ for rho_disp in rhos_disp:
 
 
 
-
-
-run_in_parallel = True
+run_in_parallel = False
 
 if run_in_parallel == False:
 
@@ -659,11 +715,13 @@ if run_in_parallel == False:
     model_names = [str(model) for model in models]
     for name_1 in baseline_models:
         for i,name_2 in enumerate(model_names):
-            if name_1 in name_2:
+            if name_1 in name_2 and "FairnessConstrained" not in name_2:
                 model_names[i] = name_1
 
 
+
     print("models: ", model_names)
+
 
     # Save results on a dict
     results_train = {name:[] for name in model_names}
@@ -727,7 +785,7 @@ else:
     model_names = [str(model) for model in models]
     for name_1 in baseline_models:
         for i,name_2 in enumerate(model_names):
-            if name_1 in name_2:
+            if name_1 in name_2 and "FairnessConstrained" not in name_2:
                 model_names[i] = name_1
 
     print("models: ", model_names)
@@ -1002,7 +1060,7 @@ plt.title("Stable Regression with |Cov(f(X)/y, y)|<= Diff*std(y) [Training Set]"
 plt.xlabel("Ratio of samples to keep")
 plt.ylabel("|Corr(f(x)/y, y)|")
 plt.tight_layout()
-plt.savefig("./temp/plots/hist_train_corr.png", dpi=600)
+plt.savefig("./temp/plots/hist_train_corr.png", dpi=600, bbox_inches="tight")
 
 plt.figure(figsize=(10,6))
 for i,diff in enumerate(diffs):
@@ -1013,7 +1071,7 @@ plt.title("Stable Regression with |Cov(f(X)/y, y)|<= Diff*std(y) [Testing Set]")
 plt.xlabel("Ratio of samples to keep")
 plt.ylabel("|Corr(f(x)/y, y)|")
 plt.tight_layout()
-plt.savefig("./temp/plots/hist_val_corr.png", dpi=600)
+plt.savefig("./temp/plots/hist_val_corr.png", dpi=600, bbox_inches="tight")
 
 
 # Correlation between residuals and y
@@ -1026,7 +1084,7 @@ plt.title("Stable Regression with |Cov(f(X)/y, y)|<= Diff*std(y) [Training Set]"
 plt.xlabel("Ratio of samples to keep")
 plt.ylabel("|Corr(res(x), y)|")
 plt.tight_layout()
-plt.savefig("./temp/plots/hist_train_res_y_corr.png", dpi=600)
+plt.savefig("./temp/plots/hist_train_res_y_corr.png", dpi=600, bbox_inches="tight")
 
 plt.figure(figsize=(10,6))
 for i,diff in enumerate(diffs):
@@ -1037,7 +1095,7 @@ plt.title("Stable Regression with |Cov(f(X)/y, y)|<= Diff*std(y) [Testing Set]")
 plt.xlabel("Ratio of samples to keep")
 plt.ylabel("|Corr(res(x), y)|")
 plt.tight_layout()
-plt.savefig("./temp/plots/hist_val_res_y_corr.png", dpi=600)
+plt.savefig("./temp/plots/hist_val_res_y_corr.png", dpi=600, bbox_inches="tight")
 
 
 # R2 plots

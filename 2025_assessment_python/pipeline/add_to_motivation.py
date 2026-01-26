@@ -257,36 +257,13 @@ def _run_clustered_model_diagnostics(
 # DELETE
 rho_ = 1e3
 models_ = [
-    LGBCovDispPenalty(rho_cov=rho_*np.std(y_val_log), rho_disp=0, cov_mode="cov", disp_mode="l2", zero_grad_tol=zero_tol, eps_y=1e-12, eps_std=1e-12, lgbm_params=lgbm_params),
-    LGBCovPenalty(rho=rho_, zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params),
+    # LGBCovDispPenalty(rho_cov=rho_*np.std(y_val_log), rho_disp=0, cov_mode="cov", disp_mode="l2", zero_grad_tol=zero_tol, eps_y=1e-12, eps_std=1e-12, lgbm_params=lgbm_params),
+    LGBCovPenalty(rho=1000, ratio_mode="div", zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params),
     # LGBSmoothPenalty(rho=rho_, zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params),
     lgb.LGBMRegressor(**lgbm_params),
+    LGBCondMeanVarPenalty(rho_cov=9, rho_disp=1, n_bins=500, ratio_mode="diff", 
+                                                anchor_mode="target", zero_grad_tol=zero_tol, eps_y=1e-12, lgbm_params=lgbm_params),
 ]
-
-# for kind_ in ["regime"]:
-
-#     cfg = PipelineConfig(
-#         base=LGBPenaltyConfig(
-#             penalty='smooth_surr',# "mse", "smooth_surr", "cov", "prb_slope",   # example: base uses PRB-style penalty too
-#             rho=rho_,
-#             ratio_mode="div",#"diff",
-#             lgbm_params=lgbm_params,
-#         ),
-#         use_calibration=True,
-#         calib=CalibratorALMConfig(
-#             kind=kind_, # "1d", "regime",
-#             regime_mode="kmeans",
-#             n_regimes=n_clusters,
-#             fairness_metric="prb_slope",# "cov", "prb_slope",
-#             ratio_mode="div",#"diff",
-#             strata_mode="regimes",#"none", "labels", "pred_quantiles", "regimes"   # recommended if you have exogenous strata labels
-#             n_strata=n_clusters,
-#             # ALM opt (2nd stage)
-#             max_abs_correction=0.20,
-#             stop_tol=1e-4,
-#         ),
-#     )
-#     models_.append(RegressivityConstrainedLogModel(cfg))
 
 _run_clustered_model_diagnostics(
     models_,

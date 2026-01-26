@@ -1,0 +1,64 @@
+no change     /orcd/software/core/001/centos7/pkg/miniforge/24.3.0-0/condabin/conda
+no change     /orcd/software/core/001/centos7/pkg/miniforge/24.3.0-0/bin/conda
+no change     /orcd/software/core/001/centos7/pkg/miniforge/24.3.0-0/bin/conda-env
+no change     /orcd/software/core/001/centos7/pkg/miniforge/24.3.0-0/bin/activate
+no change     /orcd/software/core/001/centos7/pkg/miniforge/24.3.0-0/bin/deactivate
+no change     /orcd/software/core/001/centos7/pkg/miniforge/24.3.0-0/etc/profile.d/conda.sh
+no change     /orcd/software/core/001/centos7/pkg/miniforge/24.3.0-0/etc/fish/conf.d/conda.fish
+no change     /orcd/software/core/001/centos7/pkg/miniforge/24.3.0-0/shell/condabin/Conda.psm1
+no change     /orcd/software/core/001/centos7/pkg/miniforge/24.3.0-0/shell/condabin/conda-hook.ps1
+no change     /orcd/software/core/001/centos7/pkg/miniforge/24.3.0-0/lib/python3.10/site-packages/xontrib/conda.xsh
+no change     /orcd/software/core/001/centos7/pkg/miniforge/24.3.0-0/etc/profile.d/conda.csh
+no change     /home/nacevedo/.bashrc
+No action taken.
+Loading parquet: ../data_county/2025/training_data.parquet
+Subset (last N rows): kept last 20,000 rows -> rows=20,000
+Rows after filtering: 20,000
+WARNING: dataset size is unexpectedly small; check parquet path / filters.
+Pre-test rows: 16,457 (0.822871)
+Test rows:     3,543 (0.177129)
+Temporal folds: 5 (horizon=2,915 rows each)
+Parallel jobs: 16 (cpu_count=192)
+[Stage 1] LGBM candidates: 10000, folds used: 2
+[Stage 1] Fold 3: train=12,656, val=2,915
+[Stage 1] Fold 4: train=13,542, val=2,915
+[Stage 1] Selected top-k LGBM configs: 8
+[Stage 2] Total configs: 8 (LGBM=8)
+[Stage 2] Fold 0: train=10,000, val=2,915
+[Stage 2] Fold 1: train=10,885, val=2,915
+[Stage 2] Fold 2: train=11,771, val=2,915
+[Stage 2] Fold 3: train=12,656, val=2,915
+[Stage 2] Fold 4: train=13,542, val=2,915
+
+Top 20 configs by CV mean MAE (original scale):
+model                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     params          mae          rmse  mae_log  rmse_log  elapsed_s
+ lgbm     {"bagging_fraction": 0.8428234162819122, "bagging_freq": 1, "boosting_type": "gbdt", "feature_fraction": 0.6132763726499917, "force_col_wise": true, "lambda_l1": 0.003014864232968839, "lambda_l2": 0.0023105360653011787, "learning_rate": 0.011923049822178568, "max_bin": 511, "max_depth": 8, "min_child_samples": 83, "min_gain_to_split": 0.001958927480050991, "n_estimators": 10000, "n_jobs": 1, "num_leaves": 147, "objective": "regression", "subsample_for_bin": 200000, "verbosity": -1} 79228.847802 136227.772278 0.207124  0.289991   9.932030
+ lgbm       {"bagging_fraction": 0.8250266682694359, "bagging_freq": 1, "boosting_type": "gbdt", "feature_fraction": 0.6035199608990429, "force_col_wise": true, "lambda_l1": 1.4960018917887534e-05, "lambda_l2": 0.05792075020453838, "learning_rate": 0.020871690169053894, "max_bin": 511, "max_depth": 7, "min_child_samples": 82, "min_gain_to_split": 0.02735126852854018, "n_estimators": 10000, "n_jobs": 1, "num_leaves": 82, "objective": "regression", "subsample_for_bin": 800000, "verbosity": -1} 79340.765069 136388.927571 0.207257  0.290344   5.261230
+ lgbm       {"bagging_fraction": 0.8125994833744346, "bagging_freq": 2, "boosting_type": "gbdt", "feature_fraction": 0.6021535857625674, "force_col_wise": true, "lambda_l1": 9.776148952617195e-05, "lambda_l2": 0.3090700088658175, "learning_rate": 0.011281219069380738, "max_bin": 511, "max_depth": 9, "min_child_samples": 104, "min_gain_to_split": 0.06161770606702553, "n_estimators": 10000, "n_jobs": 1, "num_leaves": 282, "objective": "regression", "subsample_for_bin": 400000, "verbosity": -1} 79400.537072 137281.865832 0.207290  0.290260   8.399376
+ lgbm  {"bagging_fraction": 0.6231036409337269, "bagging_freq": 2, "boosting_type": "gbdt", "feature_fraction": 0.6048465985637003, "force_col_wise": true, "lambda_l1": 1.3003785317938675e-05, "lambda_l2": 0.0013556064907893407, "learning_rate": 0.008417625551382132, "max_bin": 511, "max_depth": 9, "min_child_samples": 95, "min_gain_to_split": 0.0006792460548469985, "n_estimators": 10000, "n_jobs": 1, "num_leaves": 506, "objective": "regression", "subsample_for_bin": 200000, "verbosity": -1} 79454.819152 138168.273700 0.207321  0.290027  11.482804
+ lgbm    {"bagging_fraction": 0.6978336658624942, "bagging_freq": 2, "boosting_type": "gbdt", "feature_fraction": 0.6061325099831891, "force_col_wise": true, "lambda_l1": 0.0002618840550707106, "lambda_l2": 0.009574313388212182, "learning_rate": 0.01484552232181367, "max_bin": 511, "max_depth": 10, "min_child_samples": 104, "min_gain_to_split": 0.004828198101460959, "n_estimators": 10000, "n_jobs": 1, "num_leaves": 512, "objective": "regression", "subsample_for_bin": 800000, "verbosity": -1} 79532.712942 137791.537773 0.207557  0.290312   8.198898
+ lgbm {"bagging_fraction": 0.8045749332728875, "bagging_freq": 3, "boosting_type": "gbdt", "feature_fraction": 0.6196673537382665, "force_col_wise": true, "lambda_l1": 0.0004814559654627744, "lambda_l2": 0.00047728740881324987, "learning_rate": 0.008907937540819222, "max_bin": 1023, "max_depth": 10, "min_child_samples": 100, "min_gain_to_split": 0.06818480824936678, "n_estimators": 10000, "n_jobs": 1, "num_leaves": 512, "objective": "regression", "subsample_for_bin": 800000, "verbosity": -1} 79552.092619 137278.427185 0.207647  0.290501  14.698498
+ lgbm    {"bagging_fraction": 0.6256570942943334, "bagging_freq": 2, "boosting_type": "gbdt", "feature_fraction": 0.6001270351477996, "force_col_wise": true, "lambda_l1": 0.00496249458006254, "lambda_l2": 0.0004200623934410472, "learning_rate": 0.008497341674634491, "max_bin": 1023, "max_depth": 10, "min_child_samples": 92, "min_gain_to_split": 0.034713366767556986, "n_estimators": 10000, "n_jobs": 1, "num_leaves": 512, "objective": "regression", "subsample_for_bin": 400000, "verbosity": -1} 79583.022743 138191.831815 0.207532  0.289973  15.695773
+ lgbm      {"bagging_fraction": 0.7605934893411783, "bagging_freq": 3, "boosting_type": "gbdt", "feature_fraction": 0.6020359022035967, "force_col_wise": true, "lambda_l1": 0.02117613273447406, "lambda_l2": 0.004132623668709549, "learning_rate": 0.01145331318745219, "max_bin": 511, "max_depth": 10, "min_child_samples": 125, "min_gain_to_split": 0.012271552974712344, "n_estimators": 10000, "n_jobs": 1, "num_leaves": 512, "objective": "regression", "subsample_for_bin": 400000, "verbosity": -1} 79601.732354 138666.023736 0.207473  0.290055   9.589321
+
+BEST: model=lgbm, CV_MAE=79228.85, CV_RMSE=136227.77
+Training until validation scores don't improve for 200 rounds
+Early stopping, best iteration is:
+[1480]	valid_0's l1: 0.201389	valid_0's l2: 0.078633
+Evaluated only: l1
+Final LGBM best_iteration_ = 1480
+
+TEST metrics (original sale price scale):
+{
+  "mae": 78317.7461053133,
+  "rmse": 137942.06656701167
+}
+TEST metrics (log scale):
+{
+  "mae_log": 0.20174237215036198,
+  "rmse_log": 0.2827470930121306
+}
+Saved CV results to: artifacts/cv_results_20260117_211937.csv
+Saved preprocessing pipeline to: artifacts/preprocess_pipeline_20260117_211937.joblib
+Saved LightGBM model to: artifacts/best_model_lgbm_20260117_211937.txt
+Saved run summary to: artifacts/run_summary_20260117_211937.json

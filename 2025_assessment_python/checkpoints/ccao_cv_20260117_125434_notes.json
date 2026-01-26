@@ -1,0 +1,40 @@
+{
+  "run_ts": "20260117_125434",
+  "checkpoint_rows": "checkpoints/ccao_cv_20260117_125434_rows_partial.csv",
+  "checkpoint_best": "checkpoints/ccao_cv_20260117_125434_best_so_far.json",
+  "config": {
+    "parquet_path": "../data_county/2025/training_data.parquet",
+    "params_yaml_path": "params.yaml",
+    "target_name": "meta_sale_price",
+    "date_col": "meta_sale_date",
+    "subset_max_rows": 20000,
+    "subset_recent_years": 0,
+    "pretest_prop": 0.822871,
+    "inner_train_prop": 0.822871,
+    "n_splits": 5,
+    "min_train_fraction_of_pretest": 0.45,
+    "bootstrap_seeds": [
+      123,
+      3432,
+      8354
+    ],
+    "bootstrap_size": 200000,
+    "bootstrap_method": "stratified_month",
+    "parallel_jobs": 32,
+    "checkpoint_dir": "checkpoints",
+    "checkpoint_prefix": "ccao_cv",
+    "checkpoint_every_fold": true,
+    "handle_signals": true,
+    "lgbm_stage1_candidates": 10000,
+    "lgbm_stage1_folds": 2,
+    "lgbm_stage1_topk": 8,
+    "lgbm_stage2_candidates": 1000,
+    "lgbm_early_stopping_rounds": 200,
+    "lgbm_max_estimators": 10000,
+    "elasticnet_candidates": 0,
+    "rf_candidates": 0,
+    "gbr_candidates": 0,
+    "random_seed": 234,
+    "verbose": true
+  }
+}

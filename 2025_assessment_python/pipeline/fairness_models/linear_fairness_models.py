@@ -2833,3 +2833,196 @@ class ProportionalAbsoluteRegression:
     
     def __str__(self):
         return f"ProportionalAbsoluteRegression(fit_intercept={self.fit_intercept}, max_iters={self.max_iters}, tol={self.tol})"
+
+
+
+# After LGBM models
+from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
+
+class FairnessConstrainedRidgeLog(BaseEstimator, RegressorMixin):
+    """Ridge regression for log-price targets with a global covariance penalty,
+    plus an optional separable (upper-bound) surrogate penalty.
+
+    Objective (sklearn-style scaling):
+        (1/(2n)) * ||y - y_hat||^2
+        + (alpha/2) * ||beta||^2   (intercept not penalized)
+        + (rho/2) * c(beta)^2
+        + (rho_sep/2) * s(beta)
+
+    Global covariance moment (same as before):
+        c(beta) = (1/n) * sum_i r_i * y_c,i
+
+      mode='diff': r_i = y_hat_i - y_i     (target 0)
+      mode='div' : r_i = y_hat_i / y_i^safe (target 1)
+
+    Separable surrogate (Jensen upper bound on c^2), but centered at the right target:
+        define r_tilde_i = r_i - t, where t=0 for diff and t=1 for div
+        s(beta) := (1/n) * sum_i (r_tilde_i * y_c,i)^2
+    """
+
+    def __init__(
+        self,
+        alpha=1.0,
+        rho=1.0,
+        rho_sep=0.0,          # coefficient for separable surrogate
+        mode="diff",
+        fit_intercept=True,
+        eps_y=1e-12
+    ):
+        self.alpha = alpha
+        self.rho = rho
+        self.rho_sep = rho_sep
+        self.mode = mode
+        self.fit_intercept = fit_intercept
+        self.eps_y = eps_y
+
+    def fit(self, X, y):
+        X, y = check_X_y(X, y, accept_sparse=False, y_numeric=True)
+        n, d = X.shape
+
+        if self.mode not in ("diff", "div"):
+            raise ValueError("mode must be one of {'diff','div'}")
+        if float(self.rho) < 0 or float(self.rho_sep) < 0:
+            raise ValueError("rho and rho_sep must be >= 0")
+
+        # ---- Augment for intercept
+        if self.fit_intercept:
+            X_aug = np.hstack([X, np.ones((n, 1), dtype=X.dtype)])
+            p = d + 1
+        else:
+            X_aug = X
+            p = d
+
+        # ---- Base quadratic pieces
+        XtX = (X_aug.T @ X_aug) / float(n)
+        Xty = (X_aug.T @ y) / float(n)
+
+        I_reg = np.eye(p, dtype=float)
+        if self.fit_intercept:
+            I_reg[-1, -1] = 0.0
+
+        A = XtX + (float(self.alpha) * I_reg)
+        rhs = Xty.copy()
+
+        # ---- Centered y
+        y_mean = float(np.mean(y))
+        y_c = y - y_mean
+        var_y = float(np.mean(y_c * y_c))
+
+        # ==========================================================
+        # A) Separable surrogate term (CENTERED at correct target)
+        #     s(beta) = (1/n) sum_i ( (r_i - t) * y_c,i )^2
+        # ==========================================================
+        rho_s = float(self.rho_sep)
+        if rho_s > 0.0:
+            if self.mode == "diff":
+                # r_tilde = (Xb - y) - 0 = Xb - y
+                # s = (1/n)||diag(y_c)(Xb - y)||^2
+                d2 = (y_c ** 2).astype(float)
+                Xw = X_aug * d2[:, None]
+                A += rho_s * (X_aug.T @ Xw) / float(n)
+                rhs += rho_s * (X_aug.T @ (d2 * y)) / float(n)
+
+            else:
+                # mode == "div"
+                # r = (Xb)/y_safe, target t=1 => r_tilde = (Xb)/y_safe - 1 = (Xb - y_safe)/y_safe
+                # s = (1/n) sum (y_c^2 / y_safe^2) * (Xb - y_safe)^2
+                y_safe = self._safe_y(y)
+                d2 = (y_c ** 2) / (y_safe ** 2)
+                Xw = X_aug * d2[:, None]
+                A += rho_s * (X_aug.T @ Xw) / float(n)
+                rhs += rho_s * (X_aug.T @ (d2 * y_safe)) / float(n)
+
+        # ==========================================================
+        # B) Global covariance penalty (unchanged; shift doesn't matter)
+        # ==========================================================
+        rho_g = float(self.rho)
+        if rho_g > 0.0:
+            if self.mode == "diff":
+                # c = mean((Xb - y)*y_c) = u^T b - var_y
+                u = (X_aug.T @ y_c) / float(n)
+                if self.fit_intercept:
+                    u[-1] = 0.0
+                rhs = rhs + (rho_g * var_y) * u
+            else:
+                # c = mean(((Xb)/y_safe)*y_c) = u^T b
+                y_safe = self._safe_y(y)
+                w = y_c / y_safe
+                u = (X_aug.T @ w) / float(n)
+
+            u = u.reshape(-1, 1)
+            rhs_vec = rhs.reshape(-1, 1)
+
+            beta0 = self._solve(A, rhs_vec)
+            Au = self._solve(A, u)
+            denom = 1.0 + rho_g * float((u.T @ Au).item())
+
+            if (not np.isfinite(denom)) or abs(denom) < 1e-15:
+                LHS = A + rho_g * (u @ u.T)
+                beta = self._solve(LHS, rhs_vec)
+            else:
+                beta = beta0 - (rho_g / denom) * (Au * float((u.T @ beta0).item()))
+            beta = beta.ravel()
+
+        else:
+            beta = self._solve(A, rhs.reshape(-1, 1)).ravel()
+            u = None
+
+        # ---- unpack
+        if self.fit_intercept:
+            self.coef_ = beta[:-1]
+            self.intercept_ = float(beta[-1])
+        else:
+            self.coef_ = beta
+            self.intercept_ = 0.0
+
+        # ---- diagnostics (train moments)
+        y_hat = X_aug @ beta
+        if self.mode == "diff":
+            r = y_hat - y
+            r_tilde = r  # target 0
+        else:
+            y_safe = self._safe_y(y)
+            r = y_hat / y_safe
+            r_tilde = r - 1.0  # target 1
+
+        a = r * y_c              # for covariance moment (same as (r-1)*y_c)
+        a_tilde = r_tilde * y_c  # for separable surrogate
+
+        self.cov_moment_ = float(np.mean(a))
+        self.cov_moment_sq_ = float(self.cov_moment_ ** 2)
+        self.sep_surrogate_ = float(np.mean(a_tilde ** 2))  # (1/n) sum ( (r-t)*y_c )^2
+
+        self.y_mean_ = y_mean
+        self._u_ = None if u is None else u.ravel()
+        self._n_features_in_ = d
+
+        return self
+
+    def predict(self, X):
+        check_is_fitted(self, ["coef_", "intercept_"])
+        X = check_array(X)
+        return X @ self.coef_ + self.intercept_
+
+    def _safe_y(self, y):
+        y = np.asarray(y, dtype=float)
+        eps = float(self.eps_y)
+        y_safe = y.copy()
+        mask = np.abs(y_safe) < eps
+        if np.any(mask):
+            y_safe[mask] = np.where(y_safe[mask] >= 0.0, eps, -eps)
+        return y_safe
+
+    def __str__(self):
+        return f"FairnessConstrainedRidgeLog(alpha={self.alpha}, rho={self.rho}, rho_sep={self.rho_sep}, mode={self.mode})"
+
+    def __repr__(self):
+            return f"FairnessConstrainedRidgeLog(alpha={self.alpha}, rho={self.rho}, rho_sep={self.rho_sep}, mode={self.mode})"
+
+    @staticmethod
+    def _solve(M, b):
+        try:
+            return np.linalg.solve(M, b)
+        except np.linalg.LinAlgError:
+            return np.linalg.lstsq(M, b, rcond=None)[0]
+

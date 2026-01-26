@@ -33,8 +33,11 @@ def results_to_dataframe(results, r_values, round_decimals=3, source="train"):
     cols = ['Model', 'r'] + [c for c in df.columns if c not in ['Model', 'r']]
     df = df[cols] #.style.format(precision=round_decimals) #.round(round_decimals)
 
+    # Save the .csv
+
     # --- New Saving Logic ---
     file_name = f"./temp/tables/results_{source}.txt"
+    df.to_csv(file_name.replace(".txt", ".csv"))
     try:
         # Generate the tabular content only (no caption/label yet).
         # We removed booktabs=True as requested.
@@ -770,3 +773,17 @@ def plotting_dict_of_models_results(results, r_list, source="train", n_jobs=1, s
 
     if scatter_config:
         plot_scatter_diagnostics(**scatter_config)
+
+
+
+
+
+
+
+
+###########################################
+# Code for post-inference computations
+###########################################
+
+
+

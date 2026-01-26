@@ -1,0 +1,78 @@
+{
+  "best_model": "lgbm",
+  "best_params": {
+    "bagging_fraction": 0.778330058700996,
+    "bagging_freq": 2,
+    "boosting_type": "gbdt",
+    "feature_fraction": 0.6275821029717381,
+    "force_col_wise": true,
+    "lambda_l1": 4.517294931927867e-05,
+    "lambda_l2": 0.011920732454655213,
+    "learning_rate": 0.012411135642075856,
+    "max_bin": 511,
+    "max_depth": 10,
+    "min_child_samples": 75,
+    "min_gain_to_split": 0.00454536314980534,
+    "n_estimators": 10000,
+    "n_jobs": 1,
+    "num_leaves": 512,
+    "objective": "regression",
+    "subsample_for_bin": 800000,
+    "verbosity": -1
+  },
+  "cv_best": {
+    "model": "lgbm",
+    "params": "{\"bagging_fraction\": 0.778330058700996, \"bagging_freq\": 2, \"boosting_type\": \"gbdt\", \"feature_fraction\": 0.6275821029717381, \"force_col_wise\": true, \"lambda_l1\": 4.517294931927867e-05, \"lambda_l2\": 0.011920732454655213, \"learning_rate\": 0.012411135642075856, \"max_bin\": 511, \"max_depth\": 10, \"min_child_samples\": 75, \"min_gain_to_split\": 0.00454536314980534, \"n_estimators\": 10000, \"n_jobs\": 1, \"num_leaves\": 512, \"objective\": \"regression\", \"subsample_for_bin\": 800000, \"verbosity\": -1}",
+    "mae": 79260.92820843759,
+    "rmse": 136061.6958959593,
+    "mae_log": 0.20726051607049248,
+    "rmse_log": 0.29028996221787856,
+    "elapsed_s": 12.152028703689576
+  },
+  "test_metrics": {
+    "mae_log": 0.20164497973168413,
+    "rmse_log": 0.2825364438010027,
+    "mae": 78163.68172637107,
+    "rmse": 137593.58113719727
+  },
+  "config": {
+    "parquet_path": "../data_county/2025/training_data.parquet",
+    "params_yaml_path": "params.yaml",
+    "target_name": "meta_sale_price",
+    "date_col": "meta_sale_date",
+    "subset_max_rows": 20000,
+    "subset_recent_years": 0,
+    "pretest_prop": 0.822871,
+    "inner_train_prop": 0.822871,
+    "n_splits": 5,
+    "min_train_fraction_of_pretest": 0.45,
+    "bootstrap_seeds": [
+      123,
+      3432,
+      8354
+    ],
+    "bootstrap_size": 100000,
+    "bootstrap_method": "stratified_month",
+    "parallel_jobs": 32,
+    "checkpoint_dir": "checkpoints",
+    "checkpoint_prefix": "ccao_cv",
+    "checkpoint_every_fold": true,
+    "handle_signals": true,
+    "lgbm_stage1_candidates": 1000,
+    "lgbm_stage1_folds": 2,
+    "lgbm_stage1_topk": 8,
+    "lgbm_stage2_candidates": 100,
+    "lgbm_early_stopping_rounds": 200,
+    "lgbm_max_estimators": 10000,
+    "elasticnet_candidates": 0,
+    "rf_candidates": 0,
+    "gbr_candidates": 0,
+    "random_seed": 234,
+    "verbose": true
+  },
+  "paths": {
+    "pipeline": "artifacts/preprocess_pipeline_20260117_150240.joblib",
+    "model": "artifacts/best_model_lgbm_20260117_150240.txt",
+    "cv_results": "artifacts/cv_results_20260117_150240.csv"
+  }
+}
