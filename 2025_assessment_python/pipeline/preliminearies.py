@@ -35,6 +35,9 @@ folder_path = os.path.join(os.getcwd(), "2025_assessment_python")
 sys.path.append(folder_path)
 from recipes.recipes_pipelined import build_model_pipeline, build_model_pipeline_supress_onehot, ModelMainRecipe, ModelMainRecipeImputer
 
+
+from src_.motivation_utils import compute_taxation_metrics
+
 source = "CCAO" # "toy_data"
 
 
@@ -80,6 +83,7 @@ elif source == "CCAO":
         (~df['ind_pin_is_multicard'].astype('bool').fillna(True)) &
         (~df['sv_is_outlier'].astype('bool').fillna(True))
     ]
+
 
 # Get only the desired columns
 with open('params.yaml', 'r') as file:
@@ -146,7 +150,202 @@ X_val_emb = model_emb_pipeline.transform(X_val)
 X_test_emb = model_emb_pipeline.transform(X_test)
 X_train.head()
 
-from fairness_models.nn_fairness_models import FeedForwardNNRegressorWithEmbeddings6
+
+# Plot the wieghts of surrogate one
+
+random_state = 42
+n_jobs =190
+max_iter=200#100#200#500 #0
+
+
+fit_intercept = True
+l1,l2 = 1e-3, 1e-2 #5e-1 # l1 = 1e-3
+num_leaves = 31#31
+max_depth = 15 #5
+lr = 1e-1
+
+lgbm_params = {
+    "boosting_type": "gbdt",
+    "num_leaves": 31,
+    "max_depth": max_depth,
+    # "num_leaves":  2**(max_depth)//8, # must be at most 2^max_depth 
+    "learning_rate": lr,
+    "n_estimators": max_iter,
+    "subsample_for_bin": 200000,
+    "objective": "mse", # To be updated inside
+    "class_weight": None,
+    "min_child_samples": 30,
+    "colsample_bytree": 1.0,
+    "reg_alpha": l1,
+    "reg_lambda": l2,
+    "random_state": random_state,
+    "n_jobs": 1,#n_jobs,
+    "importance_type": "split",
+}
+
+
+import lightgbm as lgb
+from fairness_models.boosting_fairness_models import LGBSmoothPenalty, LGBCovPenalty
+# model = lgb.LGBMRegressor(**lgbm_params)
+# model = LGBSmoothPenalty(rho=2, ratio_mode="diff", zero_grad_tol=1e-12, eps_y=1e-12, lgbm_params=lgbm_params)
+model = LGBCovPenalty(rho=1487, ratio_mode="div", zero_grad_tol=1e-12, eps_y=1e-12, lgbm_params=lgbm_params)
+model.fit(X_train, y_train_log)
+y_pred_log = model.predict(X_val)
+residuals = y_pred_log - y_val_log
+ratios = np.exp(y_pred_log) / y_val
+
+y_plot = np.abs(y_val_log - np.mean(y_val_log))
+x_plot = y_val_log
+# plt.plot(x_plot, y_plot**2, 'o')
+# plt.savefig("temp/plots/weights/weights_1.png")
+# plt.close()
+
+plt.plot(x_plot, y_plot**2/x_plot**2, 'o')
+plt.savefig("temp/plots/weights/weights.png")
+plt.close()
+
+plt.plot(x_plot, residuals**2*y_plot**2/x_plot**2, 'o')
+plt.savefig("temp/plots/weights/residual_weights.png")
+plt.close()
+
+plt.plot(x_plot, residuals**2, 'o')
+plt.savefig("temp/plots/weights/residuals_sqrd.png")
+plt.close()
+
+# from sklearn.ensemble import IsolationForest
+# # X = [[-1.1], [0.3], [0.5], [100]]
+# isolation_args = dict(n_estimators=100, max_samples='auto', contamination='auto', max_features=1.0, bootstrap=False, n_jobs=None, random_state=None, verbose=0, warm_start=False)
+
+# clf = IsolationForest(random_state=0).fit(X_val)
+# color_values = clf.score_samples(X_val)#clf.predict(X_val)
+# plt.scatter(x_plot, residuals**2, c=color_values, cmap='viridis') # 'viridis' is a common colormap
+# plt.savefig("temp/plots/weights/residual_outliers.png")
+# plt.close()
+
+import numpy as np
+from scipy.stats import skew
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.stats import skew
+
+def binned_stats(x, y, n_bins, bin_type="quantile"):
+    """
+    Compute mean, std, skew, and kurtosis of y in bins of x.
+    """
+    df = pd.DataFrame({'x': x, 'y': y})
+    
+    if bin_type == "quantile":
+        df['bin'] = pd.qcut(df['x'], q=n_bins, duplicates='drop')
+    elif bin_type == "uniform":
+        df['bin'] = pd.cut(df['x'], bins=n_bins)
+    else:
+        raise ValueError("bin_type must be 'quantile' or 'uniform'")
+
+    # Aggregation functions handling NaNs
+    def safe_skew(series):
+        return skew(series, nan_policy='omit')
+    
+    def safe_kurtosis(series):
+        # Fisher=True means Normal dist has kurtosis = 0
+        return kurtosis(series, fisher=True, nan_policy='omit')
+
+    stats = df.groupby('bin', observed=False)['y'].agg(
+        count='count',
+        mean='mean',
+        std='std',
+        skew=safe_skew,
+        kurt=safe_kurtosis
+    ).reset_index()
+
+    # Extract bin centers/edges and CAST TO FLOAT to fix the plotting error
+    stats['x_min'] = stats['bin'].apply(lambda i: i.left).astype(float)
+    stats['x_max'] = stats['bin'].apply(lambda i: i.right).astype(float)
+    stats['x_center'] = stats['bin'].apply(lambda i: i.mid).astype(float)
+
+    return stats[['x_min', 'x_max', 'x_center', 'count', 'mean', 'std', 'skew', 'kurt']]
+
+def plot_binned_stats(stats_df, title="Binned Statistics Summary"):
+    sns.set_theme(style="whitegrid")
+    
+    # Switch to 3 rows: Main (2x height), Skew (1x), Kurtosis (1x)
+    fig, (ax1, ax2, ax3) = plt.subplots(
+        nrows=3, 
+        ncols=1, 
+        figsize=(10, 10), 
+        sharex=True, 
+        gridspec_kw={'height_ratios': [2, 1, 1]}
+    )
+
+    x = stats_df['x_center']
+    
+    # --- Row 1: Mean, Std, Counts ---
+    ax1.plot(x, stats_df['mean'], color='#1f77b4', lw=2, label='Mean')
+    ax1.fill_between(
+        x, 
+        stats_df['mean'] - stats_df['std'], 
+        stats_df['mean'] + stats_df['std'], 
+        color='#1f77b4', 
+        alpha=0.2, 
+        label='Mean ± 1 Std'
+    )
+    
+    # Ghost Bar Chart for Counts
+    ax1_count = ax1.twinx()
+    bar_width = (stats_df['x_max'] - stats_df['x_min']) * 0.8
+    ax1_count.bar(x, stats_df['count'], color='gray', alpha=0.15, width=bar_width, label='Count')
+    ax1_count.set_ylabel('Count', color='gray')
+    ax1_count.grid(False)
+    
+    ax1.set_ylabel('Mean $\pm$ Std')
+    ax1.set_title(title, fontsize=14, pad=15)
+    ax1.legend(loc='upper left')
+
+    # --- Row 2: Skewness ---
+    ax2.axhline(0, color='black', ls='--', lw=1, alpha=0.5)
+    ax2.plot(x, stats_df['skew'], color='#d62728', marker='o', ms=4, label='Skewness')
+    ax2.set_ylabel('Skewness')
+    ax2.legend(loc='upper left')
+
+    # --- Row 3: Kurtosis ---
+    # Kurtosis > 0 means "heavier tails than normal"
+    ax3.axhline(0, color='black', ls='--', lw=1, alpha=0.5)
+    ax3.plot(x, stats_df['kurt'], color='#2ca02c', marker='s', ms=4, label='Kurtosis (Fisher)')
+    ax3.set_ylabel('Kurtosis')
+    ax3.set_xlabel('X Value (Bin Center)')
+    ax3.legend(loc='upper left')
+
+    plt.tight_layout()
+    # plt.show()
+    plt.savefig("temp/plots/weights/bin_evolution.png")
+    # plt.show()
+
+# --- Example Usage ---
+
+# 2. Run the function
+n_bins = 50
+# df_summary = binned_stats(y_val_log.to_numpy(), ratios.to_numpy(), n_bins=n_bins, bin_type='quantile')
+df_summary = binned_stats(y_val_log.to_numpy(), residuals.to_numpy(), n_bins=n_bins, bin_type='quantile')
+
+# 3. Display DataFrame
+print("Summary DataFrame (First 5 bins):")
+print(df_summary.head(n_bins))
+
+# 4. Plot
+plot_binned_stats(df_summary, title="Evolution of Y Metrics by X Bins")
+
+
+# print("Stats")
+# results = binned_stats(y_val_log, residuals, bins=10, bin_type="quantile")
+
+# print("Stats 2")
+# print(binned_stats(y_val_log, ratios, bins=10, bin_type="quantile"))
+
+exit()
+
+
 
 import numpy as np
 import pandas as pd
@@ -157,61 +356,11 @@ from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 from sklearn.linear_model import RidgeCV
 
 
+# ==========================================
+# 1. The Core Estimator (Log-Space Corrected)
+# ==========================================
 
-# # 2. Fit / transform the data for models with embeddings
-# X_train_fit_emb = model_emb_pipeline.fit_transform(X_train_prep, y_train_fit_log).drop(columns=params['model']['predictor']['id'], errors="ignore")
-# X_val_fit_emb = model_emb_pipeline.transform(X_val_prep).drop(columns=params['model']['predictor']['id'], errors="ignore")
-# X_test_fit_emb = model_emb_pipeline.transform(X_test_prep).drop(columns=params['model']['predictor']['id'], errors="ignore")
-# # X_train_fit_emb["char_recent_renovation"] = X_train_fit_emb["char_recent_renovation"].astype(bool) # QUESTION: Why is this not in cat_vars?
-# # na_columns = X_train_fit_emb.isna().sum()[X_train_fit_emb.isna().sum() > 0].index
-# # X_train_fit_emb[na_columns] = X_train_fit_emb[na_columns].fillna(value="unknown")
-# cat_cols_emb = [i for i,col in enumerate(X_train_emb.columns) if X_train_emb[col].dtype == object  or X_train_emb[col].dtype == "category"]
-pred_vars = [col for col in params['model']['predictor']['all'] if col in X_train_emb.columns] 
-large_categories = ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in pred_vars if c.startswith('loc_school_')]
-coord_vars = ["loc_longitude", "loc_latitude"]
-
-
-emb_params = {
-                'learning_rate': 0.000736, 
-                'categorical_features': large_categories, 
-                'coord_features': coord_vars,
-                'batch_size': 2048, 
-                'num_epochs': 500, 
-                'hidden_sizes': [512, 256, 128], #[1796, 193, 140, 69],
-                'fourier_type': 'basic', 
-                'patience': 11, 
-                'loss': 'mse',#, 'gamma': 1.409,
-                'validation_split': 0.15,
-                'eps_y':1e-12,
-                'use_scaler':True,
-                # 'mode':"div",
-
-                'random_state': 42, 
-            }
-
-
-        # categorical_features,
-        # coord_features=(),
-        # fourier_type="none",
-        # fourier_mapping_size=16,
-        # fourier_sigma=1.25,
-        # hidden_sizes=(256, 256),         # in resnet mode, first entry is working dim
-        # dropout=0.1,
-        # normalization="layer_norm",       # 'layer_norm' or 'none'
-        # mlp_style="resnet",               # 'resnet' (recommended) or 'plain'
-        # batch_size=256,
-        # learning_rate=1e-3,
-        # num_epochs=50,
-        # patience=10,
-        # 
-        # use_scaler=True,
-        # loss="mse",           # "mse" or "huber"
-        # huber_delta=1.0,
-        # alpha=0.0,            # explicit L2 on NN params
-        # rho=0.0,              # covariance penalty weight
-        # mode="diff",          # "diff" or "div"
-        # eps_y=1e-6,
-        # random_state=0,
+from fairness_models.boosting_fairness_models import LGBCovPenalty, LGBSmoothPenalty
 
 # ==========================================
 # 2. The Path Searcher (Metrics & Loop)
@@ -237,6 +386,8 @@ class FairnessPathSearch:
         resid_log = y_pred_log - y_true_log
         metrics[f'{prefix}_mse_log'] = np.mean(resid_log**2)
         
+        tax_metrics = compute_taxation_metrics(y_true_log, y_pred_log, scale="log")
+
         # Slope of Residuals vs Price (Vertical Equity Proxy)
         if np.std(y_true_log) > 1e-9:
             slope = np.polyfit(y_true_log, resid_log, 1)[0]
@@ -269,13 +420,45 @@ class FairnessPathSearch:
         print(f"Starting Path Search over {len(self.rhos)} rho values...")
         
         for rho in self.rhos:
-            model = self.estimator_class(
-                alpha=self.alpha, 
-                rho=rho, 
-                # fit_intercept=self.fit_intercept,
-                mode=self.mode[0],
-                **emb_params
-            )
+            # model = self.estimator_class(
+            #     # alpha=self.alpha, 
+            #     rho=rho, 
+            #     # fit_intercept=self.fit_intercept,
+            #     # mode=self.mode[0],
+            # )
+            # Inputs
+            random_state = 42
+            n_jobs =190
+            max_iter=200#100#200#500 #0
+
+
+            fit_intercept = True
+            l1,l2 = 1e-3, 1e-2 #5e-1 # l1 = 1e-3
+            num_leaves = 31#31
+            max_depth = 15 #5
+            lr = 1e-1
+
+            lgbm_params = {
+                "boosting_type": "gbdt",
+                "num_leaves": 31,
+                "max_depth": max_depth,
+                # "num_leaves":  2**(max_depth)//8, # must be at most 2^max_depth 
+                "learning_rate": lr,
+                "n_estimators": max_iter,
+                "subsample_for_bin": 200000,
+                "objective": "mse", # To be updated inside
+                "class_weight": None,
+                "min_child_samples": 30,
+                "colsample_bytree": 1.0,
+                "reg_alpha": l1,
+                "reg_lambda": l2,
+                "random_state": random_state,
+                "n_jobs": 1,#n_jobs,
+                "importance_type": "split",
+            }
+
+
+            model = LGBSmoothPenalty(rho=rho, ratio_mode="diff", anchor_mode="target", zero_grad_tol=1e-12, eps_y=1e-12, lgbm_params=lgbm_params)
             model.fit(X_train, y_train)
             self.models_[rho] = model
             
@@ -299,123 +482,218 @@ class FairnessPathSearch:
 # ==========================================
 # 3. Execution & ALL Plots
 # ==========================================
+
+
+
 if __name__ == "__main__":
-
-    do_path_search = True
     # # --- A. Generate Synthetic Log-Normal Data ---
-    # np.random.seed(42)
-    # N = 1000
-    # X = np.random.rand(N, 5) 
-    
-    # # Truth: Biased structure
-    # true_log_price = 11.0 + 2.0 * X[:, 0] + 0.5 * X[:, 1]
-    # y_log = true_log_price + np.random.normal(0, 0.3, N)
-
     # # Split
     # split = int(0.8 * N)
-    # X_train, y_train_log = X[:split], y_log[:s    plit]
+    # X_train, y_train_log = X[:split], y_log[:split]
     # X_val, y_val_log = X[split:], y_log[split:]
 
     # --- B. Find Best Alpha & Run Search ---
-    rcv = RidgeCV(alphas=np.logspace(-6, 6, 10)).fit(X_train, y_train_log)
-    best_alpha = rcv.alpha_ * 1e-2
+    rcv = RidgeCV(alphas=np.logspace(-3, 2, 2)).fit(X_train, y_train_log)
+    best_alpha = rcv.alpha_
     print(f"Best Alpha found: {best_alpha:.5f}")
 
-    if do_path_search:
-        # rhos_to_search = np.linspace(1e2, 1e4, 20)#[0, 10, 50, 100, 250, 500, 1000, 2500, 5000, 10000]
-        rhos_to_search = np.logspace(-3, 3.5, 20)
+    # rhos_to_search = np.linspace(0, 1e2, 2)#[0, 10, 50, 100, 250, 500, 1000, 2500, 5000, 10000]
+    # rhos_to_search = np.logspace(-1, 4, 50)#50)#40)
+    rhos_to_search = np.logspace(-4,1, 50)
+    searcher = FairnessPathSearch(
+        estimator_class=None,
+        rhos=rhos_to_search,
+        alpha=best_alpha,
+        fit_intercept=True,
+        mode="div",
+    )
+    searcher.fit(X_train, y_train_log, X_val=X_val, y_val=y_val_log)
+    df = searcher.path_results_
 
-        searcher = FairnessPathSearch(
-            estimator_class=FeedForwardNNRegressorWithEmbeddings6,
-            rhos=rhos_to_search,
-            alpha=best_alpha,
-            fit_intercept=True,
-            mode="div",
-        )
-        searcher.fit(X_train_emb, y_train_log, X_val=X_val_emb, y_val=y_val_log)
-        df = searcher.path_results_
+    # --- C. Print Table ---
+    print("\n--- Validation Results ---")
+    print(df[['rho', 'val_mse_log', 'val_slope_log', 'val_cod_real']].to_string(float_format="%.4f"))
 
-        # --- C. Print Table ---
-        print("\n--- Validation Results ---")
-        print(df[['rho', 'val_mse_log', 'val_slope_log', 'val_cod_real']].to_string(float_format="%.4f"))
+    # --- Helper: Min-Max Normalization ---
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    import numpy as np
 
-        # =======================================================
-        # PLOT SET 1: Evolution of Metrics (Blue=MSE, Red=Slope)
-        # =======================================================
-        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    # --- Helper: Min-Max Normalization ---
+    def normalize(series):
+        return (series - series.min()) / (series.max() - series.min())
 
-        # --- Subplot 1: TRAIN ---
-        ax_train = axes[0]
-        ln1 = ax_train.semilogx(df['rho'], df['train_mse_log'], 'b-o', lw=2, label='Train MSE')
-        ax_train.set_xlabel('Fairness Penalty (Rho)')
-        ax_train.set_ylabel('MSE (Log Space)', color='b', fontweight='bold')
-        ax_train.tick_params(axis='y', labelcolor='b')
-        ax_train.set_title('TRAIN Set: Accuracy vs Fairness')
-        ax_train.grid(True, alpha=0.3)
-
-        ax_train_twin = ax_train.twinx()
-        ln2 = ax_train_twin.semilogx(df['rho'], df['train_slope_log'].abs(), 'r--s', lw=2, label='|Residual Slope|')
-        ax_train_twin.set_ylabel('|Slope of Residuals| (Inequity)', color='r', fontweight='bold')
-        ax_train_twin.tick_params(axis='y', labelcolor='r')
+    # --- Helper: Generate Label with % Change Interval ---
+    def get_label(name, original_series):
+        # original_series should be the exact data used (e.g. absolute values)
+        # 1. Identify Baseline (Initial Solution)
+        baseline = original_series.iloc[0]
         
-        # Combined Legend
-        lns = ln1 + ln2
-        labs = [l.get_label() for l in lns]
-        ax_train.legend(lns, labs, loc='center right')
-
-        # --- Subplot 2: VALIDATION ---
-        ax_val = axes[1]
-        ln3 = ax_val.semilogx(df['rho'], df['val_mse_log'], 'b-o', lw=2, label='Val MSE')
-        ax_val.set_xlabel('Fairness Penalty (Rho)')
-        ax_val.set_ylabel('MSE (Log Space)', color='b', fontweight='bold')
-        ax_val.tick_params(axis='y', labelcolor='b')
-        ax_val.set_title('VALIDATION Set: Accuracy vs Fairness')
-        ax_val.grid(True, alpha=0.3)
-
-        ax_val_twin = ax_val.twinx()
-        ln4 = ax_val_twin.semilogx(df['rho'], df['val_slope_log'].abs(), 'r--s', lw=2, label='|Residual Slope|')
-        ax_val_twin.set_ylabel('|Slope of Residuals| (Inequity)', color='r', fontweight='bold')
-        ax_val_twin.tick_params(axis='y', labelcolor='r')
+        # 2. Find Min and Max of the series
+        val_min = original_series.min()
+        val_max = original_series.max()
         
-        # Combined Legend
-        lns2 = ln3 + ln4
-        labs2 = [l.get_label() for l in lns2]
-        ax_val.legend(lns2, labs2, loc='center right')
+        # 3. Calculate % Change w.r.t Baseline
+        # Avoid division by zero if baseline is exactly 0
+        if baseline != 0:
+            pct_min = ((val_min - baseline) / baseline) * 100
+            pct_max = ((val_max - baseline) / baseline) * 100
+        else:
+            pct_min = 0.0
+            pct_max = 0.0
 
-        plt.tight_layout()
-        plt.savefig("./temp/preliminaries/evolution.pdf", dpi=600)
-        plt.show()
+        # Format: Min % Change, Max % Change
+        return f"{name} Normalized\nRange vs Init: [{pct_min:.1f}%, {pct_max:.1f}%]"
 
-        # =======================================================
-        # PLOT SET 2: Pareto Frontier & COD
-        # =======================================================
-        fig, axes = plt.subplots(1, 2, figsize=(16, 5))
+    # Create normalized columns
+    cols_to_plot = [
+        ('train_mse_log', 'norm_train_mse'),
+        ('train_slope_log', 'norm_train_slope'),
+        ('train_cod_real', 'norm_train_cod'),
+        ('val_mse_log', 'norm_val_mse'),
+        ('val_slope_log', 'norm_val_slope'),
+        ('val_cod_real', 'norm_val_cod')
+    ]
 
-        # Plot 1: Trade-off (MSE vs Slope)
-        sc = axes[0].scatter(
-            df['val_mse_log'], 
-            df['val_slope_log'].abs(), 
-            c=np.log1p(df['rho']), cmap='viridis', s=80, edgecolors='k'
-        )
-        plt.colorbar(sc, ax=axes[0], label='Log(Rho+1)')
-        axes[0].set_xlabel('Log MSE (Accuracy Loss)')
-        axes[0].set_ylabel('|Slope of Residuals| (Inequity)')
-        axes[0].set_title('Pareto Frontier (Validation)')
-        axes[0].grid(True, alpha=0.3)
+    for col_orig, col_norm in cols_to_plot:
+        # Apply .abs() where necessary before normalizing
+        if 'slope' in col_orig or 'cod' in col_orig:
+            df[col_norm] = normalize(df[col_orig].abs())
+        else:
+            df[col_norm] = normalize(df[col_orig])
 
-        # Plot 2: Real Price Metrics (COD vs Rho)
-        axes[1].semilogx(df['rho'], df['val_cod_real'], 'b-o', label='COD (Real Price)')
-        axes[1].axhline(15.0, color='red', linestyle='--', label='IAAO Limit (15.0)')
-        # axes[1].axhline(5.0, color='green', linestyle='--', label='IAAO Lower Limit (5.0)')
-        axes[1].set_xlabel('Rho')
-        axes[1].set_ylabel('COD Score')
-        axes[1].set_title('IAAO Standard Compliance (COD)')
-        axes[1].legend()
-        axes[1].grid(True, alpha=0.3)
+    # =======================================================
+    # PLOT SET 1: Evolution of Metrics (Normalized)
+    # =======================================================
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
 
-        plt.tight_layout()
-        plt.savefig("./temp/preliminaries/iaao.pdf", dpi=600)
-        plt.show()
+    # --- Subplot 1: TRAIN ---
+    ax_train = axes[0]
+
+    # Note: We pass the absolute value to get_label so the % change reflects magnitude
+    ax_train.plot(df['rho'], df['norm_train_mse'], 'b-o', lw=2, 
+                label=get_label('Train MSE', df['train_mse_log']))
+    ax_train.plot(df['rho'], df['norm_train_slope'], 'r--s', lw=2, 
+                label=get_label('|Slope|', df['train_slope_log'].abs()))
+    ax_train.plot(df['rho'], df['norm_train_cod'], 'g-.D', lw=2, 
+                label=get_label('COD', df['train_cod_real'].abs()))
+
+    ax_train.set_xscale('log')
+    ax_train.set_xlabel('Cov-Penalty (Rho)')  
+    ax_train.set_ylabel('Normalized Metric Value [0-1]')
+    ax_train.set_title('TRAIN Set: Metrics vs Cov-Penalty (Normalized)')
+    ax_train.grid(True, alpha=0.3)
+    ax_train.legend(loc='best')
+
+    # --- Subplot 2: VALIDATION ---
+    ax_val = axes[1]
+
+    ax_val.plot(df['rho'], df['norm_val_mse'], 'b-o', lw=2, 
+                label=get_label('Val MSE', df['val_mse_log']))
+    ax_val.plot(df['rho'], df['norm_val_slope'], 'r--s', lw=2, 
+                label=get_label('|Slope|', df['val_slope_log'].abs()))
+    ax_val.plot(df['rho'], df['norm_val_cod'], 'g-.D', lw=2, 
+                label=get_label('COD', df['val_cod_real'].abs()))
+
+    ax_val.set_xscale('log')
+    ax_val.set_xlabel('Cov-Penalty (Rho)') 
+    ax_val.set_ylabel('Normalized Metric Value [0-1]')
+    ax_val.set_title('VALIDATION Set: Metrics vs Cov-Penalty (Normalized)')
+    ax_val.grid(True, alpha=0.3)
+    ax_val.legend(loc='best')
+
+    plt.tight_layout()
+    plt.savefig("temp/slides/tradeoffs/LGBM_evolution.pdf")
+    plt.show()
+    exit()
+
+    # =======================================================
+    # PLOT SET 1: Evolution of Metrics (Blue=MSE, Red=Slope)
+    # =======================================================
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+    # --- Subplot 1: TRAIN ---
+    ax_train = axes[0]
+    ln1 = ax_train.semilogx(df['rho'], df['train_mse_log'], 'b-o', lw=2, label='Train MSE')
+    ax_train.set_xlabel('Fairness Penalty (Rho)')
+    # ax_train.set_ylabel('MSE (Log Space)', color='b', fontweight='bold')
+    ax_train.tick_params(axis='y', labelcolor='b')
+    ax_train.set_title('TRAIN Set: Accuracy vs Fairness')
+    ax_train.grid(True, alpha=0.3)
+
+    ax_train_twin = ax_train.twinx()
+    ln2 = ax_train_twin.semilogx(df['rho'], df['train_slope_log'].abs(), 'r--s', lw=2, label='|Residual Slope|')
+    # ax_train_twin.set_ylabel('|Slope of Residuals| (Inequity)', color='r', fontweight='bold')
+    ax_train_twin.tick_params(axis='y', labelcolor='r')
+
+    ax_train_twin = ax_train.twinx()
+    ln2 = ax_train_twin.semilogx(df['rho'], df['train_cod_real'].abs(), 'g--D', lw=2, label='Train COD')
+    # ax_train_twin.set_ylabel('|Slope of Residuals| (Inequity)', color='g', fontweight='bold')
+    ax_train_twin.tick_params(axis='y', labelcolor='g')
+    
+    # Combined Legend
+    lns = ln1 + ln2
+    labs = [l.get_label() for l in lns]
+    ax_train.legend(lns, labs, loc='center right')
+
+    # --- Subplot 2: VALIDATION ---
+    ax_val = axes[1]
+    ln3 = ax_val.semilogx(df['rho'], df['val_mse_log'], 'b-o', lw=2, label='Val MSE')
+    ax_val.set_xlabel('Fairness Penalty (Rho)')
+    # ax_val.set_ylabel('MSE (Log Space)', color='b', fontweight='bold')
+    ax_val.tick_params(axis='y', labelcolor='b')
+    ax_val.set_title('VALIDATION Set: Accuracy vs Fairness')
+    ax_val.grid(True, alpha=0.3)
+
+    ax_val_twin = ax_val.twinx()
+    ln4 = ax_val_twin.semilogx(df['rho'], df['val_slope_log'].abs(), 'r--s', lw=2, label='|Residual Slope|')
+    # ax_val_twin.set_ylabel('|Slope of Residuals| (Inequity)', color='r', fontweight='bold')
+    ax_val_twin.tick_params(axis='y', labelcolor='r')
+
+    ax_val_twin = ax_val.twinx()
+    ln4 = ax_val_twin.semilogx(df['rho'], df['val_cod_real'].abs(), 'g--s', lw=2, label='Val COD')
+    # ax_val_twin.set_ylabel('|Slope of Residuals| (Inequity)', color='r', fontweight='bold')
+    ax_val_twin.tick_params(axis='y', labelcolor='g')
+    
+    # Combined Legend
+    lns2 = ln3 + ln4
+    labs2 = [l.get_label() for l in lns2]
+    ax_val.legend(lns2, labs2, loc='center right')
+
+    plt.tight_layout()
+    plt.ylabel("Metric Value")
+    plt.savefig("temp/slides/tradeoffs/LGBM_evolution.pdf")
+    plt.show()
+
+    # =======================================================
+    # PLOT SET 2: Pareto Frontier & COD
+    # =======================================================
+    fig, axes = plt.subplots(1, 2, figsize=(16, 5))
+
+    # Plot 1: Trade-off (MSE vs Slope)
+    sc = axes[0].scatter(
+        df['val_mse_log'], 
+        df['val_slope_log'].abs(), 
+        c=np.log1p(df['rho']), cmap='viridis', s=80, edgecolors='k'
+    )
+    plt.colorbar(sc, ax=axes[0], label='Log(Rho+1)')
+    axes[0].set_xlabel('Log MSE (Accuracy Loss)')
+    axes[0].set_ylabel('|Slope of Residuals| (Inequity)')
+    axes[0].set_title('Pareto Frontier (Validation)')
+    axes[0].grid(True, alpha=0.3)
+
+    # Plot 2: Real Price Metrics (COD vs Rho)
+    axes[1].semilogx(df['rho'], df['val_cod_real'], 'b-o', label='COD (Real Price)')
+    axes[1].axhline(15.0, color='red', linestyle='--', label='IAAO Limit (15.0)')
+    # axes[1].axhline(5.0, color='green', linestyle='--', label='IAAO Lower Limit (5.0)')
+    axes[1].set_xlabel('Rho')
+    axes[1].set_ylabel('COD Score')
+    axes[1].set_title('IAAO Standard Compliance (COD)')
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
 
     # =======================================================
     # PLOT SET 3: Model Comparison Scatters (Lowess)
@@ -423,69 +701,36 @@ if __name__ == "__main__":
     print("\nGenerating Model Comparison Scatter Plots...")
 
     models_to_plot = [
-        FeedForwardNNRegressorWithEmbeddings6(alpha=best_alpha, rho=0, mode="div", **emb_params),
-        FeedForwardNNRegressorWithEmbeddings6(alpha=best_alpha, rho=5e2, mode="div", **emb_params),
-        FeedForwardNNRegressorWithEmbeddings6(alpha=best_alpha, rho=1e3, mode="div", **emb_params),
-        FeedForwardNNRegressorWithEmbeddings6(alpha=best_alpha, rho=2e3, mode="div", **emb_params),
+        # FairnessConstrainedRidgeLog(alpha=best_alpha, rho=0, fit_intercept=True, mode="div"),
+        # FairnessConstrainedRidgeLog(alpha=best_alpha, rho=20, fit_intercept=True, mode="div"),
     ]
+
+
+    # --- 1. Robust K-Means Clustering Setup ---
+    from sklearn.cluster import KMeans
+    from sklearn.preprocessing import StandardScaler
+    # A. Prepare data: Stack X and Y into a matrix
+    # X_cluster = np.column_stack((y_val_log, ratios))
+
+    # B. Standardize: Essential so 'Log Value' doesn't dominate 'Ratio' due to scale differences
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_train)
+    X_scaled_val = scaler.fit_transform(X_val)
+
+    # C. Robust K-Means: 
+    # n_init=50 runs the algo 50 times with different seeds and picks the best inertia 
+    # (This satisfies "multiple runs and majority result" logic mathematically)
+    K_CLUSTERS = 3  # You can adjust this number
+    kmeans = KMeans(n_clusters=K_CLUSTERS, init='k-means++', n_init=50, random_state=42)
+    cluster_labels = kmeans.fit_predict(X_scaled)
+    cluster_labels = kmeans.predict(X_scaled_val)
+    # --- 1. Robust K-Means Clustering Setup ---
+
 
     for model_ in models_to_plot:
         # 1. Fit & Predict
-        model_.fit(X_train_emb, y_train_log)
-        # ================================================
-        # TRAINING SET
-        # ================================================
-        y_pred_log = model_.predict(X_train_emb)
-        
-        # Transform to Real Money for Ratio Calculation
-        y_pred_money = np.exp(y_pred_log)
-        y_train_money = np.exp(y_train_log)
-        ratios = y_pred_money / y_train_money
-
-        # 2. Setup Plot
-        plt.figure(figsize=(6, 4))
-        
-        # Scatter points
-        plt.scatter(y_train_log, ratios, 
-            facecolors='none', 
-            edgecolors='black', 
-            s=50, 
-            alpha=0.4,
-            label='Properties'
-        )
-        
-        # --- Gray Grid Lines ---
-        plt.grid(True, which='major', axis='both', color='gray', linestyle='--', linewidth=0.5, alpha=0.7)
-        plt.minorticks_on()
-        plt.grid(True, which='minor', axis='both', color='lightgray', linestyle=':', linewidth=0.5, alpha=0.5)
-
-        # --- Reference Line (Perfect Equity) ---
-        plt.axhline(y=1.0, color='red', linestyle='--', linewidth=2, label='Perfect Equity (1.0)')
-
-        # --- Tendency Line (Lowess Smoothing) ---
-        lowess = sm.nonparametric.lowess(ratios, y_train_log, frac=0.4)
-        plt.plot(lowess[:, 0], lowess[:, 1], color='blue', linewidth=3, label='Trend (Lowess)')
-        
-        # --- Linear Trend (Slope Check) ---
-        z = np.polyfit(y_train_log, ratios, 1)
-        p = np.poly1d(z)
-        plt.plot(y_train_log, p(y_train_log), "g-", alpha=0.6, linewidth=1.5, label=f'Linear Slope={z[0]:.4f}')
-
-        # Formatting
-        plt.ylabel("Assessment Ratio (AV / MV)")
-        plt.xlabel("Log Market Value")
-        plt.title(f"Vertical Equity Check\nrho={model_.rho:.1f} | Lowess should be flat")
-        plt.legend(loc='upper right')
-        plt.ylim(0, 3) 
-        plt.savefig(f"./temp/preliminaries/scatter_train_{model_}.pdf", dpi=600)
-        plt.show()
-
-        print("DONE!!")
-
-        # ================================================
-        # VALIDATION SET
-        # ================================================
-        y_pred_log = model_.predict(X_val_emb)
+        model_.fit(X_train, y_train_log)
+        y_pred_log = model_.predict(X_val)
         
         # Transform to Real Money for Ratio Calculation
         y_pred_money = np.exp(y_pred_log)
@@ -527,93 +772,62 @@ if __name__ == "__main__":
         plt.title(f"Vertical Equity Check\nrho={model_.rho:.1f} | Lowess should be flat")
         plt.legend(loc='upper right')
         plt.ylim(0, 3) 
-        plt.savefig(f"./temp/preliminaries/scatter_val_{model_}.pdf", dpi=600)
         plt.show()
 
-        print("DONE!!")
-
-
-#     --- Validation Results ---
-#           rho  val_mse_log  val_slope_log  val_cod_real
-# 0      0.0001       0.1107        -0.2488       26.0308
-# 1      0.0003       0.1041        -0.2349       26.0458
-# 2      0.0007       0.1022        -0.2385       25.6792
-# 3      0.0018       0.1019        -0.2330       25.7077
-# 4      0.0048       0.1013        -0.2382       25.6028
-# 5      0.0127       0.1017        -0.2363       25.8280
-# 6      0.0336       0.1012        -0.2277       25.1928
-# 7      0.0886       0.1141        -0.2115       25.4438
-# 8      0.2336       0.1025        -0.2344       25.8325
-# 9      0.6158       0.1021        -0.2274       25.5989
-# 10     1.6238       0.1060        -0.2425       26.2230
-# 11     4.2813       0.1029        -0.2396       25.9003
-# 12    11.2884       0.1101        -0.2535       26.3442
-# 13    29.7635       0.1025        -0.2044       25.6895
-# 14    78.4760       0.1054        -0.2206       26.0965
-# 15   206.9138       0.1278        -0.1862       25.4244
-# 16   545.5595       0.1042        -0.1343       25.3163
-# 17  1438.4499       0.1099        -0.1076       25.4771
-# 18  3792.6902       0.1408        -0.1584       25.9343
-# 19 10000.0000       0.2274        -0.2142       29.4823
+        display(compute_taxation_metrics(y_val_log, y_pred_log, scale="log"))
 
 
 
-# alpha * 5e1
-
-# --- Validation Results ---
-#           rho  val_mse_log  val_slope_log  val_cod_real
-# 0      0.0001       0.1021        -0.2128       25.2678
-# 1      0.0003       0.1131        -0.2210       25.7830
-# 2      0.0007       0.1222        -0.2297       26.4640
-# 3      0.0018       0.1092        -0.2535       26.9470
-# 4      0.0048       0.1161        -0.2247       26.8259
-# 5      0.0127       0.1121        -0.2311       26.8344
-# 6      0.0336       0.1115        -0.2840       27.6180
-# 7      0.0886       0.1206        -0.2717       27.8132
-# 8      0.2336       0.1130        -0.2480       26.5099
-# 9      0.6158       0.1170        -0.2730       28.1864
-# 10     1.6238       0.1102        -0.2282       26.6806
-# 11     4.2813       0.1446        -0.2787       27.9724
-# 12    11.2884       0.1068        -0.2508       26.5099
-# 13    29.7635       0.1013        -0.2204       25.2282
-# 14    78.4760       0.1173        -0.2399       26.6014
-# 15   206.9138       0.1050        -0.1944       24.9844
-# 16   545.5595       0.1171        -0.0959       26.7875
-# 17  1438.4499       0.1398        -0.0178       26.8775
-# 18  3792.6902       0.1715        -0.0102       29.4279
-# 19 10000.0000       0.2629        -0.0431       31.8035
 
 
 
-# -- Validation Results ---
-#           rho  val_mse_log  val_slope_log  val_cod_real
-# 0      0.0000       0.1085        -0.2481       26.8352
-# 1      0.0000       0.1183        -0.2510       27.4372
-# 2      0.0000       0.1078        -0.2382       26.8292
-# 3      0.0000       0.1072        -0.2591       26.8763
-# 4      0.0000       0.1144        -0.2573       26.8904
-# 5      0.0001       0.1070        -0.2354       26.4801
-# 6      0.0001       0.1075        -0.2392       26.8659
-# 7      0.0003       0.1099        -0.2432       26.5828
-# 8      0.0006       0.1127        -0.2504       26.7296
-# 9      0.0013       0.1118        -0.2427       26.5668
-# 10     0.0028       0.1079        -0.2627       27.0889
-# 11     0.0062       0.1075        -0.2444       26.7972
-# 12     0.0137       0.1105        -0.2445       26.9901
-# 13     0.0304       0.1066        -0.2482       26.4526
-# 14     0.0672       0.1083        -0.2591       26.9610
-# 15     0.1487       0.1033        -0.2351       26.0762
-# 16     0.3290       0.1158        -0.2694       27.5709
-# 17     0.7279       0.1041        -0.2334       26.0625
-# 18     1.6103       0.1109        -0.2581       27.0282
-# 19     3.5622       0.1218        -0.2622       27.0872
-# 20     7.8805       0.1076        -0.2489       26.5817
-# 21    17.4333       0.1165        -0.2834       27.5698
-# 22    38.5662       0.1069        -0.2384       26.4700
-# 23    85.3168       0.1046        -0.2001       25.4925
-# 24   188.7392       0.1187        -0.2047       26.5381
-# 25   417.5319       0.1084        -0.1688       26.2359
-# 26   923.6709       0.1057        -0.1178       24.8321
-# 27  2043.3597       0.1212        -0.0750       26.1651
-# 28  4520.3537       0.1551        -0.0694       27.7098
-# 29 10000.0000       0.2609        -0.1801       29.5953
+
+
+        # --- 2. Setup Plot (Mirroring your workflow) ---
+        plt.figure(figsize=(6, 4))
+
+        # Scatter points (Colored by Cluster)
+        # We use a colormap (viridis) and map 'c' to the labels
+        scatter = plt.scatter(y_val_log, ratios, 
+                    c=cluster_labels, 
+                    cmap='viridis', 
+                    edgecolors='black', 
+                    linewidth=0.5,
+                    s=50, 
+                    alpha=0.6, # Slightly more opaque to see colors
+                    label='Clustered Properties'
+        )
+
+        # --- Gray Grid Lines ---
+        plt.grid(True, which='major', axis='both', color='gray', linestyle='--', linewidth=0.5, alpha=0.7)
+        plt.minorticks_on()
+        plt.grid(True, which='minor', axis='both', color='lightgray', linestyle=':', linewidth=0.5, alpha=0.5)
+
+        # --- Reference Line (Perfect Equity) ---
+        plt.axhline(y=1.0, color='red', linestyle='--', linewidth=2, label='Perfect Equity (1.0)')
+
+        # --- Tendency Line (Lowess Smoothing on ALL data) ---
+        # We still calculate this on the whole dataset to see the global trend
+        lowess = sm.nonparametric.lowess(ratios, y_val_log, frac=0.4)
+        plt.plot(lowess[:, 0], lowess[:, 1], color='blue', linewidth=3, label='Trend (Lowess)')
+
+        # --- Linear Trend (Slope Check on ALL data) ---
+        z = np.polyfit(y_val_log, ratios, 1)
+        p = np.poly1d(z)
+        plt.plot(y_val_log, p(y_val_log), "g-", alpha=0.6, linewidth=1.5, label=f'Linear Slope={z[0]:.4f}')
+
+        # Formatting
+        plt.ylabel("Assessment Ratio (AV / MV)")
+        plt.xlabel("Log Market Value")
+        plt.title(f"Vertical Equity (k={K_CLUSTERS} Clusters)\nrho={model_.rho:.1f} | Colored by Robust K-Means")
+
+        # Legend Handling
+        # We want the lines, but we also might want a legend for the clusters. 
+        # This gathers the lines + the scatter handle
+        handles, labels = plt.gca().get_legend_handles_labels()
+        plt.legend(handles, labels, loc='upper right')
+
+        plt.ylim(0, 3) 
+        plt.show()
+
+        display(compute_taxation_metrics(y_val_log, y_pred_log, scale="log"))

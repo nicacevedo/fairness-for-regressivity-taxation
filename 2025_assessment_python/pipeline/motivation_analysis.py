@@ -27,8 +27,8 @@ import yaml
 from time import sleep
 
 
-import gurobipy
-import mosek
+# import gurobipy
+# import mosek
 import cvxpy as cp 
 print(cp.installed_solvers())
 
@@ -64,7 +64,7 @@ from src_.plotting_utils import results_to_dataframe, plotting_dict_of_models_re
 #%% Data
 # source = "CCAO" # "toy_data"
 seed = 234
-source = "CCAO"
+source = "NYC"
 
 if source == "toy_data":
     # Toy dataset
@@ -118,6 +118,342 @@ elif source == "CCAO":
     
     # Train - test split
     df.sort_values(by="meta_sale_date", ascending=True, inplace=True)
+
+elif source == "NYC":
+    # df_sales = pd.read_csv("data/nyc/NYC_Citywide_Annualized_Calendar_Sales_Update_20260127.csv")
+    # print(df_sales.head())
+    # print(df_sales.columns)
+    # print(df_sales.shape)
+
+    # df_sales["BBL_int_from_parts"] = (
+    #     df_sales["BOROUGH"].astype("int64") * 1_000_000_000 +
+    #     df_sales["BLOCK"].astype("int64") * 10_000 +
+    #     df_sales["LOT"].astype("int64")
+    # )
+
+    # df_sales["BBL10"] = df_sales["BBL_int_from_parts"].astype("int64").astype(str).str.zfill(10)
+
+    # df_pluto = pd.read_csv("data/nyc/Primary_Land_Use_Tax_Lot_Output_(PLUTO)_20260127.csv")
+
+    # # If PLUTO has a 'BBL' column (often numeric), normalize it
+    # df_pluto["BBL10"] = pd.to_numeric(df_pluto["BBL"], errors="coerce").round().astype("Int64").astype(str).str.zfill(10)
+
+    # # Join: keep all sales, add PLUTO features
+    # df_merged = df_sales.merge(df_pluto, on="BBL10", how="left", suffixes=("", "_pluto"))
+
+    # match_rate = df_merged["BBL10"].notna().mean()
+    # print("Rows:", len(df_merged))
+    # print("PLUTO match rate:", df_merged.filter(regex="_pluto$").notna().any(axis=1).mean())
+
+
+    # pluto_cols = [c for c in df_merged.columns if c.endswith("_pluto")]
+    # mask_matched = df_merged[pluto_cols].notna().any(axis=1)
+
+    # df_final = df_merged.loc[mask_matched].copy()
+
+    # Post df_final saving as .csv
+    # df_final.to_csv("data/nyc/df_final.csv")
+    df = pd.read_csv("data/nyc/df_final.csv", index_col=0)
+    sample_size = 100000
+    df = df.sample(sample_size, random_state=seed)
+
+    from recipes.nyc_pipelines import NYCLGBMPreprocessor, NYCLinearPreprocessor
+    processor = NYCLGBMPreprocessor(
+        target_col="sale_price",
+        sale_date_col="sale_date",
+        drop_id_cols=True,
+        drop_high_card_cols=True,
+        high_card_threshold=500,
+        geo_grid_precision=3,
+    )
+
+    # processor = NYCLinearPreprocessor(
+    #     target_col="sale_price",
+    #     sale_date_col="sale_date",
+    #     onehot_min_frequency=0.005,
+    #     scale_numeric=True,
+    # )
+
+
+    # y parsing is on you (target is not transformed automatically)
+    df = processor._normalize_columns(df)  # optional, if you want consistent naming early
+    y = processor._parse_currency_to_float(df["sale_price"])
+    mask = processor.sales_filter_mask(df, min_price=10000, require_coords=True)
+    df = df.loc[mask].reset_index(drop=True)
+    y = y.loc[mask].reset_index(drop=True)
+
+    # Sort by date
+    df["sale_date"] = pd.to_datetime(df["sale_date"])
+    df.sort_values(by=["sale_date"], ascending=True, inplace=True)
+
+    # Train test split
+    test_prop = 0.1
+    cut_index = int(df.shape[0]*(1-test_prop))
+    df_test = df.iloc[cut_index:,:]
+    df_train = df.iloc[:cut_index,:]
+    cut_index = int(df_train.shape[0]*(1-test_prop))
+    df_val = df_train.iloc[cut_index:,:]
+    df_train = df_train.iloc[:cut_index,:]
+
+    # Target process
+    y_log = pd.Series(processor.process_target(y), index=y.index)
+    X_train = df_train.drop(columns=["sale_price", "sale_date"])
+    X_val = df_val.drop(columns=["sale_price", "sale_date"])
+    X_test = df_test.drop(columns=["sale_price", "sale_date"])
+    y_train, y_val, y_test = y_log.loc[X_train.index], y_log.loc[X_val.index], y_log.loc[X_test.index]
+
+    # Preprocess
+    X_train = processor.fit_transform(X_train)
+    X_val = processor.transform(X_val)
+    X_test = processor.transform(X_test)
+    cat_cols = processor.get_lgbm_categorical_features() # prbly useful
+
+    # cat_cols.remove("sale_date")
+    # cat_cols.remove("address_dup1")
+
+    # X_train, X_val, y_train, y_val = train_test_split(X_all, y_log, test_size=0.2, random_state=42)
+
+    # plt.hist(y_train, bins=100)
+    # plt.savefig("temp/plots/histograms/delete1.png")
+    # plt.close()
+
+    # plt.hist(np.exp(y_train), bins=100)
+    # plt.savefig("temp/plots/histograms/delete2.png")
+    # plt.close()
+
+    # print(pd.Series(y_train).describe())
+    # print(pd.Series(np.exp(y_train)).describe())
+    # exit()
+
+    # plt.hist(y_train, bins=100)
+    # plt.savefig("temp/plots/histograms/delete1.png")
+    # print(X_train.head())
+
+
+    results_train = []
+    results_val = []
+
+    # Inputs
+    random_state = 42
+    n_jobs =190
+    max_iter=200#100#200#500 #0
+
+
+    fit_intercept = True
+    l1,l2 = 1e-3, 1e-2 #5e-1 # l1 = 1e-3
+    num_leaves = 31#31
+    max_depth = 15 #5
+    lr = 1e-1
+
+    # for l1_exp in [-3]:
+        # l1 = 10 ** l1_exp
+    for max_iter_ in np.linspace(1000,2000, 10):#[100, 200, 500, 700, 1000, 1500, 2000, 5000]:
+        max_iter = int(max_iter_)
+        for l2_exp in [-2]:
+            l2 = 10 ** l2_exp
+            for max_depth in [5, 10, 15, 20, 25, 30]:
+
+                lgbm_params = {
+                    "boosting_type": "gbdt",
+                    "num_leaves": 31,
+                    "max_depth": max_depth,
+                    # "num_leaves":  2**(max_depth)//8, # must be at most 2^max_depth 
+                    "learning_rate": lr,
+                    "n_estimators": max_iter,
+                    "subsample_for_bin": 200000,
+                    "objective": "mse", # To be updated inside
+                    "class_weight": None,
+                    "min_child_samples": 30,
+                    "colsample_bytree": 1.0,
+                    "reg_alpha": l1,
+                    "reg_lambda": l2,
+                    "random_state": random_state,
+                    "n_jobs": 1,#n_jobs,
+                    "importance_type": "split",
+                }
+
+                model = lgb.LGBMRegressor(**lgbm_params)
+                model.fit(X_train, y_train, categorical_feature=cat_cols)
+
+                y_pred_log_train = model.predict(X_train)
+                y_pred_log_val = model.predict(X_val)
+
+
+                plt.hist(y_pred_log_val, bins=100)
+                plt.savefig("temp/plots/histograms/delete4.png")
+                plt.close()
+                # exit()
+
+                # train_results.append(compute_taxation_metrics(y_train, y_pred_log_train, scale="log"))
+                # val_results.append(compute_taxation_metrics(y_val, y_pred_log, scale="log"))
+                print(compute_taxation_metrics(y_train, y_pred_log_train, scale="log"))
+                print(compute_taxation_metrics(y_val, y_pred_log_val, scale="log"))
+
+                print("R2", r2_score(y_val, y_pred_log_val))
+                print("R2", r2_score(np.exp(y_val), np.exp(y_pred_log_val)))
+
+                results_train.append({"l1":l1, "l2":l2, "max_depth":max_depth, "max_iter":max_iter} | compute_taxation_metrics(y_train, y_pred_log_train, scale="log"))
+                results_val.append({"l1":l1, "l2":l2, "max_depth":max_depth, "max_iter":max_iter} | compute_taxation_metrics(y_val, y_pred_log_val, scale="log"))
+
+                
+                print(pd.DataFrame(results_train))
+                print(pd.DataFrame(results_val))
+
+
+    print(pd.DataFrame(results_train))
+    print(pd.DataFrame(results_val))
+
+    # model = Ridge(fit_intercept=True, alpha=1e-3)#lgb.LGBMRegressor(**lgbm_params)
+    # model.fit(X_train, y_train)
+
+    # y_pred_log_train = model.predict(X_train)
+    # y_pred_log = model.predict(X_val)
+    # # train_results.append(compute_taxation_metrics(y_train, y_pred_log_train, scale="log"))
+    # # val_results.append(compute_taxation_metrics(y_val, y_pred_log, scale="log"))
+    # print(compute_taxation_metrics(y_train, y_pred_log_train, scale="log"))
+    # print(compute_taxation_metrics(y_val, y_pred_log, scale="log"))
+
+
+    exit()
+
+
+elif source == "zillow":
+    
+    from recipes.zillow_pipelines import AmesHousingPreprocessor
+    df_train = pd.read_csv("data/zillow/train.csv", index_col="Id")
+    df_test = pd.read_csv("data/zillow/test.csv", index_col="Id")
+    print(df_train.head())
+    print(df_train.describe())
+    print(df_train.columns)
+    print(df_train.shape)
+
+    print(df_train["MiscFeature"].unique())
+    print(df_train["MiscVal"].unique())
+
+
+    # import pandas as pd
+    # from sklearn.linear_model import Ridge, Lasso
+    # # from sklearn.model_selection import train_test_split
+    # # from sklearn.metrics import mean_squared_error
+
+    # # 1. Load Data
+    # df_train = pd.read_csv('train.csv')
+    # df_test = pd.read_csv('test.csv')
+
+    # 2. Separate Target
+    # Linear Regression requires normal distribution of residuals. 
+    # Since SalePrice is skewed, we log-transform it.
+    processor = AmesHousingPreprocessor(mode="linear", output="sparse", onehot_min_frequency=0.01)
+    y = df_train['SalePrice']
+    y_log = processor.process_target(y)
+    X = df_train.drop(['SalePrice'], axis=1)
+
+    # 3. Fit and Transform Training Data
+    # This learns the means, modes, and one-hot categories
+    X_train = processor.fit_transform(X)
+
+    # 4. Transform Test Data
+    # (Apply the same scaling/encoding logic learned from Train)
+    X_test = processor.transform(df_test)
+    print(f"Processed Shape: {X_train.shape}")
+
+    # 5. Train Model (e.g., Ridge Regression)
+    X_train, X_val, y_train, y_val = train_test_split(X_train, y_log, test_size=0.15, random_state=42)
+
+    model = Ridge(alpha=1e-4, fit_intercept=True)
+    model.fit(X_train, y_train)
+
+    # 6. Evaluate
+    y_pred_log_train = model.predict(X_train)
+    y_pred_log = model.predict(X_val)
+
+    train_results = [compute_taxation_metrics(y_train, y_pred_log_train, scale="log")]
+    val_results = [compute_taxation_metrics(y_val, y_pred_log, scale="log")]
+    print(compute_taxation_metrics(y_train, y_pred_log_train, scale="log"))
+    print(compute_taxation_metrics(y_val, y_pred_log, scale="log"))
+
+
+
+    # LGBM
+    processor = AmesHousingPreprocessor(mode="lgbm", output="dataframe")
+    y = df_train['SalePrice']
+    y_log = processor.process_target(y)
+    X = df_train.drop(['SalePrice'], axis=1)
+
+    # 3. Fit and Transform Training Data
+    # This learns the means, modes, and one-hot categories
+    X_train = processor.fit_transform(X)
+
+    # 4. Transform Test Data
+    # (Apply the same scaling/encoding logic learned from Train)
+    X_test = processor.transform(df_test)
+    print(f"Processed Shape: {X_train.shape}")
+
+    # 5. Train Model (e.g., Ridge Regression)
+    X_train, X_val, y_train, y_val = train_test_split(X_train, y_log, test_size=0.15, random_state=42)
+
+    # Inputs
+    random_state = 42
+    n_jobs =190
+    max_iter=500#100#200#500 #0
+
+
+    fit_intercept = True
+    l1,l2 = 1e-2, 1e-4 #5e-1 # l1 = 1e-3
+    num_leaves = 31#31
+    max_depth = 15 #5
+    lr = 1e-1
+
+    lgbm_params = {
+    "boosting_type": "gbdt",
+    "num_leaves": 31,
+    "max_depth": max_depth,
+    # "num_leaves":  2**(max_depth)//8, # must be at most 2^max_depth 
+    "learning_rate": lr,
+    "n_estimators": max_iter,
+    "subsample_for_bin": 200000,
+    "objective": "mse", # To be updated inside
+    "class_weight": None,
+    "min_child_samples": 30,
+    "colsample_bytree": 1.0,
+    "reg_alpha": l1,
+    "reg_lambda": l2,
+    "random_state": random_state,
+    "n_jobs": 1,#n_jobs,
+    "importance_type": "split",
+}
+
+    model = lgb.LGBMRegressor(**lgbm_params)
+    model.fit(X_train, y_train)
+
+    y_pred_log_train = model.predict(X_train)
+    y_pred_log = model.predict(X_val)
+    train_results.append(compute_taxation_metrics(y_train, y_pred_log_train, scale="log"))
+    val_results.append(compute_taxation_metrics(y_val, y_pred_log, scale="log"))
+    print(compute_taxation_metrics(y_train, y_pred_log_train, scale="log"))
+    print(compute_taxation_metrics(y_val, y_pred_log, scale="log"))
+
+    # 7. Convert predictions back to Dollars
+    real_preds = processor.inverse_target(y_pred_log)
+    print(f"Example Prediction: ${real_preds[0]:,.2f}")
+
+    model = LGBCovPenalty(rho=1e2, ratio_mode="div", zero_grad_tol=1e-12, eps_y=1e-12, lgbm_params=lgbm_params)
+    model.fit(X_train, y_train)
+
+    y_pred_log_train = model.predict(X_train)
+    y_pred_log = model.predict(X_val)
+    train_results.append(compute_taxation_metrics(y_train, y_pred_log_train, scale="log"))
+    val_results.append(compute_taxation_metrics(y_val, y_pred_log, scale="log"))
+    print(compute_taxation_metrics(y_train, y_pred_log_train, scale="log"))
+    print(compute_taxation_metrics(y_val, y_pred_log, scale="log"))
+
+    print(pd.DataFrame(train_results))
+    print(pd.DataFrame(val_results))
+    # # 7. Convert predictions back to Dollars
+    # real_preds = processor.inverse_target(y_pred_log)
+    # print(f"Example Prediction: ${real_preds[0]:,.2f}")
+
+    exit()
 
 elif source == "sklearn":
     from sklearn.datasets import load_breast_cancer, load_diabetes
@@ -301,6 +637,11 @@ if source == "CCAO":
     X_test = linear_pipeline.transform(X_test)
     X_train.head()
 
+if source == "zillow":
+    X_train, X_test, y_train, y_test = train_test_split(X_lin, y_lin, test_size=0.15, random_state=0)
+    X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.15, random_state=0)
+    # print(y_train)
+    # exit()
 else:
     X_train, y_train = df_train.drop(columns=[target_name, sensitive_name]), df_train[target_name]
     X_val, y_val = df_val.drop(columns=[target_name, sensitive_name]), df_val[target_name]
@@ -335,6 +676,14 @@ else:
     y_val_scaled = y_val
     y_test_scaled = y_test
 
+    y_train_log = y_train
+    y_val_log = y_val
+    y_test_log = y_test
+
+    y_train = np.exp(y_train_log)
+    y_val = np.exp(y_val_log)
+    y_test = np.exp(y_test_log)
+
 
 
 ################################################################################
@@ -347,7 +696,7 @@ n_jobs =190
 max_iter=200#500 #0
 
 fit_intercept = True
-l1,l2 = 1e-2, 1e-2 # l1 = 1e-3
+l1,l2 = 1e-3, 1e-2 # l1 = 1e-3
 max_depth = 15
 lr = 1e-1
 
@@ -481,47 +830,49 @@ lgbm_params = {
     # "verbosity_eval":False,
 }
 
-# NN parameters
-from fairness_models.nn_fairness_models import FeedForwardNNRegressorWithEmbeddings6
-import torch
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("device: ", device)
+# # NN parameters
+# from fairness_models.nn_fairness_models import FeedForwardNNRegressorWithEmbeddings6
+# import torch
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# print("device: ", device)
 
-model_emb_pipeline = build_model_pipeline_supress_onehot( # WARNING: We only changed to this to perform changes on the pipeline
-        pred_vars=params['model']['predictor']['all'],
-        cat_vars=params['model']['predictor']['categorical'],
-        id_vars=params['model']['predictor']['id']
-    )
-X_train_emb = model_emb_pipeline.fit_transform(X_train, y_train_log)
-X_val_emb = model_emb_pipeline.transform(X_val)
-X_test_emb = model_emb_pipeline.transform(X_test)
-pred_vars = [col for col in params['model']['predictor']['all'] if col in X_train_emb.columns] 
-nn_params = dict(
-    categorical_features= ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in pred_vars if c.startswith('loc_school_')],
-    coord_features= ["loc_longitude", "loc_latitude"],
-    fourier_type="basic",
-    hidden_sizes=(256, 256),
-    dropout=0.1,
-    normalization="layer_norm",
-    mlp_style="resnet",
-    batch_size=1024,
-    learning_rate=1e-4,
-    num_epochs=500,
-    patience=10,
-    validation_split=0.1,
-    use_scaler=True,
-    loss="mse",
-    alpha=0,
-    eps_y=1e-12,
-    random_state=random_state,
-    verbose=True,
-    log_every=1,
-)
+# model_emb_pipeline = build_model_pipeline_supress_onehot( # WARNING: We only changed to this to perform changes on the pipeline
+#         pred_vars=params['model']['predictor']['all'],
+#         cat_vars=params['model']['predictor']['categorical'],
+#         id_vars=params['model']['predictor']['id']
+#     )
+# X_train_emb = model_emb_pipeline.fit_transform(X_train, y_train_log)
+# X_val_emb = model_emb_pipeline.transform(X_val)
+# X_test_emb = model_emb_pipeline.transform(X_test)
+# pred_vars = [col for col in params['model']['predictor']['all'] if col in X_train_emb.columns] 
+# nn_params = dict(
+#     categorical_features= ['meta_nbhd_code', 'meta_township_code', 'char_class'] + [c for c in pred_vars if c.startswith('loc_school_')],
+#     coord_features= ["loc_longitude", "loc_latitude"],
+#     fourier_type="basic",
+#     hidden_sizes=(512, 256),
+#     dropout=0.1,
+#     normalization="layer_norm",
+#     mlp_style="resnet",
+#     batch_size=1024,
+#     learning_rate=1e-4,
+#     num_epochs=500,
+#     patience=10,
+#     validation_split=0.1,
+#     use_scaler=True,
+#     loss="mse",
+#     alpha=0,
+#     l1=l1,
+#     l2=l2,
+#     eps_y=1e-12,
+#     random_state=random_state,
+#     verbose=True,
+#     log_every=1,
+# )
 
 
 # rhos = [5e2, 1e3, 5e3, 1e4]#[5e2, 1e3, 5e3, 1e4] #[5e2, 1e3, 5e3, 1e4] # Last ones: 5e2,5e3,
-# rhos = np.linspace(1e2, 5e3, 20) # [1e2, 5e2, 1e3, 5e3, 1e4]#[1e2, 5e2, 1e3, 5e3, 1e4]#[1e2, 5e2, 1e3, 5e3, 1e4] #
-rhos = np.logspace(0, 2, 2) # [1e2, 5e2, 1e3, 5e3, 1e4]#[1e2, 5e2, 1e3, 5e3, 1e4]#[1e2, 5e2, 1e3, 5e3, 1e4] #
+rhos = np.linspace(0, 1e2, 3) # [1e2, 5e2, 1e3, 5e3, 1e4]#[1e2, 5e2, 1e3, 5e3, 1e4]#[1e2, 5e2, 1e3, 5e3, 1e4] #
+# rhos = np.logspace(0, 2, 2) # [1e2, 5e2, 1e3, 5e3, 1e4]#[1e2, 5e2, 1e3, 5e3, 1e4]#[1e2, 5e2, 1e3, 5e3, 1e4] #
 rhos = [int(rho) for rho in rhos]
 adversary_types = ["overall"]#$, "individual"]
 zero_tols = [0] # 1e-8, 1e-6
@@ -533,14 +884,14 @@ eta_advs = [lr]#[lr*1e-2, lr*1e-1, lr]
 
         
 
-# NN with 
-for ratio_mode in ["div", "diff"]:
-    for rho in rhos:
-        rho_ = rho if ratio_mode == "div" else rho/1e2 # diff and div are not equally penalized
-        for zero_tol in zero_tols:
-            models.append(
-                FeedForwardNNRegressorWithEmbeddings6(rho=rho_/10, mode=ratio_mode, **nn_params)
-            )
+# # NN with 
+# for ratio_mode in ["div", "diff"]:
+#     for rho in rhos:
+#         rho_ = rho if ratio_mode == "div" else rho/1e2 # diff and div are not equally penalized
+#         for zero_tol in zero_tols:
+#             models.append(
+#                 FeedForwardNNRegressorWithEmbeddings6(rho=rho_, mode=ratio_mode, **nn_params)
+#             )
 
 
 

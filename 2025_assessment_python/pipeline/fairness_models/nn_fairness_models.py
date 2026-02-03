@@ -553,6 +553,8 @@ class FeedForwardNNRegressorWithEmbeddings6:
         loss="mse",
         huber_delta=1.0,
         alpha=0.0,
+        l1=0.0,
+        l2=0.0,
         rho=0.0,
         mode="diff",
         eps_y=1e-6,
@@ -587,6 +589,8 @@ class FeedForwardNNRegressorWithEmbeddings6:
         self.huber_delta = float(huber_delta)
 
         self.alpha = float(alpha)
+        self.l1 = float(l1)
+        self.l2 = float(l2)
         self.rho = float(rho)
         self.mode = mode
         self.eps_y = float(eps_y)
@@ -823,7 +827,10 @@ class FeedForwardNNRegressorWithEmbeddings6:
             output_size=1,
         ).to(device)
 
-        optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        if self.l2 > 0:
+            optimizer = optim.AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=self.l2)
+        else:
+            optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
 
         best_val = float("inf")
         best_state = None
@@ -861,6 +868,10 @@ class FeedForwardNNRegressorWithEmbeddings6:
                 reg = self._l2_penalty()
                 fair = self._cov_penalty(yhat, yb)
                 loss = base + reg + fair
+
+                # MINE: L1 regularization
+                l1_norm = sum(p.abs().sum() for p in self.model.parameters())
+                loss = loss + self.l1 * l1_norm
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -939,6 +950,10 @@ class FeedForwardNNRegressorWithEmbeddings6:
                     reg = self._l2_penalty()
                     fair = self._cov_penalty(yhat, yb)
                     loss = base + reg + fair
+
+                    # MINE: L1 regularization
+                    l1_norm = sum(p.abs().sum() for p in self.model.parameters())
+                    loss = loss + self.l1 * l1_norm
 
                     bsz = int(yb.shape[0])
                     va_total += loss.item() * bsz
