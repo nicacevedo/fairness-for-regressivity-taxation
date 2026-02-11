@@ -746,7 +746,7 @@ def cov_iaao(assessed, sale_price, na_rm=False):
         return np.nan
 
     sd_ratio = np.std(ratio, ddof=1)  # sample SD (n-1)
-    return sd_ratio / mean_ratio
+    return sd_ratio / mean_ratio # I need to add x 100 
 
 
 # ----- PRD -----

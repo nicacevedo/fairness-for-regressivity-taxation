@@ -208,6 +208,11 @@ elif source == "NYC":
     X_test = processor.transform(X_test)
     cat_cols = processor.get_lgbm_categorical_features() # prbly useful
 
+    # for col in X_train.columns:
+    #     print("name:", col, " | type: ", X_train[col].dtype, " | unique values:", X_train[col].unique().size, " | sample of unique: ", X_train[col].unique()[:3])
+    #     # print()
+    # exit()
+
     # cat_cols.remove("sale_date")
     # cat_cols.remove("address_dup1")
 
@@ -245,14 +250,16 @@ elif source == "NYC":
     max_depth = 15 #5
     lr = 1e-1
 
-    # for l1_exp in [-3]:
-        # l1 = 10 ** l1_exp
-    for max_iter_ in np.linspace(1000,2000, 10):#[100, 200, 500, 700, 1000, 1500, 2000, 5000]:
-        max_iter = int(max_iter_)
-        for l2_exp in [-2]:
+    for l1_exp in [-3, -2, -1, 0]:
+        l1 = 10 ** l1_exp
+    # for max_iter_ in [5000]#np.linspace(1000, 7000, 10):#[100, 200, 500, 700, 1000, 1500, 2000, 5000]:
+    #     max_iter = int(max_iter_)
+        max_iter = 5000
+        for l2_exp in [-4, -3, -2, -1]:
             l2 = 10 ** l2_exp
-            for max_depth in [5, 10, 15, 20, 25, 30]:
-
+            # l1 = 1e-3
+            for max_depth_ in [5, 10, 15, 30]:#np.linspace(5,51, 5):#[15, 20, 25, 30, 35]:#[5, 10, 15, 20, 25, 30]:
+                max_depth = int(max_depth_)
                 lgbm_params = {
                     "boosting_type": "gbdt",
                     "num_leaves": 31,
